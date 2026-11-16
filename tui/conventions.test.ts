@@ -25,7 +25,7 @@ describe("import closure of tui/main.ts", () => {
   // shared/ and these server files, which carry no server state of their own.
   const OUTSIDE_ALLOWED = new Set([
     ...["connection.ts", "socket-transport.ts", "core-socket.ts", "core-model.ts", "event-stream.ts", "layout-ops.ts", "layout-doc.ts", "snapshot.ts", "seen-label.ts", "worktrees.ts", "errors.ts", "hc-api.generated.ts"].map((name) => `server/herdr-core/${name}`),
-    "server/agent-identity.ts", "server/herdr-sidebar.ts", "server/user-home.ts", "server/herdr/line-reader.ts", "server/herdr/test-session.ts",
+    "server/agent-identity.ts", "server/herdr-sidebar.ts", "server/user-home.ts", "server/herdr/line-reader.ts", "server/herdr/test-session.ts", "server/herdr/worktree-info.ts",
     "package.json",
   ]);
   const allowed = (path: string) => path.startsWith("tui/") || path.startsWith("shared/") || OUTSIDE_ALLOWED.has(path);
