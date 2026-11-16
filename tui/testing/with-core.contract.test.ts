@@ -59,8 +59,8 @@ interface Run {
   stderr: () => string;
 }
 
-function helper(args: string[], env: Record<string, string>): Run {
-  const child = Bun.spawn([process.execPath, HELPER, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+function helper(args: string[], env: Record<string, string>, cwd?: string): Run {
+  const child = Bun.spawn([process.execPath, HELPER, ...args], { env, cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   let out = "";
   let err = "";
   const waiters = new Set<() => void>();
@@ -177,16 +177,21 @@ describe("with-core's options", () => {
   }, TEST_MS);
 
   it("refuses --core-env with a relative socket, or a socket that is a link out of ~/.cache/ovis-tmp/, before anything runs", async () => {
-    const links = join(scratch, "links");
-    mkdirSync(links);
-    // a link to a file that is there and one to nothing, both outside ~/.cache/ovis-tmp/
+    // a HOME of the test's own, run from inside its ~/.cache/ovis-tmp/: each input would pass but for the check it tests, on any machine
+    const home = join(scratch, "home");
+    const trials = join(home, ".cache", "ovis-tmp");
+    const links = join(trials, "links");
+    const cwd = join(trials, "cwd");
+    mkdirSync(links, { recursive: true });
+    mkdirSync(cwd);
+    // a link to a file that is there and one to nothing, both pointing outside that ~/.cache/ovis-tmp/
     symlinkSync("/bin/sh", join(links, "there.sock"));
     symlinkSync("/var/empty/hc.sock", join(links, "nothing.sock"));
     for (const socket of ["run/hc.sock", join(links, "there.sock"), join(links, "nothing.sock")]) {
       const file = join(scratch, "linked.env");
       const marker = join(scratch, "ran-linked");
       writeFileSync(file, `HC_SOCKET=${socket}\nHC_SESSION=elsewhere\n`);
-      const run = helper(["--core-env", file, "--", "sh", "-c", `touch '${marker}'`], callerEnv());
+      const run = helper(["--core-env", file, "--", "sh", "-c", `touch '${marker}'`], callerEnv({ HOME: home }), cwd);
       expect({ socket, exit: await run.exited, ran: existsSync(marker) }).toEqual({ socket, exit: 2, ran: false });
       expect(run.stderr()).not.toContain("root=");
     }

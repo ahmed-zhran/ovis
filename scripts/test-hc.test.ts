@@ -1,8 +1,8 @@
 import { afterAll, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { corePids, IsolatedCore, isolatedHcEnv, stopTestCores } from "./test-hc.ts";
+import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, stopTestCores } from "./test-hc.ts";
 
 // A stand-in hc that writes down how it was run: no real core is started or stopped.
 const root = mkdtempSync(join(tmpdir(), "ovis-test-hc-"));
@@ -134,6 +134,26 @@ it("refuses a core whose socket is outside the folder it was given", () => {
   expect(() => new IsolatedCore(bin, { root: folder, env: isolatedHcEnv(join(root, "elsewhere")) })).toThrow();
 });
 
+it("runs no hc command of a core whose environment stopped being isolated", () => {
+  rmSync(record, { force: true });
+  const core = new IsolatedCore(bin, coreFolder(root));
+  try {
+    // checked on every command, not only when the core was made
+    core.env["HC_SOCKET"] = join(root, "elsewhere.sock");
+    expect(() => core.hc(["server", "status", "--json"])).toThrow();
+    expect(ran()).toBe("");
+  } finally {
+    rmSync(core.root, { recursive: true, force: true });
+  }
+});
+
+it("refuses a folder whose socket path is longer than the OS takes, and leaves nothing of it", () => {
+  const deep = join(root, "d".repeat(Math.max(1, 108 - root.length)));
+  mkdirSync(deep);
+  expect(() => coreFolder(deep)).toThrow();
+  expect(readdirSync(deep)).toEqual([]);
+});
+
 it("waits for the socket of a core it has no pid for, and names one that stays", async () => {
   const env = withSocket("pidless");
   // a core that goes a moment after its stop answered, and one whose stop leaves its socket
@@ -146,6 +166,27 @@ it("waits for the socket of a core it has no pid for, and names one that stays",
   expect(existsSync(env["HC_SOCKET"]!)).toBe(false);
   writeFileSync(env["HC_SOCKET"]!, "");
   expect(await stopTestCores(stays, [{ env, pids: [] }], 200)).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [env["HC_SOCKET"]] });
+});
+
+it("waits for the core's pids after its socket went, and kills nothing that ends within the wait", async () => {
+  const env = withSocket("early");
+  const core = await sleeper(env);
+  // this core's stop removes its socket at once and its process a moment later, as hc's own stop returns early
+  const early = join(root, "hc-early");
+  writeFileSync(early, `#!/bin/sh\ncase "$1 $2" in\n  "server status") echo '{"pid":${core},"holder":null}' ;;\n  "server stop") rm -f "$HC_SOCKET"; (sleep 0.3; kill ${core}) >/dev/null 2>&1 & ;;\nesac\nexit 0\n`);
+  chmodSync(early, 0o755);
+  expect(await stopTestCores(early, [{ env, pids: [core] }])).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [] });
+  expect(alive(core)).toBe(false);
+});
+
+it.skipIf(!proc)("asks no status of a core whose pids live but whose socket is gone: status there could start a core", async () => {
+  rmSync(record, { force: true });
+  const env = isolatedHcEnv(join(root, "socketless"));
+  const living = await sleeper(env);
+  // recorded as a caller records a core it started: from that core's status, while it ran
+  await corePids(naming("hc-socketless", [living]), env);
+  expect(await stopTestCores(bin, [{ env, pids: [living] }], 200)).toEqual({ stopped: [0], killed: [living], unproven: [], socketsLeft: [] });
+  expect(ran()).toBe(`server stop|${env["HC_SOCKET"]}|\n`);
 });
 
 it.skipIf(!proc)("asks a core's status only while every recorded pid lives and its socket is there, and runs nothing when no core is left", async () => {
