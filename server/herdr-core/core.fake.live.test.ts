@@ -4,7 +4,8 @@ import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { IsolatedCore, type StopReport } from "../../scripts/test-hc.ts";
 import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
-import { FakeHcCore, type FakeProgram, socketTransport } from "./core.fake.ts";
+import { FakeHcCore, type FakeProgram } from "./core.fake.ts";
+import { connectCoreSocket } from "./socket-transport.ts";
 
 /**
  * Keeps the fake honest: one script of viewer actions (probe c's c2, c4-c8 and its verifier's
@@ -221,7 +222,7 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
 
   /** One connected line, handed over as `HcConnection` wants it (a socket opens asynchronously). */
   async function line(socket: string, onFrame?: (kind: number, payload: Uint8Array) => void): Promise<{ hc: HcConnection; raw: HcTransport }> {
-    const transport = await socketTransport(socket);
+    const transport = await connectCoreSocket(socket);
     let given = transport;
     if (onFrame) {
       const [mine, tapped] = transport.readable.tee();
@@ -396,7 +397,7 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
 
   /** Channel 0 replies to calls that are not a call, on a fresh line after hello, then a plain-mode `null` on another line. */
   async function malformedReplies(socket: string): Promise<{ framed: unknown[]; open: boolean; plain: unknown }> {
-    const framedLine = await socketTransport(socket);
+    const framedLine = await connectCoreSocket(socket);
     const replies: unknown[] = [];
     let ended = false;
     const read = makeFrameReader((frame) => { if (frame.channel === 0) replies.push(JSON.parse(Buffer.from(frame.payload).toString())); wake(); }, () => {});
@@ -427,7 +428,7 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
     } finally {
       framedLine.kill();
     }
-    const plainLine = await socketTransport(socket);
+    const plainLine = await connectCoreSocket(socket);
     try {
       const answer = plainLine.readable.getReader().read();
       plainLine.write(new TextEncoder().encode("null\n"));

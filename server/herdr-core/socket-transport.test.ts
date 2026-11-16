@@ -69,11 +69,11 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
    * PATH: a spawn of `hc` or `herdr-core` by name finds them whether or not it passes `env`, and leaves
    * a line in the log. A spawn by absolute path is not seen here; server/conventions.test.ts finds
    * any process start in the transport's imports. Returns the child's lines once every process of the
-   * run has ended, so a spawn nobody awaited has written its line.
+   * run has ended, so a spawn nobody awaited has written its line. `extra` adds to that environment.
    */
-  const runChild = async (...args: string[]): Promise<string[]> => {
+  const runChild = async (extra: Record<string, string>, ...args: string[]): Promise<string[]> => {
     const child = Bun.spawn([process.execPath, childScript, ...args], {
-      env: { PATH: `${join(dir, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`, HOME: join(dir, "home"), TMPDIR: dir, OVIS_STANDIN_RUN: dir },
+      env: { PATH: `${join(dir, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`, HOME: join(dir, "home"), TMPDIR: dir, OVIS_STANDIN_RUN: dir, ...extra },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -142,13 +142,13 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
 
   // the child runs need /proc to tell when every process of a run has ended
   it.skipIf(process.platform !== "linux")("the stand-in sees a spawn of hc by name, with env and without", async () => {
-    expect(await runChild("control")).toEqual([""]);
+    expect(await runChild({}, "control")).toEqual([""]);
     expect(hcRuns().split("\n").filter(Boolean).sort()).toEqual(["hc with-env", "hc without-env"]);
     rmSync(hcLog);
   });
 
   it.skipIf(process.platform !== "linux")("missing socket file gives no_core", async () => {
-    expect(await runChild("no-core", join(dir, "absent.sock"))).toEqual(["no_core"]);
+    expect(await runChild({}, "no-core", join(dir, "absent.sock"))).toEqual(["no_core"]);
     expect(hcRuns()).toBe("");
   });
 
@@ -160,7 +160,7 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     linkSync(live, stale);
     core.listener.stop(true);
     expect(existsSync(stale)).toBe(true);
-    expect(await runChild("no-core", stale)).toEqual(["no_core"]);
+    expect(await runChild({}, "no-core", stale)).toEqual(["no_core"]);
     expect(hcRuns()).toBe("");
   });
 
@@ -201,22 +201,21 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     expect((await transport.readable.getReader().read()).done).toBe(true);
   });
 
-  it("the test-session guard refuses the user's default socket", async () => {
+  it.skipIf(process.platform !== "linux")("the test-session guard refuses the user's default socket", async () => {
     // the user's default socket is under this test's own folders: a guard that let it through finds no core there
-    process.env["HOME"] = join(dir, "home");
-    process.env["XDG_RUNTIME_DIR"] = join(dir, "run");
-    process.env["XDG_CONFIG_HOME"] = join(dir, "config");
+    const guarded = { HOME: join(dir, "home"), XDG_RUNTIME_DIR: join(dir, "run"), XDG_CONFIG_HOME: join(dir, "config"), HERDR_TEST_SESSION: "ovis-test-guard" };
+    Object.assign(process.env, guarded);
     for (const name of ["HC_SOCKET", "HC_SESSION", "HERDR_TEST_LIVE", "OVIS_ALLOW_LIVE_HERDR"]) delete process.env[name];
-    process.env["HERDR_TEST_SESSION"] = "ovis-test-guard";
     const userDefault = coreSocket().path;
     expect(userDefault.startsWith(dir)).toBe(true);
+    // refused before any connect, so these may run here
     expect(await failureOf()).toBe("live_core_refused");
     // another spelling of the same socket
     expect(await failureOf(join(dir, "run", "herdr-core", "..", "herdr-core", "default.sock"))).toBe("live_core_refused");
-    // a core of the test's own is not the user's
-    expect(await failureOf(join(dir, "own.sock"))).toBe("no_core");
-    // said out loud, the user's own core may be reached
-    process.env["OVIS_ALLOW_LIVE_HERDR"] = "1";
-    expect(await failureOf(userDefault)).toBe("no_core");
+    // a connect that reaches no core runs in the child, as every other one does: a core of the test's own is
+    // not the user's while the guard holds there (the user's socket still is), and said out loud the user's may be reached
+    expect(await runChild(guarded, "no-core", join(dir, "own.sock"), userDefault)).toEqual(["no_core", "live_core_refused"]);
+    expect(await runChild({ ...guarded, OVIS_ALLOW_LIVE_HERDR: "1" }, "no-core", userDefault)).toEqual(["no_core"]);
+    expect(hcRuns()).toBe("");
   });
 });

@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_DATA, FRAME_RESIZE, HcConnection, HcError, makeFrameReader } from "./connection.ts";
-import { CREDIT_WINDOW, FakeHcCore, type FakeCoreOptions, type FakeTransport, FEATURES_0_1_17, FEATURES_0_1_18, socketTransport } from "./core.fake.ts";
+import { CREDIT_WINDOW, FakeHcCore, type FakeCoreOptions, type FakeTransport, FEATURES_0_1_17, FEATURES_0_1_18 } from "./core.fake.ts";
+import { connectCoreSocket } from "./socket-transport.ts";
 import type { TerminalAttachParams } from "./hc-api.generated.ts";
 
 const WAIT_MS = 2000;
@@ -573,7 +574,7 @@ describe("fake herdr-core: calls, events and lines", () => {
     const core = new FakeHcCore();
     const server = await core.listen(join(dir, "hc.sock"));
     cleanups.push(() => { void server.close(); });
-    const transport = await socketTransport(join(dir, "hc.sock"));
+    const transport = await connectCoreSocket(join(dir, "hc.sock"));
     const hc = new HcConnection(() => transport);
     cleanups.push(() => hc.close());
     expect((await hc.hello()).version).toBe("0.1.18");
@@ -587,6 +588,5 @@ describe("fake herdr-core: calls, events and lines", () => {
       await Bun.sleep(5);
     }
     expect(core.size(address)).toBe("90x30");
-    await expect(socketTransport(join(dir, "none.sock"))).rejects.toMatchObject({ kind: "no_core" });
   });
 });

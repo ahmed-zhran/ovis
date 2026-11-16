@@ -25,8 +25,8 @@
  * show Ovis never wrote the desktop app's layout.
  */
 
-import { createConnection, createServer, type Socket } from "node:net";
-import { AUTOMATIC_INPUT_FEATURE, encodeFrame, type Frame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE, HcError, type HcTransport, makeFrameReader } from "./connection.ts";
+import { createServer, type Socket } from "node:net";
+import { AUTOMATIC_INPUT_FEATURE, encodeFrame, type Frame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE, type HcTransport, makeFrameReader } from "./connection.ts";
 import type { AttachResult, CoreInfo, DocGetParams, DocSetParams, EventsSubscribeParams, HcMethod, HcMethods, MachineView, Terminal, TerminalAttachParams, TerminalLabelParams, TerminalListParams, TerminalRunParams } from "./hc-api.generated.ts";
 
 /** where a terminal nobody views runs */
@@ -773,26 +773,6 @@ export class FakeHcCore {
   private pid(): number {
     return 400_000 + this.clock++;
   }
-}
-
-/** A client line to a unix socket (the fake's, or an isolated core's): no socket, or nobody listening, is `no_core`. */
-export function socketTransport(path: string): Promise<HcTransport> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection({ path });
-    let controller!: ReadableStreamDefaultController<Uint8Array>;
-    const readable = new ReadableStream<Uint8Array>({ start: (c) => { controller = c; } });
-    const { promise: exited, resolve: exit } = Promise.withResolvers<unknown>();
-    socket.once("error", (error: NodeJS.ErrnoException) => reject(new HcError("no_core", `no core at ${path} (${error.code ?? error.message})`)));
-    socket.once("connect", () => {
-      socket.on("error", () => {});
-      socket.on("data", (data: Buffer) => controller.enqueue(new Uint8Array(data)));
-      socket.on("close", () => {
-        try { controller.close(); } catch { /* closed already */ }
-        exit(null);
-      });
-      resolve({ readable, exited, write: (bytes) => { if (!socket.destroyed) socket.write(bytes); }, kill: () => socket.destroy() });
-    });
-  });
 }
 
 /** A frame as the tests compare it: `DATA 61`, `RESIZE 80x24`, `FOCUS 1`, `FACTS {...}`, `AUTOMATIC_INPUT 1b5b49`, `CREDIT 300`, `CLOSE`. */

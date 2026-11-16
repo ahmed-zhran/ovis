@@ -147,7 +147,11 @@ describe("herdr-core's socket transport", () => {
   // sees one by absolute path, and every file the transport imports, however deep.
   const ENTRY = "server/herdr-core/socket-transport.ts";
   const RUNS_HC_OR_HERDR = new Set(["server/herdr-core/hc-connect.ts", "server/herdr-core/discovery.ts", "server/herdr/client.ts"]);
-  const PROCESS_START = /\bBun\s*\.\s*(?:spawnSync|spawn|\$)|["'](?:node:)?child_process["']|\bimport\s*\{[^}]*\b(?:spawnSync|spawn|\$)\b[^}]*\}\s*from\s*["']bun["']/g;
+  /** child_process, and any value import of "bun" (named, default, namespace, re-export or dynamic): only `import type` passes */
+  const PROCESS_START = /["'](?:node:)?child_process["']|(?:^|[\s;])(?:import|export)\s+(?!type\s)[^;]*?\sfrom\s*["']bun["']|\b(?:import|require)\s*\(\s*["']bun["']\s*\)/gm;
+  /** the global Bun's members the closure uses; any other use of `Bun` (Bun.spawn, Bun.$, Bun["spawn"], `const B = Bun`) could start a process */
+  const BUN_MEMBERS = ["connect", "Socket", "TOML"];
+  const OTHER_BUN = new RegExp(`(?<![\\w$])Bun(?![\\w$])(?!\\s*\\.\\s*(?:${BUN_MEMBERS.join("|")})(?![\\w$]))`, "g");
   const repoSource = (path: string) => (existsSync(join(repo, path)) ? read(path) : undefined);
 
   /** Each import of a file that runs hc or herdr in `entry`'s import closure, and each process start there, as `file:line: text`. */
@@ -155,10 +159,9 @@ describe("herdr-core's socket transport", () => {
     const { reached, offenders } = importClosure(entry, source, (path) => !RUNS_HC_OR_HERDR.has(path));
     const starts = reached.filter((file) => /\.(?:ts|tsx|mjs|js)$/.test(file)).flatMap((file) => {
       const code = stripComments(source(file) ?? "");
-      return [...code.matchAll(PROCESS_START)].map((match) => {
-        const line = lineOf(code, match.index);
-        return `${file}:${line}: ${code.split("\n")[line - 1]!.trim().slice(0, 160)}`;
-      });
+      // `Bun` inside a string counts too: a template literal's `${...}` is code
+      const offsets = [...code.matchAll(PROCESS_START), ...code.matchAll(OTHER_BUN)].map((match) => match.index + match[0].search(/\S/));
+      return [...new Set(offsets.map((at) => lineOf(code, at)))].sort((a, b) => a - b).map((line) => `${file}:${line}: ${code.split("\n")[line - 1]!.trim().slice(0, 160)}`);
     });
     return [...offenders, ...starts];
   }
@@ -166,15 +169,27 @@ describe("herdr-core's socket transport", () => {
   it("starts no process anywhere in its import closure", () => {
     expect(importClosure(ENTRY, repoSource).reached).toContain("server/herdr-core/connection.ts");
     fail(processStarts(ENTRY, repoSource),
-      "server/herdr-core/socket-transport.ts must never start a core: nothing in its import closure may start a process (Bun.spawn, Bun.spawnSync, Bun.$, child_process) or import hc-connect.ts, discovery.ts or server/herdr/client.ts, which run hc or herdr. Take the process start out of the file named, or import what the transport needs from a file that starts nothing.");
+      "server/herdr-core/socket-transport.ts must never start a core: nothing in its import closure may start a process (Bun.spawn, Bun.spawnSync, Bun.$, child_process, a value import of \"bun\", or Bun used as anything but Bun.connect, Bun.Socket or Bun.TOML) or import hc-connect.ts, discovery.ts or server/herdr/client.ts, which run hc or herdr. Take the process start out of the file named, or import what the transport needs from a file that starts nothing.");
   });
 
   it("finds a process start or an import of what runs hc in any file of the closure", () => {
     const graph: Record<string, string> = {
       [ENTRY]: "import { a } from \"./connection.ts\";\nimport { b } from \"./hc-connect.ts\";\nBun.spawn([\"hc\"]);",
       "server/herdr-core/connection.ts": "import \"../../shared/x.ts\";\n// Bun.spawn in a comment\nconst p = Bun . spawnSync([\"sh\"]);",
-      "shared/x.ts": "import { spawn } from \"bun\";\nimport { execFile } from \"node:child_process\";",
+      "shared/x.ts": "import { spawn } from \"bun\";\nimport { execFile } from \"node:child_process\";\nimport \"./y.ts\";",
       "server/herdr-core/hc-connect.ts": "Bun.spawn([\"hc\", \"connect\"]);",
+      // every other way to reach Bun's process starts; the members the closure really uses and a type import pass
+      "shared/y.ts": [
+        "import { $ } from \"bun\";",
+        "import * as b from \"bun\";",
+        "const B = Bun;",
+        "Bun[\"spawn\"]([\"hc\"]);",
+        "globalThis.Bun.spawn([\"hc\"]);",
+        "const run = await import(\"bun\");",
+        "import type { Socket } from \"bun\";",
+        "const s: Bun.Socket<undefined> = await Bun.connect({ unix: \"x\" }); Bun.TOML.parse(\"\");",
+        "const text = `${Bun.spawn([\"hc\"])}`;",
+      ].join("\n"),
     };
     expect(processStarts(ENTRY, (path) => graph[path])).toEqual([
       `${ENTRY}:2: ./hc-connect.ts (server/herdr-core/hc-connect.ts)`,
@@ -182,6 +197,13 @@ describe("herdr-core's socket transport", () => {
       "server/herdr-core/connection.ts:3: const p = Bun . spawnSync([\"sh\"]);",
       "shared/x.ts:1: import { spawn } from \"bun\";",
       "shared/x.ts:2: import { execFile } from \"node:child_process\";",
+      "shared/y.ts:1: import { $ } from \"bun\";",
+      "shared/y.ts:2: import * as b from \"bun\";",
+      "shared/y.ts:3: const B = Bun;",
+      "shared/y.ts:4: Bun[\"spawn\"]([\"hc\"]);",
+      "shared/y.ts:5: globalThis.Bun.spawn([\"hc\"]);",
+      "shared/y.ts:6: const run = await import(\"bun\");",
+      "shared/y.ts:9: const text = `${Bun.spawn([\"hc\"])}`;",
     ]);
   });
 });

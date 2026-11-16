@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { IsolatedCore, pidAlive } from "../../scripts/test-hc.ts";
@@ -176,6 +176,37 @@ describe("with-core's options", () => {
     expect(run.stderr()).not.toContain("root=");
   }, TEST_MS);
 
+  it("refuses --core-env with a relative socket, or a socket that is a link out of ~/.cache/ovis-tmp/, before anything runs", async () => {
+    const links = join(scratch, "links");
+    mkdirSync(links);
+    // a link to a file that is there and one to nothing, both outside ~/.cache/ovis-tmp/
+    symlinkSync("/bin/sh", join(links, "there.sock"));
+    symlinkSync("/var/empty/hc.sock", join(links, "nothing.sock"));
+    for (const socket of ["run/hc.sock", join(links, "there.sock"), join(links, "nothing.sock")]) {
+      const file = join(scratch, "linked.env");
+      const marker = join(scratch, "ran-linked");
+      writeFileSync(file, `HC_SOCKET=${socket}\nHC_SESSION=elsewhere\n`);
+      const run = helper(["--core-env", file, "--", "sh", "-c", `touch '${marker}'`], callerEnv());
+      expect({ socket, exit: await run.exited, ran: existsSync(marker) }).toEqual({ socket, exit: 2, ran: false });
+      expect(run.stderr()).not.toContain("root=");
+    }
+  }, TEST_MS);
+
+  it("runs a command whose first word starts with a dash after `-- --`, and refuses it as an option after one `--`", async () => {
+    const dir = join(scratch, "dash");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "-dash"), "#!/bin/sh\necho dashed \"$@\"\n");
+    chmodSync(join(dir, "-dash"), 0o755);
+    const env = callerEnv({ PATH: `${dir}:${process.env["PATH"]}`, OVIS_TEST_HC_BIN: undefined });
+    const ran = helper(["--no-core", "--", "--", "-dash", "x"], env);
+    expect(await ran.exited).toBe(0);
+    expect(ran.stdout()).toBe("dashed x\n");
+    // bun drops a `--` right after the script, so one `--` leaves the dash word where options are read
+    const refused = helper(["--", "-dash"], env);
+    expect(await refused.exited).toBe(2);
+    expect(refused.stderr()).not.toContain("root=");
+  }, TEST_MS);
+
   it("--no-core starts no hc: a stand-in hc first on PATH logs nothing", async () => {
     const dir = join(scratch, "standin");
     mkdirSync(dir);
@@ -264,8 +295,8 @@ describe.skipIf(!bin)("with-core against a real hc", () => {
     const script = join(scratch, "run-terminal.ts");
     writeFileSync(script, [
       `import { HcConnection } from ${JSON.stringify(join(import.meta.dir, "..", "..", "server", "herdr-core", "connection.ts"))};`,
-      `import { socketTransport } from ${JSON.stringify(join(import.meta.dir, "..", "..", "server", "herdr-core", "core.fake.ts"))};`,
-      "const transport = await socketTransport(process.env.HC_SOCKET!);",
+      `import { connectCoreSocket } from ${JSON.stringify(join(import.meta.dir, "..", "..", "server", "herdr-core", "socket-transport.ts"))};`,
+      "const transport = await connectCoreSocket(process.env.HC_SOCKET!);",
       "const hc = new HcConnection(() => transport);",
       'await hc.call("terminal.run", { argv: ["sleep", "1000"] });',
       "hc.close();",

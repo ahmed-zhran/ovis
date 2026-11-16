@@ -1,12 +1,17 @@
 /**
  * Runs one command against a herdr-core of its own, and always cleans up:
  *
- *   bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- <command...>
+ *   bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- [--] <command...>
+ *
+ * Bun drops a `--` that comes right after the script, so a command whose first word starts with a
+ * dash goes after `-- --`: one more `--` right after the one that ends the options is dropped here.
+ * After a single `--` such a word is read as an option, and refused as one (exit 2).
  *
  * Default: a real core (the hc OVIS_TEST_HC_BIN names, run by that absolute path) in a fresh folder
  * under TMPDIR, stopped afterwards. `--no-core`: the same environment, no core. `--core-env <file>`:
  * no core started; the command reaches the core the file's HC_SOCKET, HC_SESSION and XDG_* lines
- * name, which must lie under ~/.cache/ovis-tmp/ (a trial's demo core, never someone's own).
+ * name: an absolute socket path that, through every link, the socket's own included, lies under
+ * ~/.cache/ovis-tmp/ (a trial's demo core, never someone's own).
  *
  * The command gets the caller's environment without any HC_*, XDG_*, OVIS_* or HERDR_WEB_* name,
  * then the isolated core's (HC_SOCKET, HC_SESSION, XDG_*), a scratch HOME and HERDR_TEST_SESSION.
@@ -18,12 +23,12 @@
  * stderr carries `root=<folder>` once the folder exists and `stopped pids=<a,b> killed=<..>` at the end.
  */
 
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { coreFolder, IsolatedCore, stoppedCleanly } from "../../scripts/test-hc.ts";
 
-const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- <command...>";
+const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- [--] <command...>";
 /** options a later row builds; named now so a call with them fails clearly */
 const LATER = new Set(["--pty", "--size", "--keys", "--answer", "--dump"]);
 const COMMAND_GRACE_MS = 5000;
@@ -36,15 +41,17 @@ class Refused extends Error {}
 interface Options { mode: "core" | "no-core" | "core-env"; coreEnv: string | null; limitSeconds: number; command: string[] }
 
 /**
- * Options come first; the first `--`, or the first word that is not an option, starts the command.
- * Bun itself drops a `--` that comes right after the script, so `-- sh -c x` arrives as `sh -c x`.
+ * Options come first; the first `--`, or the first word that is not an option, starts the command,
+ * and one more `--` right after that `--` is dropped. Bun itself drops a `--` that comes right after
+ * the script, so `-- sh -c x` arrives as `sh -c x` and `-- -- -x` as `-- -x`.
  */
 function parse(args: string[]): Options {
   const options: Options = { mode: "core", coreEnv: null, limitSeconds: 600, command: [] };
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]!;
     if (flag === "--" || !flag.startsWith("-")) {
-      options.command = args.slice(flag === "--" ? i + 1 : i);
+      const command = args.slice(flag === "--" ? i + 1 : i);
+      options.command = flag === "--" && command[0] === "--" ? command.slice(1) : command;
       break;
     }
     if (flag === "--no-core") options.mode = "no-core";
@@ -58,7 +65,7 @@ function parse(args: string[]): Options {
       if (!Number.isFinite(seconds) || seconds <= 0) throw new Refused("--limit needs a number of seconds above 0");
       options.limitSeconds = seconds;
     } else if (LATER.has(flag)) throw new Refused(`${flag} is not available yet`);
-    else throw new Refused(`unknown option ${flag}; ${USAGE}`);
+    else throw new Refused(`unknown option ${flag} (a command whose first word starts with a dash goes after -- --); ${USAGE}`);
   }
   if (options.command.length === 0) throw new Refused(`no command after --; ${USAGE}`);
   return options;
@@ -81,12 +88,24 @@ function readCoreEnv(file: string): Record<string, string> {
   const home = process.env["HOME"];
   const socket = named["HC_SOCKET"];
   if (!home || !socket) throw new Refused(`${file} names no HC_SOCKET`);
-  // the folder through its links: a link under ovis-tmp to someone's core is not a trial's socket
-  let folder = resolve(dirname(socket));
-  try { folder = realpathSync(folder); } catch { /* not there: judged by its name */ }
-  if (!`${folder}/`.startsWith(`${home}/.cache/ovis-tmp/`)) throw new Refused(`refused: ${socket} is not under ${home}/.cache/ovis-tmp/`);
+  if (!isAbsolute(socket)) throw new Refused(`refused: HC_SOCKET ${socket} is not an absolute path`);
+  // through every link, the socket's own too: a link under ovis-tmp to someone's core is not a trial's socket
+  const real = realSocket(socket);
+  if (real === null || !real.startsWith(`${realOrNamed(join(home, ".cache", "ovis-tmp"))}/`)) throw new Refused(`refused: ${socket} is not under ${home}/.cache/ovis-tmp/`);
   if (!named["HC_SESSION"] || named["HC_SESSION"] === "default") throw new Refused(`refused: ${file} names HC_SESSION ${named["HC_SESSION"] ?? "(none)"}`);
   return named;
+}
+
+/** `path` through its links, or (not there) as written, `..` resolved */
+function realOrNamed(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
+/** The socket through every link: its own real path when it is there; else its folder's and its name, or null for a link to nothing. */
+function realSocket(socket: string): string | null {
+  try { return realpathSync(socket); } catch { /* not there, or a link to nothing */ }
+  try { if (lstatSync(socket).isSymbolicLink()) return null; } catch { /* nothing at all: judged by its folder */ }
+  return join(realOrNamed(dirname(socket)), basename(socket));
 }
 
 async function main(): Promise<number> {
