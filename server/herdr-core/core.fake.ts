@@ -16,6 +16,9 @@
  * - The stream: the first paint starts with CAN and ends with `CSI 0m CSI ?9001l` (or `h`), and what
  *   follows the mark may share its frame; 256 KiB of credit, chunks of at most 16 KiB, nothing past
  *   the credit; a program's CLOSE waits behind its output; a viewer's own CLOSE is answered at once.
+ * - A core that is stopped (`hc server stop`): each live terminal finishes with reason `server_stop`
+ *   (signal 1), its viewers' streams hear that CLOSE first and the `finished` event after it, and then
+ *   every line ends; the event stream gets no CLOSE of its own (core.fake.live.test.ts, both versions).
  * - Calls and errors in hc's shapes (codes, `data.kind`, `hint`), as an isolated core answered them.
  *
  * Not modelled: plain mode past hello, observers' `resize_notifications` repaints, the 4 MiB
@@ -312,6 +315,17 @@ export class FakeHcCore {
   restart(): void {
     for (const line of [...this.lines.values()]) line.end();
     this.seq = 0;
+  }
+
+  /**
+   * The core is stopped: every live terminal finishes with reason `server_stop`, each of its streams
+   * closing with that reason before the `finished` event goes out, and then every line ends.
+   */
+  stop(): void {
+    for (const held of this.terminals.values()) {
+      if (held.terminal.state === "live") this.finish(held, { exit_code: null, reason: "server_stop", signal: 1 }, true);
+    }
+    this.restart();
   }
 
   private open(sink: (bytes: Uint8Array) => void, hangUp: () => void): Line {
@@ -714,11 +728,14 @@ export class FakeHcCore {
     this.emit("size", held.terminal.address, { cols, rows });
   }
 
-  private finish(held: Held, end: { exit_code: number | null; reason: string; signal: number | null }): void {
+  /** A terminal ends: the `finished` event, then its streams' CLOSE; a stopping core (`closeFirst`) closes the streams first. */
+  private finish(held: Held, end: { exit_code: number | null; reason: string; signal: number | null }, closeFirst = false): void {
     const payload = { exit_code: end.exit_code, finished_ms: Date.now(), reason: end.reason, signal: end.signal };
     Object.assign(held.terminal, payload, { state: "finished" });
+    const close = () => { for (const viewer of held.viewers.splice(0)) viewer.stream.end(payload); };
+    if (closeFirst) close();
     this.emit("finished", held.terminal.address, payload);
-    for (const viewer of held.viewers.splice(0)) viewer.stream.end(payload);
+    close();
   }
 
   private setDoc(params: DocSetParams): { version: number } {

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
-import { IsolatedCore, type StopReport } from "../../scripts/test-hc.ts";
+import { IsolatedCore, type StopReport, stoppedCleanly } from "../../scripts/test-hc.ts";
 import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
 import { FakeHcCore, type FakeProgram } from "./core.fake.ts";
 import { connectCoreSocket } from "./socket-transport.ts";
@@ -168,8 +168,11 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
 
   /** the one teardown: afterAll and a signal to this test process (bun test skips afterAll then) both await it */
   let tearing: Promise<StopReport | null> | null = null;
+  /** cores a single case started for itself (one that stops its core): stopped here too, should the case not get that far */
+  const own: IsolatedCore[] = [];
   const teardown = () => (tearing ??= (async () => {
     await fakeServer?.close();
+    for (const started of own) await started.stop();
     if (fakeDir) rmSync(fakeDir, { recursive: true, force: true });
     return core ? await core.stop() : null;
   })());
@@ -438,6 +441,66 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       plainLine.kill();
     }
   }
+
+  /**
+   * What a viewer's line hears while its core is stopped: the events about the terminal it is attached
+   * to, the CLOSE of that attach and the end of its event stream, in the order they came. A stream the
+   * core closed itself carries the core's reason; one that only ended with the line carries this
+   * side's `connection_lost`.
+   */
+  async function stopOutcome(socket: string, stop: () => Promise<void>): Promise<string[]> {
+    const viewer = (await line(socket)).hc;
+    const heard: string[] = [];
+    try {
+      const { address } = await viewer.call("terminal.run", { argv: ["sleep", "1000"] });
+      const timeless = (data: Record<string, unknown> | null | undefined) => data && { ...data, ...(typeof data["finished_ms"] === "number" ? { finished_ms: "a time" } : {}) };
+      let pending = "";
+      let attached = false;
+      await viewer.open("events.subscribe", {}, {
+        onData: (payload) => {
+          pending += Buffer.from(payload).toString();
+          for (let at = pending.indexOf("\n"); at !== -1; at = pending.indexOf("\n")) {
+            const note = JSON.parse(pending.slice(0, at)) as { method: string; params: { type?: string; terminal?: string; data?: Record<string, unknown> } };
+            pending = pending.slice(at + 1);
+            if (attached && note.method === "event" && note.params.terminal === address) heard.push(`event ${String(note.params.type)} ${JSON.stringify(timeless(note.params.data))}`);
+          }
+        },
+        onClose: (reason) => { heard.push(`events CLOSE ${JSON.stringify(reason)}`); wake(); },
+      });
+      await viewer.open("terminal.attach", { terminal: address, cols: 80, rows: 24, resumed: true }, {
+        onData: () => {},
+        onClose: (reason) => { heard.push(`attach CLOSE ${JSON.stringify(timeless(reason))}`); wake(); },
+      });
+      // the attach changed the size: only what the stop itself causes is compared
+      await viewer.call("terminal.get", { terminal: address });
+      attached = true;
+      await stop();
+      await until("the end of the viewer's event stream", () => heard.some((entry) => entry.startsWith("events CLOSE")));
+      await until("the end of the viewer's attach", () => heard.some((entry) => entry.startsWith("attach CLOSE")));
+      return heard;
+    } finally {
+      viewer.close();
+    }
+  }
+
+  it("a core that is stopped closes each attach with its reason before the line ends", async () => {
+    const stopped = new IsolatedCore(bin!);
+    own.push(stopped);
+    await stopped.start();
+    const onReal = await stopOutcome(stopped.socket, async () => { expect(stoppedCleanly(await stopped.stop())).toBe(true); });
+    const { version, features } = await withLine(real.socket, (hc) => hc.hello());
+    const stand = new FakeHcCore({ version, features });
+    const server = await stand.listen(join(fakeDir, "stop.sock"));
+    try {
+      const onFake = await stopOutcome(join(fakeDir, "stop.sock"), async () => stand.stop());
+      // the core's own CLOSE reaches the attach while the line is still there: the line's end comes after it
+      expect(onReal.findIndex((entry) => entry.startsWith("attach CLOSE"))).toBeLessThan(onReal.findIndex((entry) => entry.startsWith("events CLOSE")));
+      expect(onReal.find((entry) => entry.startsWith("attach CLOSE"))).toContain("server_stop");
+      expect(onFake).toEqual(onReal);
+    } finally {
+      await server.close();
+    }
+  }, TEST_MS);
 
   it("answers calls that are not calls as the real core does", async () => {
     const onReal = await malformedReplies(real.socket);

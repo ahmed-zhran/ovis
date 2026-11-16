@@ -393,6 +393,26 @@ describe("fake herdr-core: the attach stream", () => {
     expect(order.map((entry) => entry.what)).toEqual(["event", "frame"]);
   });
 
+  it("a stopped core closes each attach with server_stop, then says finished, then ends its lines", async () => {
+    const s = scene();
+    const t = await s.run();
+    const idle = await s.run();
+    await s.attach("A", t, 80, 24, { resumed: true });
+    let ended = false;
+    await s.control.open("events.subscribe", {}, { onData: () => {}, onClose: (reason) => { ended = reason?.["reason"] === "connection_lost"; s.wake(); } });
+    s.core.stop();
+    await s.until("the CLOSE of the attach", () => s.closed("A") !== undefined);
+    await s.until("the end of the control line", () => ended);
+    expect(s.closed("A")).toEqual({ exit_code: null, finished_ms: expect.any(Number), reason: "server_stop", signal: 1 });
+    // the reverse of a program's own end: the stream's CLOSE goes out before the finished event
+    const order = s.core.log.filter((entry) => (entry.what === "event" && entry.type === "finished" && entry.terminal === t) || (entry.what === "frame" && entry.from === "core" && entry.kind === FRAME_CLOSE && entry.terminal === t));
+    expect(order.map((entry) => entry.what)).toEqual(["frame", "event"]);
+    expect(s.core.events(idle, "finished")).toEqual(["finished"]);
+    expect([s.core.terminal(t), s.core.terminal(idle)].map((record) => [record.state, record.reason, record.signal])).toEqual([["finished", "server_stop", 1], ["finished", "server_stop", 1]]);
+    // the event stream got no CLOSE frame of its own: it ended with its line
+    expect(s.core.log.filter((entry) => entry.what === "frame" && entry.from === "core" && entry.kind === FRAME_CLOSE && entry.terminal === null)).toEqual([]);
+  });
+
   it("records every frame of a terminal, and proves nothing was sent on another", async () => {
     const s = scene();
     const t = await s.run();
