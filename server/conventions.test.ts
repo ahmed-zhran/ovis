@@ -147,8 +147,11 @@ describe("herdr-core's socket transport", () => {
   // sees one by absolute path, and every file the transport imports, however deep.
   const ENTRY = "server/herdr-core/socket-transport.ts";
   const RUNS_HC_OR_HERDR = new Set(["server/herdr-core/hc-connect.ts", "server/herdr-core/discovery.ts", "server/herdr/client.ts"]);
-  /** child_process, and any value import of "bun" (named, default, namespace, re-export or dynamic): only `import type` passes */
-  const PROCESS_START = /["'](?:node:)?child_process["']|(?:^|[\s;])(?:import|export)\s+(?!type\s)[^;]*?\sfrom\s*["']bun["']|\b(?:import|require)\s*\(\s*["']bun["']\s*\)/gm;
+  /**
+   * child_process, and any value import of "bun" (named, default, namespace, re-export or dynamic), spaces or none
+   * around the braces and `from`: only `import type` passes
+   */
+  const PROCESS_START = /["'](?:node:)?child_process["']|(?<![\w$.])(?:import|export)(?![\w$])(?!\s*type(?:\s*[{*]|\s+(?!from[\s"'])[\w$]))[^;]*?(?<![\w$])from\s*["']bun["']|\b(?:import|require)\s*\(\s*["']bun["']\s*\)/g;
   /** the global Bun's members the closure uses; any other use of `Bun` (Bun.spawn, Bun.$, Bun["spawn"], `const B = Bun`) could start a process */
   const BUN_MEMBERS = ["connect", "Socket", "TOML"];
   const OTHER_BUN = new RegExp(`(?<![\\w$])Bun(?![\\w$])(?!\\s*\\.\\s*(?:${BUN_MEMBERS.join("|")})(?![\\w$]))`, "g");
@@ -189,6 +192,18 @@ describe("herdr-core's socket transport", () => {
         "import type { Socket } from \"bun\";",
         "const s: Bun.Socket<undefined> = await Bun.connect({ unix: \"x\" }); Bun.TOML.parse(\"\");",
         "const text = `${Bun.spawn([\"hc\"])}`;",
+        // the same imports written without spaces, after a brace, or across lines
+        "import{spawn}from\"bun\";",
+        "import {spawn}from \"bun\";",
+        "import{ spawn } from \"bun\";",
+        "import{spawnSync}from\"bun\";",
+        "{}import { spawn } from \"bun\";",
+        "import {",
+        "  spawn,",
+        "}from \"bun\";",
+        "import{$}from\"bun\";",
+        "export*from'bun';",
+        "import type{Socket}from\"bun\";",
       ].join("\n"),
     };
     expect(processStarts(ENTRY, (path) => graph[path])).toEqual([
@@ -204,6 +219,14 @@ describe("herdr-core's socket transport", () => {
       "shared/y.ts:5: globalThis.Bun.spawn([\"hc\"]);",
       "shared/y.ts:6: const run = await import(\"bun\");",
       "shared/y.ts:9: const text = `${Bun.spawn([\"hc\"])}`;",
+      "shared/y.ts:10: import{spawn}from\"bun\";",
+      "shared/y.ts:11: import {spawn}from \"bun\";",
+      "shared/y.ts:12: import{ spawn } from \"bun\";",
+      "shared/y.ts:13: import{spawnSync}from\"bun\";",
+      "shared/y.ts:14: {}import { spawn } from \"bun\";",
+      "shared/y.ts:15: import {",
+      "shared/y.ts:18: import{$}from\"bun\";",
+      "shared/y.ts:19: export*from'bun';",
     ]);
   });
 });
