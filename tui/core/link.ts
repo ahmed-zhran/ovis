@@ -58,13 +58,18 @@ export const FAILURE_DEADLINE = "failure";
  */
 export type NoCoreCode = "no_core" | "refused" | "unreachable";
 /**
- * Why the link is Offline: a NoCoreCode when a retry found no core; else why the line ended:
- * `closed` (EOF, or the connection's own `closed`), `timeout` (a call or hello went unanswered),
- * `bad_line` (the event stream closed while the line stayed, or brought what cannot be read: a line
- * that is not JSON or too long, a `missed` or a subscribe answer without its snapshot, an invalid
- * frame), `call_failed` (the core refused a call the link needs), `silent` (LINE_SILENCE_MS without
- * an event or heartbeat), `notify_failed` (the owner's `notify` threw); or `link_closed` (closed by
- * its owner, never retried).
+ * Why the link is Offline: a NoCoreCode when a retry found no core; else why the line ended, as
+ * first known:
+ * - the connection ended the line, and its own kind (HcConnection `onEnd`) says why: `closed` (EOF:
+ *   the transport ended, or the connection's `closed`), `timeout` (hello, or a call on a line silent
+ *   since it was sent, went unanswered), `bad_line` (an invalid frame);
+ * - a call the link needs failed while the line stayed: `timeout` (unanswered, while other lines
+ *   kept coming), `call_failed` (the core refused it: `events.subscribe`, either `doc.get`, a re-read);
+ * - the line stayed but its event stream cannot be read on: `bad_line` (hc closed the stream, or sent
+ *   a line that is not JSON or too long, a `missed` without its snapshot, a subscribe answer without one);
+ * - the link's own: `silent` (LINE_SILENCE_MS without a whole line on the event stream, reached by
+ *   `fire` before any call's own timeout ended the line), `notify_failed` (the owner's `notify`
+ *   threw), `link_closed` (closed by its owner, never retried).
  */
 export type OfflineCode = NoCoreCode | "closed" | "timeout" | "bad_line" | "call_failed" | "silent" | "notify_failed" | "link_closed";
 /** Why the core cannot serve the screen: `bad_hello` (the connection's kind for a hello it cannot speak to: another protocol generation, no framed mode) or `missing_methods`. */
@@ -116,6 +121,8 @@ export interface LinkOptions {
   notify: (notice: LinkNotice) => void;
   /** one attempt at the socket: socket-transport.ts's own, which a test may wrap */
   connect?: (path: string) => Promise<HcTransport>;
+  /** how long hello and each call of the link wait for the core: the connection's own default (10 s) unless a test shortens it */
+  timeoutMs?: number;
 }
 
 /** The link as the screen uses it; `call` and `hello` stand in for an HcConnection's (seen-label.ts, layout-ops.ts). */
@@ -140,6 +147,8 @@ interface Line {
   readonly hc: HcConnection;
   /** set once, when the line ended or was given up: nothing of it is acted on after */
   over: boolean;
+  /** the connection ended the line (HcConnection `onEnd`): its verdict, not a symptom of it, names the end */
+  ending: boolean;
   hello: HelloInfo | null;
   events: Channel | null;
   /** 0 until the line's first resync is published */
@@ -168,13 +177,19 @@ function noCoreCode(error: unknown): NoCoreCode {
   return kind === "no_core" ? "no_core" : kind === "live_core_refused" ? "refused" : "unreachable";
 }
 
-/** Why a call the link needs failed, from the connection's error kind (connection.ts). */
-function callCode(error: unknown): OfflineCode {
-  const kind = error instanceof HcError ? error.kind : null;
-  if (kind === "closed" || kind === OFFLINE) return "closed";
+/** Why the connection ended a line, from the kind it ended it for (connection.ts `end`). */
+function endCode(kind: string): OfflineCode {
   if (kind === "timeout") return "timeout";
   if (kind === "bad_frame") return "bad_line";
-  return "call_failed";
+  return "closed";
+}
+
+/**
+ * Why a call the link needs failed on a line that stayed (a line the connection ended was told by
+ * `onEnd` first): unanswered while other lines kept coming, or refused by the core.
+ */
+function callCode(error: unknown): OfflineCode {
+  return error instanceof HcError && error.kind === "timeout" ? "timeout" : "call_failed";
 }
 
 /** A link to the core at `options.socket`: Connecting at once, with its first notice after this returned. */
@@ -320,19 +335,29 @@ class Link implements CoreLink {
       if (handedOut) throw new HcError(OFFLINE, "this line to herdr-core ended");
       handedOut = true;
       return transport;
+    }, {
+      ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
+      // the connection's verdict comes before its waiting calls fail and its channels close: what follows
+      // from that end is a symptom. The event stream's close is ignored while `ending`; a rejected call's
+      // handler runs after the microtask queued here, which has ended the line by then. The line is named
+      // once the connection has told every channel, so each hears `connection_lost` first.
+      onEnd: (kind, message) => {
+        if (line.over) return;
+        line.ending = true;
+        queueMicrotask(() => {
+          if (kind === "bad_hello") this.incompatible(line, "bad_hello", message, []);
+          else this.lineEnded(line, endCode(kind), message);
+        });
+      },
     });
-    const line: Line = { hc, over: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, held: null, docs: new Map(), heardAt: this.options.now(), onlineAt: null };
+    const line: Line = { hc, over: false, ending: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, held: null, docs: new Map(), heardAt: this.options.now(), onlineAt: null };
     this.line = line;
-    // before the connection's own watch: the socket transport settles `exited` before it ends `readable`,
-    // so an EOF is told here as `closed` before the event stream's close could tell it as a bad line
-    void transport.exited.then(() => this.lineEnded(line, "closed", "herdr-core's line ended"));
 
     let hello: HelloInfo;
     try {
       hello = await hc.hello();
-    } catch (error) {
-      if (error instanceof HcError && error.kind === "bad_hello") this.incompatible(line, "bad_hello", error.message, []);
-      else this.lineEnded(line, callCode(error), messageOf(error));
+    } catch {
+      // hello fails only when the connection ends the line, and `onEnd` named why already
       return;
     }
     if (line.over) return;
@@ -348,7 +373,7 @@ class Link implements CoreLink {
       subscribed = await openEventStream(hc, {
         event: (event, seq) => this.onEvent(line, event, seq),
         resync: (missed) => {
-          if (!missed) this.lineEnded(line, "bad_line", "herdr-core's event stream ended or sent what cannot be read");
+          if (!missed) { if (!line.ending) this.lineEnded(line, "bad_line", "herdr-core's event stream ended or sent what cannot be read"); }
           else if (line.early) line.early.push({ missed });
           else void this.resync(line, missed);
         },
@@ -477,6 +502,7 @@ class Link implements CoreLink {
   }
 
   private incompatible(line: Line, code: IncompatibleCode, reason: string, missing: string[]): void {
+    if (line.over) return;
     line.over = true;
     line.hc.close();
     if (this.line === line) this.line = null;

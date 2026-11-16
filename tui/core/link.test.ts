@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodeFrame, FRAME_CLOSE, FRAME_DATA, HcError, type HcTransport, makeFrameReader } from "../../server/herdr-core/connection.ts";
@@ -16,7 +17,7 @@ const WAIT_MS = 5000;
  */
 const standInRun = process.env["OVIS_STANDIN_RUN"];
 /** the cases of the first block: the last block checks that the stand-in run passed every one */
-const LINK_CASES = 21;
+const LINK_CASES = 29;
 /** the cases the plan names (row 22), which the last block finds by name among those that passed */
 const NAMED = ["EOF", "missed", "stale socket", "incompatible names the methods", "a call while offline opens no socket"];
 
@@ -26,67 +27,65 @@ const HELLO = { generation: 1, framed: true, version: "0.1.18", core: { id: "s1"
 /** what a scripted core's handler answers to keep a call waiting */
 const HOLD = Symbol("hold");
 
+type Answer = (method: string, params: Record<string, unknown>, line: ScriptedLine) => unknown;
+
 /**
- * A core scripted by the test, in process: answers hello with `hello`, each call with `answer`
- * (an error when it throws, nothing while it answers HOLD), and lets the test put lines on a stream
- * channel or end the line.
+ * One connection to a core scripted by the test, served on a unix socket so that the link reaches it
+ * through the real socket transport: answers hello with `hello` (never, when null), each call with
+ * `answer` (an error when it throws, nothing while it answers HOLD), and lets the test put lines
+ * or a CLOSE on a stream channel, send raw frames, or end the connection (EOF).
  */
-class ScriptedCore implements HcTransport {
-  readonly readable: ReadableStream<Uint8Array>;
-  readonly exited: Promise<unknown>;
+class ScriptedLine {
   readonly calls: string[] = [];
   ended = false;
-  private controller!: ReadableStreamDefaultController<Uint8Array>;
-  private settle!: () => void;
   private plain = true;
   private readonly frames = makeFrameReader((frame) => this.onFrame(frame.channel, frame.kind, frame.payload), () => {});
 
-  constructor(private readonly hello: Record<string, unknown>, private readonly answer: (method: string, params: Record<string, unknown>) => unknown, private readonly heard: () => void) {
-    this.readable = new ReadableStream({ start: (controller) => { this.controller = controller; } });
-    const { promise, resolve } = Promise.withResolvers<unknown>();
-    this.exited = promise;
-    this.settle = () => resolve(null);
-  }
-
-  write(bytes: Uint8Array): void {
-    if (this.ended) return;
-    if (this.plain) {
-      this.plain = false;
-      this.calls.push("hello");
-      this.enqueue(new TextEncoder().encode(`${JSON.stringify({ id: 0, jsonrpc: "2.0", result: this.hello })}\n`));
-      return;
-    }
-    this.frames(bytes);
-  }
-
-  kill(): void {
-    this.end();
+  constructor(private readonly socket: Socket, private readonly hello: Record<string, unknown> | null, private readonly answer: Answer, private readonly heard: () => void) {
+    socket.on("data", (data: Buffer) => this.receive(new Uint8Array(data)));
+    socket.on("close", () => { this.ended = true; heard(); });
+    socket.on("error", () => {});
   }
 
   /** a line on a stream channel, as hc sends a notification */
   line(channel: number, text: string): void {
-    this.enqueue(encodeFrame(channel, FRAME_DATA, `${text}\n`));
+    this.send(encodeFrame(channel, FRAME_DATA, `${text}\n`));
   }
 
   notify(channel: number, method: string, params: Record<string, unknown>): void {
     this.line(channel, JSON.stringify({ jsonrpc: "2.0", method, params }));
   }
 
-  /** EOF: the core went. `exited` settles before `readable` ends, in the socket transport's order. */
-  end(): void {
-    if (this.ended) return;
-    this.ended = true;
-    this.settle();
-    try { this.controller.close(); } catch { /* closed */ }
+  /** hc ends a stream channel while the connection stays */
+  closeChannel(channel: number): void {
+    this.send(encodeFrame(channel, FRAME_CLOSE, new Uint8Array(0)));
   }
 
-  private enqueue(bytes: Uint8Array): void {
-    if (!this.ended) this.controller.enqueue(bytes);
+  send(bytes: Uint8Array): void {
+    if (!this.ended) this.socket.write(bytes);
+  }
+
+  /** EOF: the core went */
+  end(): void {
+    this.socket.end();
+  }
+
+  private receive(bytes: Uint8Array): void {
+    if (!this.plain) {
+      this.frames(bytes);
+      return;
+    }
+    const at = bytes.indexOf(0x0a);
+    this.plain = false;
+    this.calls.push("hello");
+    this.heard();
+    if (this.hello) this.send(new TextEncoder().encode(`${JSON.stringify({ id: 0, jsonrpc: "2.0", result: this.hello })}\n`));
+    if (at !== -1 && at + 1 < bytes.length) this.frames(bytes.subarray(at + 1));
   }
 
   private onFrame(channel: number, kind: number, payload: Uint8Array): void {
     if (channel !== 0) {
-      if (kind === FRAME_CLOSE) this.enqueue(encodeFrame(channel, FRAME_CLOSE, new Uint8Array(0)));
+      if (kind === FRAME_CLOSE) this.send(encodeFrame(channel, FRAME_CLOSE, new Uint8Array(0)));
       return;
     }
     const message = JSON.parse(new TextDecoder().decode(payload)) as { id: number; method: string; params: Record<string, unknown> };
@@ -94,13 +93,13 @@ class ScriptedCore implements HcTransport {
     this.heard();
     let reply: Record<string, unknown>;
     try {
-      const result = this.answer(message.method, message.params);
+      const result = this.answer(message.method, message.params, this);
       if (result === HOLD) return;
       reply = { result };
     } catch (error) {
       reply = { error: { code: -32000, message: String(error), data: { kind: "refused" } } };
     }
-    this.enqueue(encodeFrame(0, FRAME_DATA, JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply })));
+    this.send(encodeFrame(0, FRAME_DATA, JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply })));
   }
 }
 
@@ -141,8 +140,9 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     servers.push(server);
     return server;
   };
-  const start = (path: string, connect?: LinkOptions["connect"]) => {
+  const start = (path: string, connect?: LinkOptions["connect"], timeoutMs?: number) => {
     const link = openLink({
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
       socket: path,
       now: () => now,
       model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
@@ -169,17 +169,23 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
   /** frames a viewer sent on a terminal's stream: an attach, a write, a resize, a close */
   const terminalFrames = (core: FakeHcCore, line: number) => core.log.filter((entry) => entry.what === "frame" && entry.from === "viewer" && entry.terminal !== null && entry.line === line);
   const lastLine = (core: FakeHcCore) => core.calls().at(-1)!.line;
-  const scripted = (answer: (method: string, params: Record<string, unknown>) => unknown, hello: Record<string, unknown> = HELLO) => {
-    const cores: ScriptedCore[] = [];
-    const connect = () => {
-      const core = new ScriptedCore(hello, answer, wake);
-      cores.push(core);
-      return Promise.resolve(core);
-    };
-    return { cores, connect };
+  /** a scripted core listening on a socket of its own: `cores` holds one ScriptedLine per connection, in order */
+  const scripted = async (answer: Answer, hello: Record<string, unknown> | null = HELLO) => {
+    const cores: ScriptedLine[] = [];
+    const open = new Set<Socket>();
+    const server = createServer((connection) => {
+      open.add(connection);
+      connection.on("close", () => open.delete(connection));
+      cores.push(new ScriptedLine(connection, hello, answer, wake));
+      wake();
+    });
+    const path = socket();
+    await new Promise<void>((resolve) => server.listen(path, () => resolve()));
+    servers.push({ close: () => new Promise<void>((resolve) => { for (const connection of open) connection.destroy(); server.close(() => resolve()); }) });
+    return { cores, path };
   };
   /** a scripted core whose event stream is channel 1, with `terminals` in its snapshot at seq 1 */
-  const subscribing = (terminals: unknown[] = []) => (method: string): unknown => {
+  const subscribing = (terminals: unknown[] = []): Answer => (method) => {
     if (method === "events.subscribe") return { channel: 1, seq: 1, terminals };
     if (method === "doc.get") return { value: null, version: 0 };
     throw new Error(`no ${method} here`);
@@ -416,31 +422,131 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     });
   }
 
-  it("ends the line on what it cannot read: a line that is not JSON, an oversize line, a missed without its snapshot", async () => {
-    for (const bad of ["not json", "x".repeat(4 * 1024 * 1024 + 1), JSON.stringify({ jsonrpc: "2.0", method: "missed", params: { seq: 3 } })]) {
-      const { cores, connect } = scripted(subscribing());
-      const link = start("scripted", connect);
+  // one case or more per code, each on the path that produces it, through the real socket transport
+
+  it("code bad_line: hc closes the event stream on a line that stays, or sends a line that is not JSON, too long, a missed without its snapshot, or an invalid frame", async () => {
+    const sources: [string, (line: ScriptedLine) => void][] = [
+      ["the event stream closed", (line) => line.closeChannel(1)],
+      ["a line that is not JSON", (line) => line.line(1, "not json")],
+      ["a line over its size limit", (line) => line.line(1, "x".repeat(4 * 1024 * 1024 + 1))],
+      ["a missed without its snapshot", (line) => line.notify(1, "missed", { seq: 3 })],
+      ["an invalid frame", (line) => line.send(encodeFrame(0, FRAME_DATA, "not json"))],
+    ];
+    for (const [source, send] of sources) {
+      const { cores, path } = await scripted(subscribing());
+      const link = start(path);
       await online(link, 1);
-      cores[0]!.line(1, bad);
-      await until("Offline", () => link.state.kind === "Offline");
-      expect(link.state).toMatchObject({ code: "bad_line" });
+      send(cores[0]!);
+      await until(`Offline after ${source}`, () => link.state.kind === "Offline");
+      expect({ source, state: link.state }).toMatchObject({ source, state: { code: "bad_line", retryAt: RECONNECT_FIRST_MS } });
+      await read(() => cores[0]!.ended);
       expect(cores[0]!.ended).toBe(true);
       await link.close();
     }
   });
 
-  it("ends a line whose subscribe answer has no snapshot, and tries again", async () => {
-    const { cores, connect } = scripted((method) => (method === "events.subscribe" ? { channel: 1, seq: 1, terminals: { t1: {} } } : { value: null, version: 0 }));
-    const link = start("scripted", connect);
+  it("code bad_line: a subscribe answer without its snapshot ends the line, and it is tried again", async () => {
+    const { cores, path } = await scripted((method) => (method === "events.subscribe" ? { channel: 1, seq: 1, terminals: { t1: {} } } : { value: null, version: 0 }));
+    const link = start(path);
     await until("Offline", () => link.state.kind === "Offline");
     expect(cores[0]!.calls).toEqual(["hello", "events.subscribe"]);
-    expect(cores[0]!.ended).toBe(true);
     expect(link.state).toMatchObject({ code: "bad_line", retryAt: RECONNECT_FIRST_MS });
+    await read(() => cores[0]!.ended);
+    expect(cores[0]!.ended).toBe(true);
   });
 
-  it("is incompatible with a core of another protocol generation", async () => {
-    const { cores, connect } = scripted(subscribing(), { ...HELLO, generation: 2 });
-    const link = start("scripted", connect);
+  // the connection's own timers are real time: the link is given a short one, so these cases wait SHORT_MS, not 10 s
+  const SHORT_MS = 50;
+
+  it("code timeout: a hello never answered", async () => {
+    const { cores, path } = await scripted(subscribing(), null);
+    const link = start(path, undefined, SHORT_MS);
+    await until("Offline", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "timeout", retryAt: RECONNECT_FIRST_MS });
+    expect(cores[0]!.calls).toEqual(["hello"]);
+  });
+
+  it("code timeout: a doc.get never answered on a line silent since", async () => {
+    const { cores, path } = await scripted((method, params, line) => (method === "doc.get" ? HOLD : subscribing()(method, params, line)));
+    const link = start(path, undefined, SHORT_MS);
+    await until("Offline", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "timeout", retryAt: RECONNECT_FIRST_MS });
+    expect(cores[0]!.calls).toEqual(COMING_UP);
+  });
+
+  it("code timeout: a doc.get never answered while the event stream keeps bringing heartbeats", async () => {
+    const { cores, path } = await scripted((method, params, line) => {
+      if (method !== "doc.get") return subscribing()(method, params, line);
+      line.notify(1, "heartbeat", { seq: 1 });
+      return HOLD;
+    });
+    const link = start(path, undefined, SHORT_MS);
+    await until("Offline", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "timeout", retryAt: RECONNECT_FIRST_MS });
+    expect(cores[0]!.calls).toEqual(COMING_UP);
+  });
+
+  it("code call_failed: the core refuses events.subscribe, either doc.get, or a re-read", async () => {
+    for (const refused of ["events.subscribe", "doc.get herdr-app", "doc.get ovis-layout"]) {
+      const { cores, path } = await scripted((method, params, line) => {
+        if ((method === "doc.get" ? `doc.get ${String(params["name"])}` : method) === refused) throw new Error("refused here");
+        return subscribing()(method, params, line);
+      });
+      const link = start(path);
+      await until(`Offline when ${refused} is refused`, () => link.state.kind === "Offline");
+      expect({ refused, state: link.state }).toMatchObject({ refused, state: { code: "call_failed" } });
+      expect(cores[0]!.calls).toContain(refused);
+      await link.close();
+    }
+    let reads = 0;
+    const { cores, path } = await scripted((method, params, line) => {
+      if (method === "doc.get" && ++reads > 2) throw new Error("refused here");
+      return subscribing()(method, params, line);
+    });
+    const link = start(path);
+    await online(link, 1);
+    cores[0]!.notify(1, "event", { seq: 2, type: "doc", data: { name: "ovis-layout", version: 1 } });
+    await until("Offline when the re-read is refused", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "call_failed" });
+    expect(cores[0]!.calls).toEqual([...COMING_UP, "doc.get ovis-layout"]);
+  });
+
+  it("code refused: the test-session guard keeps the user's own core out of reach", async () => {
+    const saved = process.env["HERDR_TEST_SESSION"];
+    process.env["HERDR_TEST_SESSION"] = "ovis-test-link";
+    try {
+      // the user's default socket as hc works it out in this run (its XDG_RUNTIME_DIR is this test's own folder)
+      const link = start(join(dir, "run", "herdr-core", "default.sock"));
+      await until("NoCore", () => link.state.kind === "NoCore");
+      expect(link.state).toEqual({ kind: "NoCore", code: "refused", reason: expect.any(String) });
+    } finally {
+      if (saved === undefined) delete process.env["HERDR_TEST_SESSION"];
+      else process.env["HERDR_TEST_SESSION"] = saved;
+    }
+  });
+
+  it("code unreachable: a socket that cannot be opened at all", async () => {
+    // longer than a unix socket path may be: the connect fails before any core could answer
+    const link = start(join(dir, `${"u".repeat(120)}.sock`));
+    await until("NoCore", () => link.state.kind === "NoCore");
+    expect(link.state).toEqual({ kind: "NoCore", code: "unreachable", reason: expect.any(String) });
+  });
+
+  it("code silent: the silence deadline reached by fire() wins over a call still waiting for its own timeout", async () => {
+    const { cores, path } = await scripted((method, params, line) => (method === "terminal.get" ? HOLD : subscribing()(method, params, line)));
+    const link = start(path);
+    await online(link, 1);
+    const pending = failure(link.call("terminal.get", { terminal: "t1" }, 60_000));
+    await until("the call at the core", () => cores[0]!.calls.includes("terminal.get"));
+    now = LINE_SILENCE_MS;
+    link.fire();
+    expect(link.state).toMatchObject({ kind: "Offline", code: "silent" });
+    expect(await pending).toBe("closed");
+  });
+
+  it("code bad_hello: a core of another protocol generation", async () => {
+    const { cores, path } = await scripted(subscribing(), { ...HELLO, generation: 2 });
+    const link = start(path);
     await until("Incompatible", () => link.state.kind === "Incompatible");
     expect(link.state).toEqual({ kind: "Incompatible", code: "bad_hello", missing: [], reason: expect.any(String) });
     expect(cores[0]!.calls).toEqual(["hello"]);
@@ -448,8 +554,8 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
   });
 
   it("drops events at or below the seq of missed, and passes an event about a terminal it does not know", async () => {
-    const { cores, connect } = scripted(subscribing([{ address: "t1", state: "live", turn: 0, labels: {}, status: { state: "working", app: "codex" } }]));
-    const link = start("scripted", connect);
+    const { cores, path } = await scripted(subscribing([{ address: "t1", state: "live", turn: 0, labels: {}, status: { state: "working", app: "codex" } }]));
+    const link = start(path);
     await online(link, 1);
     const core = cores[0]!;
     const seqs = () => notices.flatMap((notice) => (notice.type === "event" ? [notice.seq] : []));
@@ -470,13 +576,14 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
 
   it("fails a call whose line ended before its answer, and no answer reaches it from the new line", async () => {
     let hold = true;
-    const { cores, connect } = scripted((method) => (method === "terminal.get" && hold ? HOLD : subscribing()(method)));
-    const link = start("scripted", connect);
+    const { cores, path } = await scripted((method, params, line) => (method === "terminal.get" && hold ? HOLD : subscribing()(method, params, line)));
+    const link = start(path);
     await online(link, 1);
     const pending = failure(link.call("terminal.get", { terminal: "t1" }));
     await until("the call at the core", () => cores[0]!.calls.includes("terminal.get"));
     cores[0]!.end();
-    expect(await pending).not.toBe("answered");
+    expect(await pending).toBe("closed");
+    await until("Offline", () => link.state.kind === "Offline");
     expect(link.state).toMatchObject({ kind: "Offline", code: "closed" });
     hold = false;
     now = RECONNECT_FIRST_MS;
@@ -488,12 +595,12 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
 
   it("reads a layout document again when hc says it changed, and only then", async () => {
     const versions: Record<string, number> = { "herdr-app": 0, "ovis-layout": 0 };
-    const { cores, connect } = scripted((method, params) => {
+    const { cores, path } = await scripted((method, params, line) => {
       if (method === "doc.get") return { value: null, version: versions[String(params["name"])] };
       if (method === "machine.list") return { machines: [] };
-      return subscribing()(method);
+      return subscribing()(method, params, line);
     });
-    const link = start("scripted", connect);
+    const link = start(path);
     await online(link, 1);
     const core = cores[0]!;
     const reads = () => core.calls.filter((call) => call.startsWith("doc.get"));
@@ -569,8 +676,8 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
   });
 
   it("backs off a core that breaks its line right after coming up, and starts again at the first wait only after a stable line", async () => {
-    const { cores, connect } = scripted(subscribing());
-    const link = start("scripted", connect);
+    const { cores, path } = await scripted(subscribing());
+    const link = start(path);
     const waits: number[] = [];
     for (let epoch = 1; epoch <= 6; epoch++) {
       await online(link, epoch);
@@ -587,6 +694,37 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     cores.at(-1)!.line(1, "not json");
     await until("Offline after a stable line", () => link.state.kind === "Offline");
     expect(link.state).toMatchObject({ code: "bad_line", retryAt: now + RECONNECT_FIRST_MS });
+  });
+
+  it("keeps the first of two errors notify throws in one burst, and connect() throws a kept error as fire() does", async () => {
+    const path = socket();
+    const core = new FakeHcCore();
+    await serve(core, path);
+    const thrown: Record<string, Error> = { "state Online": new Error("first"), "state Offline": new Error("second") };
+    const link = openLink({
+      socket: path,
+      now: () => now,
+      model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
+      notify: (notice) => {
+        notices.push(notice);
+        wake();
+        const key = notice.type === "state" ? `state ${notice.state.kind}` : notice.type;
+        const error = thrown[key];
+        delete thrown[key];
+        if (error) throw error;
+      },
+    });
+    links.push(link);
+    // Online throws, which ends the line; the Offline it causes throws again in the same burst
+    await until("Offline", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "notify_failed", retryAt: RECONNECT_FIRST_MS });
+    expect(() => link.fire()).toThrow("first");
+    expect([...link.deadlines()]).toEqual([["reconnect", RECONNECT_FIRST_MS]]);
+    expect(() => link.fire()).not.toThrow();
+    // connect() in place of the waiting retry: what the notice it makes throws comes back from connect() itself
+    thrown["state Connecting"] = new Error("third");
+    expect(() => link.connect()).toThrow("third");
+    await online(link, 2);
   });
 
   it("refuses calls once closed, and closes the event stream before its line", async () => {
