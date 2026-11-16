@@ -54,11 +54,11 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
     for (const sub of ["state", "config", "run", "home"]) mkdirSync(join(root, sub), { mode: 0o700 });
     const { HC_SOCKET: _named, ...env } = isolatedHcEnv(root);
     plain = env;
-    // stopTestCores stops only an environment that names its socket: the one the rule gives
+    // the helper runs hc only in an environment that names its socket: the one the rule gives
     core = { env: { ...env, HC_SOCKET: coreSocket({ env }).path }, pids: [] };
     for (const signal of SIGNALS) process.once(signal, onSignal);
     await output(["server", "start"], env);
-    core.pids = await corePids(bin!, env);
+    core.pids = await corePids(bin!, core.env);
   }, TEST_MS);
 
   afterAll(async () => {

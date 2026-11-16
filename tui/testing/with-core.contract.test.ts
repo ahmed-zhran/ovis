@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { IsolatedCore, pidAlive } from "./isolated-core.ts";
+import { IsolatedCore, pidAlive } from "../../scripts/test-hc.ts";
 
 /**
  * The helper end to end, against a real hc where OVIS_TEST_HC_BIN names one: the command's

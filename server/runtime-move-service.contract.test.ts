@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isolatedHcEnv, stopIsolatedCore } from "../scripts/test-hc.ts";
+import { isolatedHcEnv, stopTestCores } from "../scripts/test-hc.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MovePlan } from "../shared/runtime-move.ts";
@@ -47,7 +47,7 @@ describe.skipIf(!bin)("move of herdr's session to a real herdr-core", () => {
 
   afterAll(async () => {
     hc?.close();
-    await stopIsolatedCore(bin!, env);
+    await stopTestCores(bin!, [{ env, pids: [] }]);
     if (workspace) await workspaceClose(workspace);
     if (originalHcEnv === undefined) delete process.env["OVIS_HC_ENV"]; else process.env["OVIS_HC_ENV"] = originalHcEnv;
     if (originalHcBin === undefined) delete process.env["OVIS_HC_BIN"]; else process.env["OVIS_HC_BIN"] = originalHcBin;

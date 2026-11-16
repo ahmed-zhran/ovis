@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isolatedHcEnv, stopIsolatedCore } from "../../scripts/test-hc.ts";
+import { isolatedHcEnv, stopTestCores } from "../../scripts/test-hc.ts";
 import { workspaceCreate } from "../herdr/client.ts";
 import { coreDestination } from "../runtime-move-service.ts";
 import { startRuntime } from "./runtime.ts";
@@ -32,7 +32,7 @@ describe.skipIf(!bin || process.platform === "win32")("terminals Ovis starts on 
   }, TEST_MS);
 
   afterAll(async () => {
-    await stopIsolatedCore(bin!, env);
+    await stopTestCores(bin!, [{ env, pids: [] }]);
     for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
     rmSync(root, { recursive: true, force: true });
   });

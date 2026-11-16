@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
-import { IsolatedCore, type StopReport } from "../../tui/testing/isolated-core.ts";
+import { IsolatedCore, type StopReport } from "../../scripts/test-hc.ts";
 import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
 import { FakeHcCore, type FakeProgram, socketTransport } from "./core.fake.ts";
 

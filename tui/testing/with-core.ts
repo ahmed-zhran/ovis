@@ -21,7 +21,7 @@
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname, resolve } from "node:path";
-import { coreFolder, IsolatedCore, stoppedCleanly } from "./isolated-core.ts";
+import { coreFolder, IsolatedCore, stoppedCleanly } from "../../scripts/test-hc.ts";
 
 const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- <command...>";
 /** options a later row builds; named now so a call with them fails clearly */
