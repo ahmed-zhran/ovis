@@ -148,6 +148,7 @@ describe("herdr socket", () => {
     "server/herdr/client.ts": "the one herdr RPC client: one connection per call, plus subscribeEvents",
     "server/herdr-marker.ts": "a liveness probe: connects and ends at once, sends no request",
     "server/account/recovery.ts": "ovis recover's own private recovery socket in this PC's state folder, not herdr's",
+    "server/herdr-core/socket-transport.ts": "herdr-core's socket, not herdr's: a line that never starts a core, for a client that must not",
   };
   const NET_CONNECT_ALLOWED: Record<string, string> = {
     "server/ssh-askpass.ts": "the SSH askpass helper's own private socket, not herdr's",

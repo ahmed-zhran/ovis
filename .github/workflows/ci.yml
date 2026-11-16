@@ -306,6 +306,7 @@ jobs:
           # one file per line: a new live test file is added by adding its line
           files=(
             ./server/herdr-core/live.test.ts
+            ./server/herdr-core/socket-transport.live.test.ts
           )
           while read -r version sha256; do
             [ -n "$version" ] || continue
