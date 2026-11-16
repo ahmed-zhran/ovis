@@ -85,3 +85,22 @@ export const CONFIG_TEXT_MAX_CHARS = 80;
 export const REFUSALS_SHOWN = 20;
 /** The most graphemes a one-line text field (rename, new tab name, goto) holds; typing or pasting past it is cut. */
 export const TEXT_FIELD_MAX_GRAPHEMES = 256;
+
+/**
+ * A pane's first paint normally ends at hc's mark. Without one it counts as complete once the stream
+ * was quiet this long with every byte of it credited back, so a core that changes the mark costs a
+ * pane this wait and not its life.
+ */
+export const PAINT_QUIET_MS = 1_000;
+/**
+ * How long a pane waits after the last change of its rectangle, or the last `size` event another
+ * viewer caused, before it attaches again: a window being dragged, or a viewer resizing in steps,
+ * costs one new attach and not one per step.
+ */
+export const REATTACH_SETTLE_MS = 150;
+/**
+ * How often in a row a pane attaches again by itself after its stream was dropped though its terminal
+ * lives, or after its emulator died, before it is Failed and waits for the user's retry. Counted from
+ * the last time the pane was live.
+ */
+export const PANE_REOPEN_LIMIT = 3;
