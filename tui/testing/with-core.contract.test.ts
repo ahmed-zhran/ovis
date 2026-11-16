@@ -153,7 +153,9 @@ function gatedHc(name: string, options: { gate?: "start" | "stop"; noStop?: bool
 describe("with-core's options", () => {
   for (const [what, args, env] of [
     ["an unknown option", ["--frobnicate", "--", "true"], {}],
-    ["an option a later row adds", ["--pty", "--", "true"], {}],
+    ["--size without --pty", ["--no-core", "--size", "40x5", "--", "true"], {}],
+    ["a --size that is not COLSxROWS", ["--no-core", "--pty", "--size", "40", "--", "true"], {}],
+    ["an --answer that is not y or n", ["--no-core", "--pty", "--answer", "maybe", "--", "true"], {}],
     ["no command", ["--no-core"], {}],
     ["a limit that is not a number", ["--limit", "soon", "--", "true"], {}],
     ["no hc named", ["--", "true"], { OVIS_TEST_HC_BIN: undefined }],
@@ -235,6 +237,43 @@ describe("with-core's options", () => {
     // the stand-in does log when it is run
     expect(await Bun.spawn([join(dir, "hc"), "control"], { env }).exited).toBe(0);
     expect(readFileSync(log, "utf8")).toBe("control\n");
+  }, TEST_MS);
+});
+
+describe("with-core --pty", () => {
+  const noHc = () => callerEnv({ OVIS_TEST_HC_BIN: undefined });
+
+  it("runs the command on a pseudo-terminal of the given size, and --dump prints the final cells", async () => {
+    const run = helper(["--no-core", "--pty", "--size", "30x4", "--dump", "--", "sh", "-c", "test -t 0 && test -t 1 && stty size && printf hello"], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toBe("4 30\nhello\n\n\n");
+    expect(leftovers(run)).toEqual(NOTHING_LEFT);
+  }, TEST_MS);
+
+  it("without --dump passes the output on as it comes", async () => {
+    const run = helper(["--no-core", "--pty", "--", "sh", "-c", "printf streamed"], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain("streamed");
+  }, TEST_MS);
+
+  it("--answer answers the [Y/n] question and --keys are typed only after the first frame", async () => {
+    const script = 'printf "start it? [Y/n] "; read a; printf "\\033[?2026h\\033[?2026l"; read b; echo "a=$a b=$b"';
+    const run = helper(["--no-core", "--pty", "--answer", "y", "--keys", "x,ctrl+v,y,enter", "--dump", "--", "sh", "-c", script], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain("a=y b=xy");
+  }, TEST_MS);
+
+  it("answers DA1 as a terminal does", async () => {
+    const script = "stty raw -echo; printf '\\033[c'; head -c 9 | od -An -tx1; stty sane";
+    const run = helper(["--no-core", "--pty", "--limit", "20", "--dump", "--", "sh", "-c", script], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain("1b 5b 3f 36 32 3b 32 32 63");
+  }, TEST_MS);
+
+  it("ends a command that outlives --limit through the PTY host, and leaves nothing", async () => {
+    const run = helper(["--no-core", "--pty", "--limit", "1", "--", "sh", "-c", "printf running; exec sleep 30"], noHc());
+    expect(await run.exited).toBe(124);
+    expect(leftovers(run)).toEqual(NOTHING_LEFT);
   }, TEST_MS);
 });
 

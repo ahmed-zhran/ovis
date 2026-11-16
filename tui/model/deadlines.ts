@@ -25,6 +25,11 @@ export const PASTE_LIMIT_BYTES = 1024 * 1024;
 /** The most bytes of one escape sequence kept; a longer one is consumed to its end and reported cut to this. */
 export const SEQUENCE_LIMIT_BYTES = 4096;
 
+/** A drain of stdin ends when no more bytes arrive within this long (probe d: one `readable` wait, repeated). */
+export const DRAIN_WAIT_MS = 50;
+/** After a signal gave the terminal back, the host ends the process once its end listeners settle, or after this long. */
+export const SIGNAL_END_WAIT_MS = 2000;
+
 export const NO_DEADLINES: Deadlines = new Map();
 
 /** `deadlines` with `name` due at `at`, replacing that name's earlier time if it had one. */

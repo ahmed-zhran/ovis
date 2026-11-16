@@ -1,7 +1,8 @@
 /**
  * Runs one command against a herdr-core of its own, and always cleans up:
  *
- *   bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- [--] <command...>
+ *   bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>]
+ *     [--pty [--size COLSxROWS] [--keys <list>] [--answer y|n] [--dump]] -- [--] <command...>
  *
  * Bun drops a `--` that comes right after the script, so a command whose first word starts with a
  * dash goes after `-- --`: one more `--` right after the one that ends the options is dropped here.
@@ -19,6 +20,14 @@
  * setsid()), which a signal or the time limit ends as a whole, while the helper has not reaped it.
  * The core's cleanup goes through scripts/test-hc.ts, which kills only a pid proven to be that core's.
  *
+ * `--pty` runs the command on a pseudo-terminal of its own (tui/testing/pty.ts; default 80x24, or
+ * `--size`) instead of on the helper's stdio, and answers its DA1 and DECRQM 2026 queries the way a
+ * terminal does. What it prints goes to stdout as it comes, or, with `--dump`, only the final cell
+ * grid as text, one line a row, once the command ended. `--keys` types a comma-separated list after
+ * the first frame (the first `ESC[?2026l`): `enter`, `tab`, `esc`, `space`, `backspace`, `up`,
+ * `down`, `left`, `right` and `ctrl+<letter>` are keys, any other item is typed as written.
+ * `--answer y|n` answers the launcher's `[Y/n]` question with that letter and Enter.
+ *
  * Exit code: the command's (128 + n when a signal n ended it); 128 + n when the helper got signal
  * n; 124 when `--limit` (default 600 s) ran out; 2 for a wrong call; 125 when the core could not
  * be started or the cleanup had to kill, met a pid it could not prove the core's, or left something.
@@ -30,10 +39,18 @@ import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:
 import { constants } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { coreFolder, IsolatedCore, signalChildGroup, stoppedCleanly } from "../../scripts/test-hc.ts";
+import { GhosttyEngine, GhosttyModule } from "../../shared/ghostty/engine.ts";
+import { runOnPty, type PtyRun } from "./pty.ts";
 
-const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- [--] <command...>";
-/** options a later row builds; named now so a call with them fails clearly */
-const LATER = new Set(["--pty", "--size", "--keys", "--answer", "--dump"]);
+const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] [--pty [--size COLSxROWS] [--keys <list>] [--answer y|n] [--dump]] -- [--] <command...>";
+const WASM = join(import.meta.dir, "..", "..", "shared", "ghostty", "ghostty-vt.wasm");
+const FIRST_FRAME_END = "\x1b[?2026l";
+const QUESTION = "[Y/n]";
+/** what a terminal answers to the queries a screen's start probe ends with */
+const ANSWERS: [query: string, answer: string][] = [["\x1b[c", "\x1b[?62;22c"], ["\x1b[?2026$p", "\x1b[?2026;2$y"]];
+const KEYS: Record<string, string> = {
+  enter: "\r", tab: "\t", esc: "\x1b", space: " ", backspace: "\x7f", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
+};
 const COMMAND_GRACE_MS = 5000;
 const EXIT_USAGE = 2;
 const EXIT_LIMIT = 124;
@@ -41,7 +58,51 @@ const EXIT_FAILED = 125;
 
 class Refused extends Error {}
 
-interface Options { mode: "core" | "no-core" | "core-env"; coreEnv: string | null; limitSeconds: number; command: string[] }
+/** The command on a pseudo-terminal: its output passed on (or kept for the dump), queries answered, keys typed. */
+function startPty(choice: PtyChoice, command: string[], env: Record<string, string>, limitSeconds: number): PtyRun {
+  let tail = "";
+  const run: PtyRun = runOnPty({
+    command, env, cols: choice.cols, rows: choice.rows, deadlineMs: limitSeconds * 1000 + COMMAND_GRACE_MS,
+    onData: (text) => {
+      if (!choice.dump) process.stdout.write(text);
+      const window = tail + text;
+      for (const [query, answer] of ANSWERS) {
+        for (let at = window.indexOf(query); at !== -1; at = window.indexOf(query, at + 1)) if (at + query.length > tail.length) run.type(answer);
+      }
+      tail = window.slice(-16);
+    },
+  });
+  const keys = choice.keys;
+  if (keys) void run.until(FIRST_FRAME_END, "the first frame").then(() => run.type(keys.split(",").map(keyBytes).join("")), () => {});
+  const answer = choice.answer;
+  if (answer) void run.until(QUESTION, "the question").then(() => run.type(`${answer}\r`), () => {});
+  return run;
+}
+
+/** The cell grid the output leaves on a terminal of this size, one line a row, trailing blanks cut. */
+async function dumpGrid(output: string, cols: number, rows: number): Promise<string> {
+  const module = new GhosttyModule(new WebAssembly.Instance(new WebAssembly.Module(await Bun.file(WASM).arrayBuffer()), {}));
+  const engine = new GhosttyEngine(module, cols, rows, { widths: "core", images: false });
+  try {
+    engine.write(new TextEncoder().encode(output));
+    const lines: string[] = Array.from({ length: rows }, () => "");
+    engine.frame((y, runs) => { lines[y] = runs.flatMap((run) => run.cells.map((cell) => cell.text)).join("").trimEnd(); });
+    return `${lines.join("\n")}\n`;
+  } finally {
+    engine.dispose();
+  }
+}
+
+interface PtyChoice { cols: number; rows: number; keys: string | null; answer: "y" | "n" | null; dump: boolean }
+
+interface Options { mode: "core" | "no-core" | "core-env"; coreEnv: string | null; limitSeconds: number; pty: PtyChoice | null; command: string[] }
+
+/** One key or text of a `--keys` list, as the bytes a terminal sends for it. */
+function keyBytes(item: string): string {
+  const ctrl = /^ctrl\+([a-z])$/.exec(item);
+  if (ctrl) return String.fromCharCode(ctrl[1]!.charCodeAt(0) - 96);
+  return KEYS[item] ?? item;
+}
 
 /**
  * Options come first; the first `--`, or the first word that is not an option, starts the command,
@@ -49,7 +110,10 @@ interface Options { mode: "core" | "no-core" | "core-env"; coreEnv: string | nul
  * the script, so `-- sh -c x` arrives as `sh -c x` and `-- -- -x` as `-- -x`.
  */
 function parse(args: string[]): Options {
-  const options: Options = { mode: "core", coreEnv: null, limitSeconds: 600, command: [] };
+  const options: Options = { mode: "core", coreEnv: null, limitSeconds: 600, pty: null, command: [] };
+  let pty = false;
+  const choice: PtyChoice = { cols: 80, rows: 24, keys: null, answer: null, dump: false };
+  const ptyOnly: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]!;
     if (flag === "--" || !flag.startsWith("-")) {
@@ -67,10 +131,31 @@ function parse(args: string[]): Options {
       const seconds = Number(args[++i]);
       if (!Number.isFinite(seconds) || seconds <= 0) throw new Refused("--limit needs a number of seconds above 0");
       options.limitSeconds = seconds;
-    } else if (LATER.has(flag)) throw new Refused(`${flag} is not available yet`);
-    else throw new Refused(`unknown option ${flag} (a command whose first word starts with a dash goes after -- --); ${USAGE}`);
+    } else if (flag === "--pty") pty = true;
+    else if (flag === "--size") {
+      const size = /^(\d+)x(\d+)$/.exec(args[++i] ?? "");
+      const [cols, rows] = [Number(size?.[1]), Number(size?.[2])];
+      if (!size || cols < 1 || rows < 1 || cols > 1000 || rows > 1000) throw new Refused("--size needs COLSxROWS, each 1 to 1000");
+      Object.assign(choice, { cols, rows });
+      ptyOnly.push(flag);
+    } else if (flag === "--keys") {
+      const keys = args[++i];
+      if (!keys) throw new Refused("--keys needs a comma-separated list");
+      choice.keys = keys;
+      ptyOnly.push(flag);
+    } else if (flag === "--answer") {
+      const answer = args[++i];
+      if (answer !== "y" && answer !== "n") throw new Refused("--answer needs y or n");
+      choice.answer = answer;
+      ptyOnly.push(flag);
+    } else if (flag === "--dump") {
+      choice.dump = true;
+      ptyOnly.push(flag);
+    } else throw new Refused(`unknown option ${flag} (a command whose first word starts with a dash goes after -- --); ${USAGE}`);
   }
   if (options.command.length === 0) throw new Refused(`no command after --; ${USAGE}`);
+  if (!pty && ptyOnly.length > 0) throw new Refused(`${ptyOnly[0]} needs --pty`);
+  options.pty = pty ? choice : null;
   return options;
 }
 
@@ -133,11 +218,14 @@ async function main(): Promise<number> {
   let interrupted = false;
   let finishing: Promise<number> | null = null;
   let child: ReturnType<typeof Bun.spawn> | null = null;
+  let ptyRun: PtyRun | null = null;
   let core: IsolatedCore | null = null;
   let folder: { root: string; env: Record<string, string> } | null = null;
 
   // the group is signalled only while the child is not reaped (signalChildGroup): a reaped child's pid may be someone else's
   const stopCommand = async (signal: NodeJS.Signals) => {
+    // the PTY host this helper started hangs the command's group up, and kills what is left
+    if (ptyRun) return ptyRun.stop();
     if (!child || !signalChildGroup(child, signal)) return;
     if (await Promise.race([child.exited.then(() => true), Bun.sleep(COMMAND_GRACE_MS).then(() => false)])) return;
     if (signalChildGroup(child, "SIGKILL")) await child.exited;
@@ -211,7 +299,21 @@ async function main(): Promise<number> {
     Object.assign(env, coreEnv);
   }
 
-  if (!finishing && forced === null) {
+  if (!finishing && forced === null && options.pty) {
+    // stdout carries the command's output (or the dump) alone: the PTY host's choice is logged to stderr
+    console.log = console.error;
+    try {
+      ptyRun = startPty(options.pty, options.command, env, options.limitSeconds);
+    } catch (error) {
+      console.error(`with-core: cannot run ${options.command[0]} on a pseudo-terminal: ${error instanceof Error ? error.message : String(error)}`);
+      forced ??= 127;
+    }
+    if (ptyRun) {
+      const code = await ptyRun.exited;
+      if (options.pty.dump) process.stdout.write(await dumpGrid(ptyRun.output(), options.pty.cols, options.pty.rows));
+      forced ??= code ?? EXIT_FAILED;
+    }
+  } else if (!finishing && forced === null) {
     try {
       child = Bun.spawn(options.command, { env, stdin: "inherit", stdout: "inherit", stderr: "inherit", detached: true });
     } catch (error) {
