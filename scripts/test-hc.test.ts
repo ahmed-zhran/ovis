@@ -2,7 +2,7 @@ import { afterAll, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, stopTestCores } from "./test-hc.ts";
+import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, recordedStarts, signalChildGroup, stopTestCores, stoppedCleanly } from "./test-hc.ts";
 
 // A stand-in hc that writes down how it was run: no real core is started or stopped.
 const root = mkdtempSync(join(tmpdir(), "ovis-test-hc-"));
@@ -64,6 +64,8 @@ it("kills no recorded pid that is now a process of another core, and names it un
   try {
     const result = await stopTestCores(naming("hc-other", [stranger.pid]), [{ env, pids: [stranger.pid] }], 200);
     expect({ result, alive: alive(stranger.pid) }).toEqual({ result: { stopped: [0], killed: [], unproven: [stranger.pid], socketsLeft: [env["HC_SOCKET"]] }, alive: true });
+    // an unproven pid is a leak: the stop was not clean
+    expect(stoppedCleanly({ pids: [stranger.pid], killed: [], unproven: [stranger.pid], alive: [], socketGone: true, rootGone: true })).toBe(false);
   } finally {
     stranger.kill();
     await stranger.exited;
@@ -81,6 +83,65 @@ it("kills no pid that no status named, even one started in the core's own enviro
     stranger.kill();
     await stranger.exited;
   }
+});
+
+it.skipIf(!proc)("proves a core started without HC_SOCKET by the socket its session and runtime folder name", async () => {
+  const { HC_SOCKET: _named, ...unnamed } = isolatedHcEnv(join(root, "unnamed"));
+  // where hc puts the socket of a core started without HC_SOCKET, and that socket's file, as a running core's is there
+  const socket = join(unnamed["XDG_RUNTIME_DIR"]!, "herdr-core", `${unnamed["HC_SESSION"]}.sock`);
+  mkdirSync(join(unnamed["XDG_RUNTIME_DIR"]!, "herdr-core"), { recursive: true });
+  writeFileSync(socket, "");
+  // a core started so, and a process of the same session in another runtime folder
+  const core = Bun.spawn(["sleep", "30"], { env: unnamed });
+  const other = Bun.spawn(["sleep", "30"], { env: { ...unnamed, XDG_RUNTIME_DIR: join(root, "elsewhere-run") } });
+  try {
+    const result = await stopTestCores(naming("hc-unnamed", [core.pid, other.pid]), [{ env: { ...unnamed, HC_SOCKET: socket }, pids: [core.pid, other.pid] }], 200);
+    expect({ killed: result.killed, unproven: result.unproven, alive: [core.pid, other.pid].filter(alive) }).toEqual({ killed: [core.pid], unproven: [other.pid], alive: [other.pid] });
+  } finally {
+    for (const sleep of [core, other]) sleep.kill();
+    await Promise.all([core.exited, other.exited]);
+  }
+});
+
+it("kills no recorded pid whose start time is not the one recorded with it", async () => {
+  const env = withSocket("restarted");
+  // a sleep whose environment names the core's socket, as the core's own does: only its start time tells it apart
+  const other = Bun.spawn(["sleep", "30"], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"]! } });
+  try {
+    expect(await corePids(naming("hc-restarted", [other.pid]), env)).toEqual([other.pid]);
+    // what a pid recorded for a process that has since ended and whose number came back would carry
+    recordedStarts.set(other.pid, "1");
+    const result = await stopTestCores(silent, [{ env, pids: [other.pid] }], 200);
+    expect({ result, alive: alive(other.pid) }).toEqual({ result: { stopped: [0], killed: [], unproven: [other.pid], socketsLeft: [env["HC_SOCKET"]] }, alive: true });
+  } finally {
+    other.kill();
+    await other.exited;
+  }
+});
+
+it.skipIf(!proc)("signals a child's process group only while the child is not reaped, and never a pid that cannot be its own group", async () => {
+  // a child that leads a group of its own (detached) and leaves a member in it, which ends when the child's stdin closes
+  const child = Bun.spawn(["sh", "-c", "exec 3<&0; cat <&3 >/dev/null & echo $!"], { env: { PATH: "/usr/bin:/bin" }, stdin: "pipe", stdout: "pipe", stderr: "ignore", detached: true });
+  try {
+    const member = Number((await new Response(child.stdout).text()).trim());
+    await child.exited;
+    // the child is reaped: its pid, and so its group's, may belong to someone else by now
+    expect({ sent: signalChildGroup(child, "SIGTERM"), memberAlive: alive(member) }).toEqual({ sent: false, memberAlive: true });
+  } finally {
+    child.stdin.end();
+  }
+  // a reaped child whose number now leads another group: a detached sleep of the test's own stands in for that group
+  const reused = Bun.spawn(["sleep", "30"], { env: { PATH: "/usr/bin:/bin" }, detached: true });
+  try {
+    expect({ sent: signalChildGroup({ pid: reused.pid, exitCode: 0, signalCode: null }, "SIGTERM"), alive: alive(reused.pid) }).toEqual({ sent: false, alive: true });
+  } finally {
+    reused.kill();
+    await reused.exited;
+  }
+  // signal 0 only asks, so even a wrong answer here signals no one
+  const ownGroup = Number(readFileSync("/proc/self/stat", "latin1").split(") ")[1]!.split(" ")[2]);
+  const unreaped = { exitCode: null, signalCode: null };
+  for (const pid of [undefined, 0, 1, ownGroup]) expect({ pid, sent: signalChildGroup({ ...unreaped, pid: pid as number }, 0) }).toEqual({ pid, sent: false });
 });
 
 it("refuses, before any hc command, an environment that names no core of its own", async () => {
@@ -193,7 +254,6 @@ it.skipIf(!proc)("asks a core's status only while every recorded pid lives and i
   rmSync(record, { force: true });
   const env = withSocket("half");
   const living = await sleeper(env);
-  // recorded as a caller records a core it started: from that core's status, while it ran
   await corePids(naming("hc-half", [living]), env);
   const ended = Bun.spawn(["/bin/true"], { env: { PATH: "/usr/bin:/bin" } });
   await ended.exited;

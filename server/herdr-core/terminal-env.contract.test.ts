@@ -35,11 +35,11 @@ describe.skipIf(!bin || process.platform === "win32")("terminals Ovis starts on 
   }, TEST_MS);
 
   afterAll(async () => {
-    // a core that had to be killed, or a socket left, is a leak: it fails the suite (the hook outlasts the stop's 10 s wait)
-    const { killed, socketsLeft } = await stopTestCores(bin!, [{ env, pids }]);
+    // a core that had to be killed, a pid left that is not proven its own, or a socket left, is a leak: it fails the suite (the hook outlasts the stop's 10 s wait)
+    const { killed, unproven, socketsLeft } = await stopTestCores(bin!, [{ env, pids }]);
     for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
     rmSync(root, { recursive: true, force: true });
-    expect({ killed, socketsLeft }).toEqual({ killed: [], socketsLeft: [] });
+    expect({ killed, unproven, socketsLeft }).toEqual({ killed: [], unproven: [], socketsLeft: [] });
   }, TEST_MS);
 
   async function paneEnv(address: string): Promise<Record<string, string>> {

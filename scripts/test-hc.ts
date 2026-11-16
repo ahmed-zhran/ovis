@@ -4,7 +4,8 @@
  * itself (corePids, stopTestCores). Every hc command here first refuses an environment that is not
  * isolated (isolationProblem), the user's own core above all. A pid is killed only once it is proven
  * to still be the core or holder recorded for the test's own core (provenCore), so neither another
- * run's core under the same TMPDIR nor a process that got a recorded pid's number is ever touched.
+ * run's core under the same TMPDIR nor a process that got a recorded pid's number is ever touched;
+ * a test's own command is signalled as a group only while it is not reaped (signalChildGroup).
  *
  * hc is always run by the path the test gave: the installed `hc` may be a guard script that finds
  * the real program beside itself, which still works under a scratch HOME.
@@ -13,7 +14,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { userCore } from "../server/herdr-core/core-socket.ts";
+import { coreSocket, userCore } from "../server/herdr-core/core-socket.ts";
 
 /** the longest unix socket path the OS takes (sun_path less its terminating NUL) */
 const SOCKET_PATH_MAX = 107;
@@ -72,18 +73,32 @@ export const pidAlive = (pid: number): boolean => {
   }
 };
 
-/** when `pid` started (field 22 of /proc/<pid>/stat, after the command name, which may hold spaces), or null without /proc */
-function startTime(pid: number): string | null {
+/** The fields of /proc/<pid>/stat from the third (state) on, or null when the process is gone or there is no /proc. */
+function statFields(pid: number): string[] | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "latin1");
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+    // the second field, the name in parentheses, may hold spaces and parentheses itself
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
   } catch {
     return null;
   }
 }
 
-/** Every pid a status read named, with its start time then: a process that later gets the same number has another one. */
-const recordedStarts = new Map<number, string>();
+/** when `pid` started (field 22 of /proc/<pid>/stat, clock ticks after boot), or null */
+const startTime = (pid: number): string | null => statFields(pid)?.[19] ?? null;
+
+/** the process group `pid` is in (field 5 of /proc/<pid>/stat), or null */
+function processGroup(pid: number): number | null {
+  const group = statFields(pid)?.[2];
+  return group === undefined ? null : Number(group);
+}
+
+/**
+ * Every pid a status read of this helper named, with its start time read right then: a later process
+ * that gets the same number has another start time. Where there is no /proc nothing is recorded.
+ * Exported so a test can give a pid the start time of a process that has since ended.
+ */
+export const recordedStarts = new Map<number, string>();
 
 function record(pids: number[]): number[] {
   for (const pid of pids) {
@@ -94,19 +109,43 @@ function record(pids: number[]): number[] {
 }
 
 /**
- * Whether `pid` is still the process a status of the core at `socket` named: its start time is the one
- * recorded with it, and the environment it was started in, which a core and its holder keep, names that
- * socket as HC_SOCKET. A pid no status named, a process that got a recorded pid's number later and a
- * process of another core are not proven; without /proc nothing is.
+ * Whether `pid` is still the process a status of the core at `socket` named: it lives, its start time
+ * is the one recorded with it, and the environment it was started in (which a core and its holders
+ * keep) names that core's own socket: by HC_SOCKET, or without one through HC_SESSION and
+ * XDG_RUNTIME_DIR, as hc works it out (coreSocket). Without /proc nothing is proven.
  */
-function provenCore(pid: number, socket: string): boolean {
+export function provenCore(pid: number, socket: string): boolean {
   const recorded = recordedStarts.get(pid);
   if (recorded === undefined || startTime(pid) !== recorded) return false;
+  let environ: string;
   try {
-    return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`HC_SOCKET=${socket}`);
+    environ = readFileSync(`/proc/${pid}/environ`, "latin1");
   } catch {
     return false;
   }
+  const env = Object.fromEntries(environ.split("\0").filter((entry) => entry.includes("=")).map((entry) => [entry.slice(0, entry.indexOf("=")), entry.slice(entry.indexOf("=") + 1)]));
+  return coreSocket({ env }).path === socket;
+}
+
+/**
+ * Sends `signal` to the process group of a child the test started as the leader of a group of its own
+ * (Bun.spawn's `detached: true` runs it through setsid(), so its group's id is its pid), only while
+ * this process has not reaped it: once reaped, its number, and with it the group's, may be someone
+ * else's. Never for a pid that is missing, 0 or 1, this process's own group, or not a group leader;
+ * where there is no /proc, never. Answers whether the signal was sent.
+ */
+export function signalChildGroup(child: { pid: number; exitCode: number | null; signalCode: string | null }, signal: NodeJS.Signals | 0): boolean {
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  const pid = child.pid;
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  const own = processGroup(process.pid);
+  if (own === null || pid === own || processGroup(pid) !== pid) return false;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // the whole group ended meanwhile
+  }
+  return true;
 }
 
 /** A test's own core: the environment it was started in, and the pids of its core and holder known so far. */

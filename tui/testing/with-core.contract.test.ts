@@ -212,6 +212,15 @@ describe("with-core's options", () => {
     expect(refused.stderr()).not.toContain("root=");
   }, TEST_MS);
 
+  it("runs the command as the leader of a process group and session of its own", async () => {
+    // fields 1, 5 and 6 of /proc/<pid>/stat: the shell's pid, its process group and its session
+    const run = helper(["--no-core", "--", "sh", "-c", "cut -d' ' -f1,5,6 /proc/$$/stat"], callerEnv({ OVIS_TEST_HC_BIN: undefined }));
+    expect(await run.exited).toBe(0);
+    const [pid, group, session] = run.stdout().trim().split(" ").map(Number);
+    expect({ group, session }).toEqual({ group: pid, session: pid });
+    expect(leftovers(run)).toEqual(NOTHING_LEFT);
+  }, TEST_MS);
+
   it("--no-core starts no hc: a stand-in hc first on PATH logs nothing", async () => {
     const dir = join(scratch, "standin");
     mkdirSync(dir);

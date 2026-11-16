@@ -15,18 +15,21 @@
  *
  * The command gets the caller's environment without any HC_*, XDG_*, OVIS_* or HERDR_WEB_* name,
  * then the isolated core's (HC_SOCKET, HC_SESSION, XDG_*), a scratch HOME and HERDR_TEST_SESSION.
- * It runs in a process group of its own, which a signal or the time limit ends as a whole.
+ * It runs as the leader of a process group of its own (`detached: true`: Bun starts it through
+ * setsid()), which a signal or the time limit ends as a whole, while the helper has not reaped it.
+ * The core's cleanup goes through scripts/test-hc.ts, which kills only a pid proven to be that core's.
  *
  * Exit code: the command's (128 + n when a signal n ended it); 128 + n when the helper got signal
  * n; 124 when `--limit` (default 600 s) ran out; 2 for a wrong call; 125 when the core could not
- * be started or the cleanup had to kill or left something. Every path waits for the one cleanup.
- * stderr carries `root=<folder>` once the folder exists and `stopped pids=<a,b> killed=<..>` at the end.
+ * be started or the cleanup had to kill, met a pid it could not prove the core's, or left something.
+ * Every path waits for the one cleanup. stderr carries `root=<folder>` once the folder exists and
+ * `stopped pids=<a,b> killed=<..> unproven=<..>` at the end.
  */
 
 import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { coreFolder, IsolatedCore, stoppedCleanly } from "../../scripts/test-hc.ts";
+import { coreFolder, IsolatedCore, signalChildGroup, stoppedCleanly } from "../../scripts/test-hc.ts";
 
 const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] -- [--] <command...>";
 /** options a later row builds; named now so a call with them fails clearly */
@@ -133,13 +136,11 @@ async function main(): Promise<number> {
   let core: IsolatedCore | null = null;
   let folder: { root: string; env: Record<string, string> } | null = null;
 
+  // the group is signalled only while the child is not reaped (signalChildGroup): a reaped child's pid may be someone else's
   const stopCommand = async (signal: NodeJS.Signals) => {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const group = (name: NodeJS.Signals) => { try { process.kill(-child!.pid, name); } catch { /* the group is gone */ } };
-    group(signal);
+    if (!child || !signalChildGroup(child, signal)) return;
     if (await Promise.race([child.exited.then(() => true), Bun.sleep(COMMAND_GRACE_MS).then(() => false)])) return;
-    group("SIGKILL");
-    await child.exited;
+    if (signalChildGroup(child, "SIGKILL")) await child.exited;
   };
 
   /** The one cleanup: the command, then the core, then the folder. Every exit path awaits this promise. */
@@ -157,7 +158,7 @@ async function main(): Promise<number> {
       if (core) {
         const report = await core.stop();
         failed = !stoppedCleanly(report);
-        console.error(`with-core: stopped pids=${report.pids.join(",")} killed=${report.killed.join(",")} alive=${report.alive.join(",")} socket=${report.socketGone ? "gone" : "left"} root=${report.rootGone ? "gone" : "left"}`);
+        console.error(`with-core: stopped pids=${report.pids.join(",")} killed=${report.killed.join(",")} unproven=${report.unproven.join(",")} alive=${report.alive.join(",")} socket=${report.socketGone ? "gone" : "left"} root=${report.rootGone ? "gone" : "left"}`);
         return failed ? EXIT_FAILED : forced!;
       }
       // no core of ours: a socket in our folder means the command started one there
@@ -172,7 +173,7 @@ async function main(): Promise<number> {
           await stray.stop();
         }
       } else rmSync(folder.root, { recursive: true, force: true });
-      console.error(`with-core: stopped pids= killed= alive= socket=${existsSync(socket) ? "left" : "gone"} root=${existsSync(folder.root) ? "left" : "gone"}`);
+      console.error(`with-core: stopped pids= killed= unproven= alive= socket=${existsSync(socket) ? "left" : "gone"} root=${existsSync(folder.root) ? "left" : "gone"}`);
       return failed ? EXIT_FAILED : forced!;
     })();
     return finishing;

@@ -50,13 +50,13 @@ describe.skipIf(!bin)("move of herdr's session to a real herdr-core", () => {
 
   afterAll(async () => {
     hc?.close();
-    // a core that had to be killed, or a socket left, is a leak: it fails the suite (the hook outlasts the stop's 10 s wait)
-    const { killed, socketsLeft } = await stopTestCores(bin!, [{ env, pids }]);
+    // a core that had to be killed, a pid left that is not proven its own, or a socket left, is a leak: it fails the suite (the hook outlasts the stop's 10 s wait)
+    const { killed, unproven, socketsLeft } = await stopTestCores(bin!, [{ env, pids }]);
     if (workspace) await workspaceClose(workspace);
     if (originalHcEnv === undefined) delete process.env["OVIS_HC_ENV"]; else process.env["OVIS_HC_ENV"] = originalHcEnv;
     if (originalHcBin === undefined) delete process.env["OVIS_HC_BIN"]; else process.env["OVIS_HC_BIN"] = originalHcBin;
     rmSync(root, { recursive: true, force: true });
-    expect({ killed, socketsLeft }).toEqual({ killed: [], socketsLeft: [] });
+    expect({ killed, unproven, socketsLeft }).toEqual({ killed: [], unproven: [], socketsLeft: [] });
   }, TEST_MS);
 
   it("builds every workspace, tab and split on herdr-core, and ends all of it when the switch is refused", async () => {
