@@ -30,10 +30,12 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
   let root = "";
   /** set before the core is started, so the teardown stops whatever the start left */
   let core: TestCore | null = null;
+  /** the core's environment without HC_SOCKET: hc and coreSocket work out its socket from HC_SESSION and XDG_RUNTIME_DIR */
+  let plain: Record<string, string> = {};
   const lines: HcConnection[] = [];
   /** the one teardown: the test that stops the core and afterAll both await it */
-  let teardown: Promise<{ stopped: number[]; killed: number[]; unproven: number[] }> | null = null;
-  const stopCore = () => (teardown ??= core ? stopTestCores(bin!, [core], WAIT_MS) : Promise.resolve({ stopped: [], killed: [], unproven: [] }));
+  let teardown: ReturnType<typeof stopTestCores> | null = null;
+  const stopCore = () => (teardown ??= core ? stopTestCores(bin!, [core], WAIT_MS) : Promise.resolve({ stopped: [], killed: [], unproven: [], socketsLeft: [] }));
   /** a signal ends `bun test` without running afterAll: the same teardown runs first */
   const SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
   const onSignal = (signal: NodeJS.Signals) => {
@@ -51,7 +53,9 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
     root = mkdtempSync(join(tmpdir(), "ovis-hc-"));
     for (const sub of ["state", "config", "run", "home"]) mkdirSync(join(root, sub), { mode: 0o700 });
     const { HC_SOCKET: _named, ...env } = isolatedHcEnv(root);
-    core = { env, pids: [] };
+    plain = env;
+    // stopTestCores stops only an environment that names its socket: the one the rule gives
+    core = { env: { ...env, HC_SOCKET: coreSocket({ env }).path }, pids: [] };
     for (const signal of SIGNALS) process.once(signal, onSignal);
     await output(["server", "start"], env);
     core.pids = await corePids(bin!, env);
@@ -59,15 +63,15 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
 
   afterAll(async () => {
     for (const hc of lines) hc.close();
-    const { stopped, killed, unproven } = await stopCore();
+    const { stopped, killed, unproven, socketsLeft } = await stopCore();
     for (const signal of SIGNALS) process.off(signal, onSignal);
     // only once its pids are gone: a late hc child would otherwise run whatever hc PATH finds
     if (root) rmSync(root, { recursive: true, force: true });
-    expect({ stopped, killed, unproven }).toEqual({ stopped: core ? [0] : [], killed: [], unproven: [] });
+    expect({ stopped, killed, unproven, socketsLeft }).toEqual({ stopped: core ? [0] : [], killed: [], unproven: [], socketsLeft: [] });
   }, TEST_MS);
 
   it("coreSocket finds this core's socket without HC_SOCKET", async () => {
-    const found = coreSocket({ env: core!.env });
+    const found = coreSocket({ env: plain });
     expect(found.path.startsWith(root)).toBe(true);
     const transport = await connectCoreSocket(found.path);
     const hc = new HcConnection(() => transport);
@@ -77,7 +81,7 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
   }, TEST_MS);
 
   it("answers hello through HcConnection in generation 1 with the core's version", async () => {
-    const transport = await connectCoreSocket(coreSocket({ env: core!.env }).path);
+    const transport = await connectCoreSocket(coreSocket({ env: plain }).path);
     const hc = new HcConnection(() => transport);
     lines.push(hc);
     const hello = await hc.hello();
@@ -86,10 +90,10 @@ describe.skipIf(!bin || process.platform === "win32")("the socket transport agai
   }, TEST_MS);
 
   it("gives no_core once the core is stopped, and starts none", async () => {
-    const path = coreSocket({ env: core!.env }).path;
-    expect(await stopCore()).toEqual({ stopped: [0], killed: [], unproven: [] });
+    const path = coreSocket({ env: plain }).path;
+    expect(await stopCore()).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [] });
     expect(await failureOf(path)).toBe("no_core");
-    expect(coreSocket({ env: core!.env }).running).toBe(false);
+    expect(coreSocket({ env: plain }).running).toBe(false);
     expect(core!.pids.filter(alive)).toEqual([]);
   }, TEST_MS);
 });

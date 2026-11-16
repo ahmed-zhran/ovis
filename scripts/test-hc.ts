@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 /**
  * A herdr-core of a test's own: its session, state, config and runtime folders under `root`, and the
@@ -38,6 +38,9 @@ export async function corePids(bin: string, env: Record<string, string>): Promis
 }
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/** Whether `env` names a core of its own (an HC_SOCKET and an HC_SESSION, as isolatedHcEnv sets them), so hc there never reaches the user's default core. */
+const namesOwnCore = (env: Record<string, string>): boolean => Boolean(env["HC_SOCKET"] && env["HC_SESSION"]);
 
 /** when `pid` started (field 22 of /proc/<pid>/stat, after the command name, which may hold spaces), or null without /proc */
 function startTime(pid: number): string | null {
@@ -85,12 +88,20 @@ function provenCore(pid: number, socket: string | undefined): boolean {
  * it cannot start that one again; it is named in `killed`, but only once provenCore shows it is still
  * that core's process. Any other pid alive is named in `unproven` and left alone (record pids with
  * corePids: a pid no status named is never proven). The test asserts both are empty, so a leak fails it.
+ * A core with no recorded pid (a start whose status failed) is waited for by its socket file instead,
+ * and a socket still there after `waitMs` is named in `socketsLeft`.
  * Delete a core's folder only after this: a late hc child would otherwise run whatever hc PATH finds.
+ * Throws before any hc command when an environment names no core of its own.
  */
-export async function stopTestCores(bin: string, cores: TestCore[], waitMs = 5000): Promise<{ stopped: number[]; killed: number[]; unproven: number[] }> {
+export async function stopTestCores(bin: string, cores: TestCore[], waitMs = 5000): Promise<{ stopped: number[]; killed: number[]; unproven: number[]; socketsLeft: string[] }> {
+  const unnamed = cores.filter((core) => !namesOwnCore(core.env));
+  if (unnamed.length) {
+    throw new Error(`stopTestCores stops only a test's own cores, and ${unnamed.length} environment(s) name none: give each an HC_SOCKET and an HC_SESSION of its own (isolatedHcEnv), so hc server stop never reaches the user's default core`);
+  }
   const stopped: number[] = [];
   const killed: number[] = [];
   const unproven: number[] = [];
+  const socketsLeft: string[] = [];
   for (const core of cores) {
     if (core.pids.some(alive)) {
       // a status that fails keeps the pids recorded so far
@@ -99,6 +110,11 @@ export async function stopTestCores(bin: string, cores: TestCore[], waitMs = 500
     stopped.push(await Bun.spawn([bin, "server", "stop"], { env: core.env, stdout: "ignore", stderr: "ignore" }).exited);
     const deadline = Date.now() + waitMs;
     while (core.pids.some(alive) && Date.now() < deadline) await Bun.sleep(25);
+    if (core.pids.length === 0) {
+      const socket = core.env["HC_SOCKET"]!;
+      while (existsSync(socket) && Date.now() < deadline) await Bun.sleep(25);
+      if (existsSync(socket)) socketsLeft.push(socket);
+    }
     const ended: number[] = [];
     for (const pid of core.pids.filter(alive)) {
       if (!provenCore(pid, core.env["HC_SOCKET"])) {
@@ -116,11 +132,11 @@ export async function stopTestCores(bin: string, cores: TestCore[], waitMs = 500
     const killDeadline = Date.now() + waitMs;
     while (ended.some(alive) && Date.now() < killDeadline) await Bun.sleep(25);
   }
-  return { stopped, killed, unproven };
+  return { stopped, killed, unproven, socketsLeft };
 }
 
 /** Stops the core `env` names, only when it names one of its own (an HC_SOCKET); run in that environment alone. */
 export async function stopIsolatedCore(bin: string, env: Record<string, string>): Promise<void> {
-  if (!env["HC_SOCKET"] || !env["HC_SESSION"]) return;
+  if (!namesOwnCore(env)) return;
   await Bun.spawn([bin, "server", "stop"], { env, stdout: "ignore", stderr: "ignore" }).exited;
 }
