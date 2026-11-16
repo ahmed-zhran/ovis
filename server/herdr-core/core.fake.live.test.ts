@@ -39,6 +39,9 @@ type Step =
   | ["closed", Name]
   | ["kill"];
 
+/** channel 0 payloads that are JSON but not a call */
+const MALFORMED = ["null", "42", "[]", "{}", "{\"id\":7}", "{\"id\":7,\"method\":5}", "\"x\""];
+
 interface Scenario { name: string; steps: Step[]; noFocusReports?: boolean }
 
 const SCENARIOS: Scenario[] = [
@@ -87,6 +90,11 @@ const SCENARIOS: Scenario[] = [
   { name: "3c focus reports as automatic input", steps: [["attach", "A", 120, 40], ["data", "A", "a"], ["attach", "B", 80, 24, R], ["automatic", "B", "\x1b[O"], ["automatic", "B", "\x1b[I"], ["detach", "B"], ["detach", "A"]] },
   { name: "x1 a program without mode 1004", noFocusReports: true, steps: [["attach", "A", 120, 40], ["data", "A", "a"], ["attach", "B", 80, 24, R], ["automatic", "B", "\x1b[I"], ["focus", "B", 1], ["detach", "B"], ["detach", "A"]] },
   { name: "x2 FOCUS 0 from a viewer that never sent FOCUS 1", steps: [["attach", "A", 120, 40], ["data", "A", "a"], ["attach", "C", 80, 24, R], ["focus", "C", 0], ["detach", "C"], ["detach", "A"]] },
+  {
+    // B's only stamp is a RESIZE to the size the terminal already has: once the driver leaves, B leads, not the newer C
+    name: "v10 a RESIZE to the current size is a viewer's only stamp",
+    steps: [["attach", "A", 120, 40], ["data", "A", "a"], ["attach", "B", 80, 24, R], ["resize", "B", 120, 40], ["attach", "C", 70, 20, R], ["detach", "A"], ["detach", "C"], ["detach", "B"]],
+  },
 ];
 
 /** The program in every terminal: raw input logged as hex to a file, its size printed on SIGWINCH, exit 3 on a lone "q". */
@@ -385,6 +393,57 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       for (const hc of opened) hc.close();
     }
   }
+
+  /** Channel 0 replies to calls that are not a call, on a fresh line after hello, then a plain-mode `null` on another line. */
+  async function malformedReplies(socket: string): Promise<{ framed: unknown[]; open: boolean; plain: unknown }> {
+    const framedLine = await socketTransport(socket);
+    const replies: unknown[] = [];
+    let ended = false;
+    const read = makeFrameReader((frame) => { if (frame.channel === 0) replies.push(JSON.parse(Buffer.from(frame.payload).toString())); wake(); }, () => {});
+    void (async () => {
+      let framed = false;
+      for await (const chunk of framedLine.readable) {
+        let bytes = chunk;
+        if (!framed) {
+          const at = bytes.indexOf(0x0a);
+          if (at === -1) continue;
+          framed = true;
+          bytes = bytes.subarray(at + 1);
+          replies.push("hello");
+          wake();
+        }
+        read(bytes);
+      }
+      ended = true;
+      wake();
+    })();
+    try {
+      framedLine.write(new TextEncoder().encode(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "hello", params: { generation: 1, framed: true } })}\n`));
+      await until("the hello answer", () => replies.length === 1);
+      for (const input of MALFORMED) framedLine.write(encodeFrame(0, 0, input));
+      // a real call after them: the line is still open and answers it
+      framedLine.write(encodeFrame(0, 0, JSON.stringify({ jsonrpc: "2.0", id: 99, method: "machine.list", params: {} })));
+      await until("an answer to every malformed call and the call after them", () => replies.length === MALFORMED.length + 2 || ended);
+    } finally {
+      framedLine.kill();
+    }
+    const plainLine = await socketTransport(socket);
+    try {
+      const answer = plainLine.readable.getReader().read();
+      plainLine.write(new TextEncoder().encode("null\n"));
+      const { value } = await answer;
+      return { framed: replies.slice(1), open: !ended, plain: value ? JSON.parse(Buffer.from(value).toString()) : "nothing" };
+    } finally {
+      plainLine.kill();
+    }
+  }
+
+  it("answers calls that are not calls as the real core does", async () => {
+    const onReal = await malformedReplies(real.socket);
+    const onFake = await malformedReplies(faked.socket);
+    expect(onReal.framed).toHaveLength(MALFORMED.length + 1);
+    expect(onFake).toEqual(onReal);
+  }, TEST_MS);
 
   for (const [index, scenario] of SCENARIOS.entries()) {
     it(scenario.name, async () => {

@@ -27,7 +27,7 @@
 
 import { createConnection, createServer, type Socket } from "node:net";
 import { AUTOMATIC_INPUT_FEATURE, encodeFrame, type Frame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE, HcError, type HcTransport, makeFrameReader } from "./connection.ts";
-import type { CoreInfo, DocGetParams, DocSetParams, EventsSubscribeParams, HcMethod, MachineView, Terminal, TerminalAttachParams, TerminalLabelParams, TerminalListParams, TerminalRunParams } from "./hc-api.generated.ts";
+import type { AttachResult, CoreInfo, DocGetParams, DocSetParams, EventsSubscribeParams, HcMethod, HcMethods, MachineView, Terminal, TerminalAttachParams, TerminalLabelParams, TerminalListParams, TerminalRunParams } from "./hc-api.generated.ts";
 
 /** where a terminal nobody views runs */
 export const HEADLESS = { cols: 200, rows: 120 } as const;
@@ -40,7 +40,11 @@ export const FEATURES_0_1_18: readonly string[] = [...FEATURES_0_1_17, AUTOMATIC
 /** the frames a viewer sends as its user's (or its terminal's) input: what "nothing was sent" counts */
 export const INPUT_KINDS: readonly number[] = [FRAME_DATA, FRAME_RESIZE, FRAME_FOCUS, FRAME_FACTS, FRAME_AUTOMATIC_INPUT];
 
-const ANSWERED: HcMethod[] = ["hello", "terminal.list", "terminal.get", "terminal.run", "terminal.kill", "terminal.rm", "terminal.label", "terminal.attach", "doc.get", "doc.set", "events.subscribe", "machine.list"];
+const ANSWERED = ["hello", "terminal.list", "terminal.get", "terminal.run", "terminal.kill", "terminal.rm", "terminal.label", "terminal.attach", "doc.get", "doc.set", "events.subscribe", "machine.list"] as const satisfies readonly HcMethod[];
+type Answered = Exclude<(typeof ANSWERED)[number], "hello">;
+/** what the fake answers a method with: hc's result type, except that a 0.1.17-like core leaves `automatic_input` out of the attach reply, as 0.1.17 does */
+type Reply<M extends HcMethod> = M extends "terminal.attach" ? Omit<AttachResult, "automatic_input"> & { automatic_input?: boolean } : HcMethods[M]["result"];
+interface Answer<M extends HcMethod> { result: Reply<M>; after?: () => void }
 const NAME = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 
 export interface FakeCoreOptions {
@@ -265,7 +269,7 @@ export class FakeHcCore {
   constructor(options: FakeCoreOptions = {}) {
     this.version = options.version ?? "0.1.18";
     this.features = options.features ?? FEATURES_0_1_18;
-    this.methods = options.methods ?? ANSWERED;
+    this.methods = options.methods ?? [...ANSWERED];
     this.info = options.core ?? { id: "fake0000", name: "fake" };
     this.machines = options.machines ?? [];
   }
@@ -437,14 +441,20 @@ export class FakeHcCore {
 
   /** @returns whether the line is framed from here on */
   onHello(line: Line, text: string): boolean {
-    let message: { id?: unknown; method?: unknown; params?: { generation?: unknown; framed?: unknown } };
+    let parsed: unknown;
     try {
-      message = JSON.parse(text);
+      parsed = JSON.parse(text);
     } catch (error) {
       line.sendLine(errorReply(null, new CallError(-32700, "parse_error", String(error), "see `hc schema`")));
       return false;
     }
-    const id = message.id ?? null;
+    const call = callOf(parsed);
+    if ("invalid" in call) {
+      line.sendLine(errorReply(call.invalid, MISSING_METHOD));
+      return false;
+    }
+    const id = call.id;
+    const message = { method: call.method, params: call.params as { generation?: unknown; framed?: unknown } };
     this.log.push({ what: "call", line: line.id, method: String(message.method), params: { ...message.params } });
     const refusal = message.method !== "hello" ? new CallError(-32000, "unsupported", "this fake speaks framed mode only: send hello with framed true first", "see `hc schema`")
       : message.params?.generation !== 1 ? new CallError(-32000, "unsupported_generation", `generation ${String(message.params?.generation)} is not spoken here`, "this core speaks generation 1")
@@ -526,22 +536,25 @@ export class FakeHcCore {
   }
 
   private onCall(line: Line, payload: Uint8Array): void {
-    let message: { id?: unknown; method?: unknown; params?: unknown };
+    let parsed: unknown;
     try {
-      message = JSON.parse(Buffer.from(payload).toString());
+      parsed = JSON.parse(Buffer.from(payload).toString());
     } catch (error) {
       line.send(0, FRAME_DATA, Buffer.from(JSON.stringify(errorReply(null, new CallError(-32700, "parse_error", String(error), "see `hc schema`")))));
       return;
     }
-    const id = message.id ?? null;
-    const method = String(message.method);
-    const params = (typeof message.params === "object" && message.params !== null ? message.params : {}) as Record<string, unknown>;
+    const call = callOf(parsed);
+    if ("invalid" in call) {
+      line.send(0, FRAME_DATA, Buffer.from(JSON.stringify(errorReply(call.invalid, MISSING_METHOD))));
+      return;
+    }
+    const { id, method, params } = call;
     this.log.push({ what: "call", line: line.id, method, params });
     let after: (() => void) | undefined;
     let reply: unknown;
     try {
-      if (!this.methods.includes(method) || !ANSWERED.includes(method as HcMethod) || method === "hello") throw new CallError(-32601, "unknown_method", `unknown method "${method}"`, "see `hc schema`");
-      const answered = this.answer(line, method as Exclude<HcMethod, "hello">, params);
+      if (!this.methods.includes(method) || !(ANSWERED as readonly string[]).includes(method) || method === "hello") throw new CallError(-32601, "unknown_method", `unknown method "${method}"`, "see `hc schema`");
+      const answered = this.answer(line, method as Answered, params);
       after = answered.after;
       this.log.push({ what: "reply", line: line.id, method, result: answered.result });
       reply = { id, jsonrpc: "2.0", result: answered.result };
@@ -555,35 +568,34 @@ export class FakeHcCore {
     after?.();
   }
 
-  private answer(line: Line, method: Exclude<HcMethod, "hello">, params: Record<string, unknown>): { result: unknown; after?: () => void } {
+  private answer(line: Line, method: Answered, params: Record<string, unknown>): Answer<Answered> {
     const terminalParam = () => {
       if (typeof params["terminal"] !== "string") throw missing("terminal");
       return params["terminal"];
     };
-    switch (method) {
-      case "terminal.list": {
+    // one handler per method, each checked against hc's result type for that method
+    const handlers: { [M in Answered]: () => Answer<M> } = {
+      "terminal.list": () => {
         const { all, labels } = params as TerminalListParams;
         const matching = [...this.terminals.values()].map((held) => held.terminal).filter((record) => matches(record, labels));
         const shown = matching.filter((record) => all || record.state === "live");
         return { result: { terminals: structuredClone(shown), hidden_finished: matching.length - shown.length, machines: structuredClone(this.machines) } };
-      }
-      case "terminal.get":
-        return { result: structuredClone(this.held(terminalParam(), true).terminal) };
-      case "terminal.run":
-        return { result: structuredClone(this.run(params as TerminalRunParams)) };
-      case "terminal.kill": {
+      },
+      "terminal.get": () => ({ result: structuredClone(this.held(terminalParam(), true).terminal) }),
+      "terminal.run": () => ({ result: structuredClone(this.run(params as TerminalRunParams)) }),
+      "terminal.kill": () => {
         const held = this.held(terminalParam(), true);
         if (held.terminal.state === "live") this.finish(held, { exit_code: null, reason: "killed", signal: 1 });
         return { result: structuredClone(held.terminal) };
-      }
-      case "terminal.rm": {
+      },
+      "terminal.rm": () => {
         const terminal = terminalParam();
         const held = this.held(terminal, true);
         if (held.terminal.state === "live") throw new CallError(-32000, "live", `${terminal} is still running`, `kill it first: hc kill ${terminal}`);
         this.remove(terminal);
         return { result: { removed: terminal } };
-      }
-      case "terminal.label": {
+      },
+      "terminal.label": () => {
         const { labels } = params as unknown as TerminalLabelParams;
         if (typeof labels !== "object" || labels === null) throw missing("labels");
         const held = this.held(terminalParam(), true);
@@ -593,23 +605,18 @@ export class FakeHcCore {
         }
         this.emit("labels", held.terminal.address, { labels: { ...held.terminal.labels } });
         return { result: structuredClone(held.terminal) };
-      }
-      case "terminal.attach":
-        return this.attach(line, params as unknown as TerminalAttachParams);
-      case "events.subscribe": {
+      },
+      "terminal.attach": () => this.attach(line, params as unknown as TerminalAttachParams),
+      "events.subscribe": () => {
         const stream = line.stream();
         stream.filter = params as EventsSubscribeParams;
         return { result: { channel: stream.id, seq: this.seq, terminals: this.snapshot(stream.filter) } };
-      }
-      case "doc.get":
-        return { result: structuredClone(this.docs.get(docName(params as unknown as DocGetParams)) ?? { value: null, version: 0 }) };
-      case "doc.set":
-        return { result: this.setDoc(params as unknown as DocSetParams) };
-      case "machine.list":
-        return { result: { machines: structuredClone(this.machines) } };
-      default:
-        throw new CallError(-32601, "unknown_method", `unknown method "${method}"`, "see `hc schema`");
-    }
+      },
+      "doc.get": () => ({ result: structuredClone(this.docs.get(docName(params as unknown as DocGetParams)) ?? { value: null, version: 0 }) }),
+      "doc.set": () => ({ result: this.setDoc(params as unknown as DocSetParams) }),
+      "machine.list": () => ({ result: { machines: structuredClone(this.machines) } }),
+    };
+    return handlers[method]();
   }
 
   private run(params: TerminalRunParams): Terminal {
@@ -647,7 +654,7 @@ export class FakeHcCore {
     });
   }
 
-  private attach(line: Line, params: TerminalAttachParams): { result: unknown; after: () => void } {
+  private attach(line: Line, params: TerminalAttachParams): Answer<"terminal.attach"> {
     if (typeof params.terminal !== "string") throw missing("terminal");
     if (typeof params.cols !== "number") throw missing("cols");
     if (typeof params.rows !== "number") throw missing("rows");
@@ -801,6 +808,17 @@ export function describeFrame(kind: number, payload: Uint8Array): string {
     case FRAME_AUTOMATIC_INPUT: return `AUTOMATIC_INPUT ${bytes.toString("hex")}`;
     default: return `KIND ${kind} ${bytes.toString("hex")}`;
   }
+}
+
+/** what hc answers a message that is JSON but not a call: the message's id when it is an object that has one */
+const MISSING_METHOD = new CallError(-32600, "invalid_request", "missing method", "see `hc schema`");
+
+/** A parsed message as a call, or (`invalid`) the id to answer MISSING_METHOD with. */
+function callOf(message: unknown): { id: unknown; method: string; params: Record<string, unknown> } | { invalid: unknown } {
+  if (typeof message !== "object" || message === null || Array.isArray(message)) return { invalid: null };
+  const { id = null, method, params } = message as { id?: unknown; method?: unknown; params?: unknown };
+  if (typeof method !== "string") return { invalid: id };
+  return { id, method, params: typeof params === "object" && params !== null && !Array.isArray(params) ? params as Record<string, unknown> : {} };
 }
 
 function matches(record: Terminal, labels: Record<string, string> | undefined): boolean {

@@ -510,7 +510,18 @@ describe("fake herdr-core: calls, events and lines", () => {
       undefined,
     ]);
     expect(replies[1]!["id"]).toBeNull();
+    // a call that is not an object with a string method: -32600, with the id only when an object carries one (both releases)
+    const malformed: [string, number | null][] = [["null", null], ["42", null], ["[]", null], ["{}", null], ["{\"id\":7}", 7], ["{\"id\":7,\"method\":5}", 7], ["\"x\"", null]];
+    for (const [input] of malformed) transport.write(encodeFrame(0, FRAME_DATA, input));
+    await wait("an answer to every malformed call", () => replies.length === 4 + malformed.length);
+    expect(replies.slice(4)).toEqual(malformed.map(([, id]) => ({ error: { code: -32600, data: { hint: "see `hc schema`", kind: "invalid_request" }, message: "missing method" }, id, jsonrpc: "2.0" })));
     expect(ended).toBe(false);
+    // the same before framing: a hello line that is `null` is answered, and the line stays plain and open
+    const plain = core.transport();
+    const answer = plain.readable.getReader().read();
+    plain.write(new TextEncoder().encode("null\n"));
+    const { value } = await answer;
+    expect(JSON.parse(Buffer.from(value!).toString())).toEqual({ error: { code: -32600, data: { hint: "see `hc schema`", kind: "invalid_request" }, message: "missing method" }, id: null, jsonrpc: "2.0" });
     const header = new Uint8Array(9);
     new DataView(header.buffer).setUint32(5, 17 * 1024 * 1024, true);
     transport.write(header);
