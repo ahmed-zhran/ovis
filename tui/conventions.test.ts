@@ -1,31 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
-import { fail, files, lineOf, read, repo, stripComments } from "../scripts/source-scan.ts";
+import { fail, files, importClosure, lineOf, read, relativeImports, repo, stripComments } from "../scripts/source-scan.ts";
 
 // Rules for the terminal screen under tui/. Each failure says what to change; repo-wide rules are
 // in scripts/conventions.test.ts, and the UI wording scan of src/conventions.test.ts reads tui/ too.
 
 /** The screen's shipped code: not tests, and not the test tooling under tui/testing/. */
 const productCode = (): string[] => files("tui/**/*.{ts,tsx,mjs,js}").filter((file) => !file.startsWith("tui/testing/") && !/\.test\.tsx?$/.test(file));
-
-/**
- * Module specifiers of static imports and re-exports, side-effect imports and `import("…")` with a literal (as in
- * scripts/conventions.test.ts). A declaration never runs on into the next `import`: one that no semicolon ends would
- * otherwise take the import after it for its own `from` and hide what that import names.
- */
-const SPECIFIER = /(?:^|[\s;])(?:import|export)\s(?:(?!\bimport\b)[^;])*?\sfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/gm;
-
-/** Each relative import of `code` (comments removed), as the repository path it names and its line. */
-function relativeImports(file: string, code: string): { target: string; line: number; specifier: string }[] {
-  return [...code.matchAll(SPECIFIER)].flatMap((match) => {
-    const specifier = match[1] ?? match[2] ?? match[3]!;
-    if (!specifier.startsWith(".")) return [];
-    // the match may start with the newline before the import
-    const at = match.index + match[0].search(/\S/);
-    return [{ target: posix.normalize(posix.join(posix.dirname(file), specifier.replace(/\?.*$/, ""))), line: lineOf(code, at), specifier }];
-  });
-}
 
 /** Every match of `pattern` in each file's code (comments removed), as `file:line: text`. */
 function matches(fileList: string[], pattern: RegExp): string[] {
@@ -48,28 +30,7 @@ describe("import closure of tui/main.ts", () => {
   ]);
   const allowed = (path: string) => path.startsWith("tui/") || path.startsWith("shared/") || OUTSIDE_ALLOWED.has(path);
 
-  /**
-   * The repository files `entry` reaches through relative imports, followed transitively through
-   * every allowed code file, and each import that leaves the allowed set. A file that does not
-   * exist is not read: a listed file its row has not written yet is simply not reached.
-   */
-  function closure(entry: string, source: (path: string) => string | undefined): { reached: string[]; offenders: string[] } {
-    const reached = new Set([entry]);
-    const offenders: string[] = [];
-    for (const queue = [entry]; queue.length;) {
-      const file = queue.shift()!;
-      const text = /\.(?:ts|tsx|mjs|js)$/.test(file) ? source(file) : undefined;
-      if (text === undefined) continue;
-      for (const { target, line, specifier } of relativeImports(file, stripComments(text))) {
-        if (!allowed(target)) offenders.push(`${file}:${line}: ${specifier} (${target})`);
-        else if (!reached.has(target)) {
-          reached.add(target);
-          queue.push(target);
-        }
-      }
-    }
-    return { reached: [...reached], offenders };
-  }
+  const closure = (entry: string, source: (path: string) => string | undefined) => importClosure(entry, source, allowed);
 
   it("stays inside tui/, shared/ and the listed server files", () => {
     const { reached, offenders } = closure("tui/main.ts", (path) => existsSync(join(repo, path)) ? read(path) : undefined);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { posix } from "node:path";
-import { fail, files, lineOf, read, stripComments } from "../scripts/source-scan.ts";
+import { existsSync } from "node:fs";
+import { join, posix } from "node:path";
+import { fail, files, importClosure, lineOf, read, repo, stripComments } from "../scripts/source-scan.ts";
 
 const serverCode = (): string[] => files("server/**/*.{ts,mjs,js}").filter((file) => !/\.test\.ts$|\.fake\.ts$/.test(file));
 
@@ -139,6 +140,51 @@ function unixConnects(file: string, code: string): { file: string; at: string; b
   }
   return found;
 }
+
+describe("herdr-core's socket transport", () => {
+  // The terminal screen reaches herdr-core through this file so that no core is ever started (hc
+  // connect starts one when none runs). A PATH stand-in sees only a spawn by name; this rule also
+  // sees one by absolute path, and every file the transport imports, however deep.
+  const ENTRY = "server/herdr-core/socket-transport.ts";
+  const RUNS_HC_OR_HERDR = new Set(["server/herdr-core/hc-connect.ts", "server/herdr-core/discovery.ts", "server/herdr/client.ts"]);
+  const PROCESS_START = /\bBun\s*\.\s*(?:spawnSync|spawn|\$)|["'](?:node:)?child_process["']|\bimport\s*\{[^}]*\b(?:spawnSync|spawn|\$)\b[^}]*\}\s*from\s*["']bun["']/g;
+  const repoSource = (path: string) => (existsSync(join(repo, path)) ? read(path) : undefined);
+
+  /** Each import of a file that runs hc or herdr in `entry`'s import closure, and each process start there, as `file:line: text`. */
+  function processStarts(entry: string, source: (path: string) => string | undefined): string[] {
+    const { reached, offenders } = importClosure(entry, source, (path) => !RUNS_HC_OR_HERDR.has(path));
+    const starts = reached.filter((file) => /\.(?:ts|tsx|mjs|js)$/.test(file)).flatMap((file) => {
+      const code = stripComments(source(file) ?? "");
+      return [...code.matchAll(PROCESS_START)].map((match) => {
+        const line = lineOf(code, match.index);
+        return `${file}:${line}: ${code.split("\n")[line - 1]!.trim().slice(0, 160)}`;
+      });
+    });
+    return [...offenders, ...starts];
+  }
+
+  it("starts no process anywhere in its import closure", () => {
+    expect(importClosure(ENTRY, repoSource).reached).toContain("server/herdr-core/connection.ts");
+    fail(processStarts(ENTRY, repoSource),
+      "server/herdr-core/socket-transport.ts must never start a core: nothing in its import closure may start a process (Bun.spawn, Bun.spawnSync, Bun.$, child_process) or import hc-connect.ts, discovery.ts or server/herdr/client.ts, which run hc or herdr. Take the process start out of the file named, or import what the transport needs from a file that starts nothing.");
+  });
+
+  it("finds a process start or an import of what runs hc in any file of the closure", () => {
+    const graph: Record<string, string> = {
+      [ENTRY]: "import { a } from \"./connection.ts\";\nimport { b } from \"./hc-connect.ts\";\nBun.spawn([\"hc\"]);",
+      "server/herdr-core/connection.ts": "import \"../../shared/x.ts\";\n// Bun.spawn in a comment\nconst p = Bun . spawnSync([\"sh\"]);",
+      "shared/x.ts": "import { spawn } from \"bun\";\nimport { execFile } from \"node:child_process\";",
+      "server/herdr-core/hc-connect.ts": "Bun.spawn([\"hc\", \"connect\"]);",
+    };
+    expect(processStarts(ENTRY, (path) => graph[path])).toEqual([
+      `${ENTRY}:2: ./hc-connect.ts (server/herdr-core/hc-connect.ts)`,
+      `${ENTRY}:3: Bun.spawn(["hc"]);`,
+      "server/herdr-core/connection.ts:3: const p = Bun . spawnSync([\"sh\"]);",
+      "shared/x.ts:1: import { spawn } from \"bun\";",
+      "shared/x.ts:2: import { execFile } from \"node:child_process\";",
+    ]);
+  });
+});
 
 describe("herdr socket", () => {
   // herdr closes the socket after each answer, so every RPC opens its own connection in

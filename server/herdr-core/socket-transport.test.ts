@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Socket, UnixSocketListener } from "bun";
@@ -13,8 +13,11 @@ const WAIT_MS = 5000;
 describe.skipIf(process.platform === "win32")("the socket transport", () => {
   /** short: a unix socket path must stay within the OS's 107 bytes */
   const dir = mkdtempSync(join(tmpdir(), "r9-"));
+  /** the stand-ins' log: one line per run of `hc` or `herdr-core` by name, with its arguments */
   const hcLog = join(dir, "hc.log");
-  const NAMES = ["PATH", "HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HC_SOCKET", "HC_SESSION", "HERDR_TEST_SESSION", "HERDR_TEST_LIVE", "OVIS_ALLOW_LIVE_HERDR"] as const;
+  /** connects to each path (`no-core <path>…`, printing each error's kind), or starts hc by name both ways (`control`) */
+  const childScript = join(dir, "child.ts");
+  const NAMES = ["HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HC_SOCKET", "HC_SESSION", "HERDR_TEST_SESSION", "HERDR_TEST_LIVE", "OVIS_ALLOW_LIVE_HERDR"] as const;
   const saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
   const listeners: UnixSocketListener<undefined>[] = [];
   const transports: HcTransport[] = [];
@@ -56,27 +59,59 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     (error: unknown) => (error instanceof HcError ? error.kind : String(error)),
   );
   const hcRuns = () => (existsSync(hcLog) ? readFileSync(hcLog, "utf8") : "");
+  /** processes still running from a child run: each inherits its OVIS_STANDIN_RUN, whichever way it was spawned */
+  const fromChildRun = () => readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).filter((pid) => {
+    try { return readFileSync(`/proc/${pid}/environ`, "latin1").includes(`OVIS_STANDIN_RUN=${dir}\0`); } catch { return false; }
+  });
 
-  beforeAll(async () => {
-    // an hc first on PATH that only records its arguments: a transport that started one would leave a line
+  /**
+   * Runs the child script in a `bun` whose startup environment, built here, has the stand-ins first on
+   * PATH: a spawn of `hc` or `herdr-core` by name finds them whether or not it passes `env`, and leaves
+   * a line in the log. A spawn by absolute path is not seen here; server/conventions.test.ts finds
+   * any process start in the transport's imports. Returns the child's lines once every process of the
+   * run has ended, so a spawn nobody awaited has written its line.
+   */
+  const runChild = async (...args: string[]): Promise<string[]> => {
+    const child = Bun.spawn([process.execPath, childScript, ...args], {
+      env: { PATH: `${join(dir, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`, HOME: join(dir, "home"), TMPDIR: dir, OVIS_STANDIN_RUN: dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect({ code, err }).toEqual({ code: 0, err: "" });
+    const deadline = Date.now() + WAIT_MS;
+    while (fromChildRun().length > 0) {
+      if (Date.now() > deadline) throw new Error(`processes of the child run still running after ${WAIT_MS}ms: ${fromChildRun().join(", ")}`);
+      await Bun.sleep(25);
+    }
+    return out.trim().split("\n");
+  };
+
+  beforeAll(() => {
     mkdirSync(join(dir, "bin"));
-    writeFileSync(join(dir, "bin", "hc"), `#!/bin/sh\necho "$*" >> '${hcLog}'\n`);
-    chmodSync(join(dir, "bin", "hc"), 0o755);
-    process.env["PATH"] = `${join(dir, "bin")}:${saved["PATH"] ?? "/usr/bin:/bin"}`;
-    // the stand-in is what a spawn in this environment finds (as spawnHcConnect's), so an empty log below means nothing ran it
-    expect(await Bun.spawn(["hc", "control"], { env: process.env, stdout: "ignore", stderr: "ignore" }).exited).toBe(0);
-    expect(hcRuns()).toBe("control\n");
-    rmSync(hcLog);
+    for (const name of ["hc", "herdr-core"]) {
+      writeFileSync(join(dir, "bin", name), `#!/bin/sh\necho "${name} $*" >> '${hcLog}'\n`);
+      chmodSync(join(dir, "bin", name), 0o755);
+    }
+    writeFileSync(childScript, [
+      `import { connectCoreSocket } from ${JSON.stringify(join(import.meta.dir, "socket-transport.ts"))};`,
+      "const [mode, ...paths] = process.argv.slice(2);",
+      "if (mode === \"control\") {",
+      "  Bun.spawn([\"hc\", \"with-env\"], { env: process.env, stdout: \"ignore\", stderr: \"ignore\" });",
+      "  Bun.spawn([\"hc\", \"without-env\"], { stdout: \"ignore\", stderr: \"ignore\" });",
+      "} else {",
+      "  for (const path of paths) console.log(await connectCoreSocket(path).then((line) => { line.kill(); return \"connected\"; }, (error) => error?.kind ?? String(error)));",
+      "}",
+    ].join("\n"));
   });
 
   afterEach(() => {
     for (const transport of transports.splice(0)) transport.kill();
     for (const listener of listeners.splice(0)) listener.stop(true);
-    for (const name of NAMES) if (name !== "PATH") { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    for (const name of NAMES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   });
 
   afterAll(() => {
-    process.env["PATH"] = saved["PATH"];
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -105,12 +140,19 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     reader.releaseLock();
   });
 
-  it("missing socket file gives no_core", async () => {
-    expect(await failureOf(join(dir, "absent.sock"))).toBe("no_core");
+  // the child runs need /proc to tell when every process of a run has ended
+  it.skipIf(process.platform !== "linux")("the stand-in sees a spawn of hc by name, with env and without", async () => {
+    expect(await runChild("control")).toEqual([""]);
+    expect(hcRuns().split("\n").filter(Boolean).sort()).toEqual(["hc with-env", "hc without-env"]);
+    rmSync(hcLog);
+  });
+
+  it.skipIf(process.platform !== "linux")("missing socket file gives no_core", async () => {
+    expect(await runChild("no-core", join(dir, "absent.sock"))).toEqual(["no_core"]);
     expect(hcRuns()).toBe("");
   });
 
-  it("stale socket file refuses", async () => {
+  it.skipIf(process.platform !== "linux")("stale socket file refuses", async () => {
     const live = join(dir, "live.sock");
     const stale = join(dir, "stale.sock");
     const core = listen(live);
@@ -118,7 +160,7 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     linkSync(live, stale);
     core.listener.stop(true);
     expect(existsSync(stale)).toBe(true);
-    expect(await failureOf(stale)).toBe("no_core");
+    expect(await runChild("no-core", stale)).toEqual(["no_core"]);
     expect(hcRuns()).toBe("");
   });
 
@@ -164,6 +206,5 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     // said out loud, the user's own core may be reached
     process.env["OVIS_ALLOW_LIVE_HERDR"] = "1";
     expect(await failureOf(userDefault)).toBe("no_core");
-    expect(hcRuns()).toBe("");
   });
 });
