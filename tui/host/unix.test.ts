@@ -30,16 +30,17 @@ function standIns(options: { stdinTTY?: boolean; stdoutTTY?: boolean; env?: Reco
   const stdout = Object.assign(new Emitter(), { isTTY: options.stdoutTTY ?? true, fd: 1, columns: 120, rows: 40 });
   const proc = Object.assign(new Emitter(), { exit: (code: number) => { log.push(`exit ${code}`); } });
   const failures: string[] = [];
+  const refuse = { always: false, pauses: 0 };
   const writeSync = (fd: number, buffer: Uint8Array, offset: number, length: number) => {
-    const failure = failures.shift();
+    const failure = refuse.always ? "EAGAIN" : failures.shift();
     if (failure) throw Object.assign(new Error(`${failure}: write failed`), { code: failure });
     const part = Math.min(length, 7);
     log.push(`write ${fd} ${new TextDecoder().decode(buffer.subarray(offset, offset + part))}`);
     return part;
   };
-  const host = createUnixHost({ stdin, stdout, process: proc, env: options.env ?? {}, writeSync });
+  const host = createUnixHost({ stdin, stdout, process: proc, env: options.env ?? {}, writeSync, pause: () => { refuse.pauses++; } });
   const written = () => log.filter((entry) => entry.startsWith("write ")).map((entry) => entry.slice(8)).join("");
-  return { host, log, waiting, stdin, stdout, proc, failures, written };
+  return { host, log, waiting, stdin, stdout, proc, failures, refuse, written };
 }
 
 describe("the unix host", () => {
@@ -82,6 +83,20 @@ describe("the unix host", () => {
     expect(host.write("lost")).toBe(false);
     expect(ends).toEqual([{ kind: "gone", why: "write-failed" }]);
     expect(written()).toBe(`${ENTER}frame`);
+  });
+
+  it("gives up on a terminal that refuses every write after WRITE_AGAIN_LIMIT pauses, and reports it gone", () => {
+    const { host, refuse, written } = standIns();
+    const ends: unknown[] = [];
+    host.onEnd((end) => { ends.push(end); });
+    host.enter();
+    refuse.always = true;
+    expect(host.write("frame")).toBe(false);
+    expect(refuse.pauses).toBe(2000);
+    expect(ends).toEqual([{ kind: "gone", why: "write-failed" }]);
+    expect(host.write("more")).toBe(false);
+    expect(refuse.pauses).toBe(2000);
+    expect(written()).toBe(ENTER);
   });
 
   it("on SIGTERM leaves, unhooks nothing it still needs, and ends the process with 143", () => {

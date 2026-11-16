@@ -246,7 +246,8 @@ describe("with-core --pty", () => {
   it("runs the command on a pseudo-terminal of the given size, and --dump prints the final cells", async () => {
     const run = helper(["--no-core", "--pty", "--size", "30x4", "--dump", "--", "sh", "-c", "test -t 0 && test -t 1 && stty size && printf hello"], noHc());
     expect(await run.exited).toBe(0);
-    expect(run.stdout()).toBe("4 30\nhello\n\n\n");
+    // server/pty/host.ts may say first, on stdout, which PTY host it took; the dump is what ends stdout
+    expect(run.stdout().endsWith("\n4 30\nhello\n\n\n") || run.stdout() === "4 30\nhello\n\n\n").toBe(true);
     expect(leftovers(run)).toEqual(NOTHING_LEFT);
   }, TEST_MS);
 

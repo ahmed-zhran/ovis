@@ -1,4 +1,5 @@
 import { writeSync } from "node:fs";
+import { WRITE_AGAIN_LIMIT, WRITE_AGAIN_PAUSE_MS } from "../model/deadlines.ts";
 import { guardedHost, type HostHooks } from "./guard.ts";
 import type { Host } from "./index.ts";
 
@@ -35,7 +36,13 @@ export interface UnixHostParts {
   process: UnixProcess;
   env: Record<string, string | undefined>;
   writeSync: (fd: number, buffer: Uint8Array, offset: number, length: number) => number;
+  /** blocks this long between two tries of a refused write */
+  pause: (ms: number) => void;
 }
+
+const pauseCell = new Int32Array(new SharedArrayBuffer(4));
+/** a synchronous wait that does not spin: writes are synchronous, so the retry must be too */
+const pauseSync = (ms: number) => { Atomics.wait(pauseCell, 0, 0, ms); };
 
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
@@ -51,6 +58,7 @@ export function createUnixHost(parts: Partial<UnixHostParts> = {}): Host {
   const proc: UnixProcess = parts.process ?? process;
   const env = parts.env ?? process.env;
   const write = parts.writeSync ?? writeSync;
+  const pause = parts.pause ?? pauseSync;
   let sink: ((bytes: Uint8Array) => void) | null = null;
 
   const readAll = () => {
@@ -64,12 +72,16 @@ export function createUnixHost(parts: Partial<UnixHostParts> = {}): Host {
     colorTerm: env["COLORTERM"],
     setRaw: (on) => { stdin.setRawMode(on); },
     write(bytes) {
+      let refused = 0;
       for (let at = 0; at < bytes.length;) {
         try {
           at += write(stdout.fd, bytes, at, bytes.length - at);
+          refused = 0;
         } catch (error) {
-          // a tty another program left non-blocking: the write is tried again until it goes through
-          if ((error as { code?: unknown }).code !== "EAGAIN") throw error;
+          // a tty another program left non-blocking: tried again, a while apart, up to a limit; then the
+          // EAGAIN goes up and the guard reports the terminal gone
+          if ((error as { code?: unknown }).code !== "EAGAIN" || ++refused > WRITE_AGAIN_LIMIT) throw error;
+          pause(WRITE_AGAIN_PAUSE_MS);
         }
       }
     },
@@ -90,6 +102,7 @@ export function createUnixHost(parts: Partial<UnixHostParts> = {}): Host {
       const timer = setTimeout(fire, ms);
       return () => clearTimeout(timer);
     },
+    now: () => performance.now(),
     hook(hooks: HostHooks) {
       const signals = SIGNALS.map((name) => [name, () => hooks.signal(name)] as const);
       for (const [name, listener] of signals) proc.on(name, listener);

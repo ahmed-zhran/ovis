@@ -59,6 +59,7 @@ export class HeadlessHost implements Host {
         this.timerList.push(entry);
         return () => { const i = this.timerList.indexOf(entry); if (i !== -1) this.timerList.splice(i, 1); };
       },
+      now: () => this.now,
       hook: (hooks) => { this.hooks = hooks; return () => { this.hooks = null; }; },
       exit: (code) => { this.exitCode ??= code; },
     });

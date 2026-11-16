@@ -33,7 +33,7 @@ const count = (haystack: string, needle: string) => haystack.split(needle).lengt
 // the fixture ends its report lines with CR LF; the tty's output processing (left on by Bun's raw
 // mode) may turn the LF into CR LF again, so the tests match a line up to its first CR
 
-function start(mode: "exit" | "process-exit" | "throw" | "wait", env: Record<string, string> = {}): SupervisedRun {
+function start(mode: "exit" | "linger" | "process-exit" | "throw" | "wait", env: Record<string, string> = {}): SupervisedRun {
   return runSupervised({ entry: [process.execPath, FIXTURE, mode], env: { ...BASE_ENV, ...env }, cols: 80, rows: 24 });
 }
 
@@ -164,26 +164,80 @@ describe("the start probe on a pseudo-terminal", () => {
     expect(inputLines(run.output())).toEqual(["1 71"]);
   }, TEST_MS);
 
-  for (const [what, answer] of [
-    ["late replies", ANSWER],
-    ["garbage", `garbage${ESC}[?zz${ESC}]11;`],
-    ["a partial reply", `${ESC}]11;rgb:ff`],
-    ["1 MiB of bytes", "A".repeat(1024 * 1024)],
+  /** Starts an entry, waits for its probe's question, and returns what each INPUT line says. */
+  const inputsOf = (output: string) => [...output.matchAll(/INPUT (\d+) ([0-9a-f]*)\r/g)].map((match) => ({ length: Number(match[1]), hex: match[2]! }));
+  const hex = (data: string) => Buffer.from(data, "latin1").toString("hex");
+
+  it("swallows late replies, one cut after its ESC across two writes too: only the typed keys are input", async () => {
+    const run = start("exit");
+    await run.until("READY\r");
+    expect(probeLine(run.output()).result).toMatchObject({ answered: false });
+    run.type(ESC);
+    run.type(`]11;rgb:ffff/ffff/ffff${ST}`);
+    run.type(ANSWER);
+    run.type("x");
+    await run.until("INPUT 1 78\r");
+    run.type("q");
+    await expectRestored(run, 0);
+    expect(inputsOf(run.output()).map((line) => line.hex).join("")).toBe(hex("xq"));
+  }, TEST_MS);
+
+  it("a key typed between the replies during the probe is input, and the replies are not", async () => {
+    const run = start("exit");
+    await run.until(PROBE);
+    const cut = ANSWER.indexOf(`${ESC}]11;`);
+    run.type(`${ANSWER.slice(0, cut)}k${ANSWER.slice(cut)}`);
+    await run.until("READY\r");
+    expect(probeLine(run.output()).result).toMatchObject({ answered: true, background: [255, 255, 255] });
+    run.type("q");
+    await expectRestored(run, 0);
+    expect(inputsOf(run.output()).map((line) => line.hex).join("")).toBe(hex("kq"));
+  }, TEST_MS);
+
+  for (const [what, answer, held] of [
+    ["garbage", `garbage${ESC}[?zz${ESC}]11;`, `${ESC}]11;`],
+    ["a partial reply", `${ESC}]11;rgb:ff`, `${ESC}]11;rgb:ff`],
   ] as const) {
-    it(`swallows ${what}: the probe ends at its limit and only the typed key is input`, async () => {
+    it(`${what} during the probe: the probe ends at its limit, what is no whole reply is input, a broken reply whole at its wait`, async () => {
       const run = start("exit");
       await run.until(PROBE);
-      if (what !== "late replies") run.type(answer);
+      run.type(answer);
       await run.until("READY\r");
       expect(probeLine(run.output()).result).toMatchObject({ answered: false });
-      if (what === "late replies") run.type(answer);
+      await run.until(`INPUT ${held.length} ${hex(held)}\r`);
       run.type("x");
       await run.until("INPUT 1 78\r");
       run.type("q");
       await expectRestored(run, 0);
-      expect(inputLines(run.output())).toEqual(["1 78", "1 71"]);
+      expect(inputsOf(run.output()).map((line) => line.hex).join("")).toBe(hex(`${answer}xq`));
     }, TEST_MS);
   }
+
+  it("1 MiB of text during the probe: the probe ends at its limit and every byte is input", async () => {
+    const run = start("exit");
+    await run.until(PROBE);
+    run.type("A".repeat(1024 * 1024));
+    await run.until("READY\r");
+    expect(probeLine(run.output()).result).toMatchObject({ answered: false });
+    run.type("q");
+    await expectRestored(run, 0);
+    const lines = inputsOf(run.output());
+    expect(lines.reduce((sum, line) => sum + line.length, 0)).toBe(1024 * 1024 + 1);
+    expect(lines.slice(0, -1).every((line) => /^(41)+$/.test(line.hex))).toBe(true);
+  }, TEST_MS);
+});
+
+describe("the module itself gives cooked mode back", () => {
+  it("read while the entry still runs after leave (Bun's own restore at exit does not count here)", async () => {
+    const run = await ready("linger");
+    run.type("q");
+    await run.until(LEAVE);
+    const after = await run.stty();
+    expect([after.canonical, after.echo, after.signals]).toEqual([true, true, true]);
+    expect(run.output().endsWith(LEAVE)).toBe(true);
+    run.signal("SIGTERM");
+    expect((await run.ended).code).toBe(143);
+  }, TEST_MS);
 });
 
 describe("colour depth and modes on a pseudo-terminal", () => {

@@ -82,11 +82,12 @@ function startPty(choice: PtyChoice, command: string[], env: Record<string, stri
 /** The cell grid the output leaves on a terminal of this size, one line a row, trailing blanks cut. */
 async function dumpGrid(output: string, cols: number, rows: number): Promise<string> {
   const module = new GhosttyModule(new WebAssembly.Instance(new WebAssembly.Module(await Bun.file(WASM).arrayBuffer()), {}));
+  // laid out the way herdr-core lays graphemes out, as the screen's own panes are
   const engine = new GhosttyEngine(module, cols, rows, { widths: "core", images: false });
   try {
     engine.write(new TextEncoder().encode(output));
     const lines: string[] = Array.from({ length: rows }, () => "");
-    engine.frame((y, runs) => { lines[y] = runs.flatMap((run) => run.cells.map((cell) => cell.text)).join("").trimEnd(); });
+    engine.frameAll((y, runs) => { lines[y] = runs.flatMap((run) => run.cells.map((cell) => cell.text)).join("").trimEnd(); });
     return `${lines.join("\n")}\n`;
   } finally {
     engine.dispose();
@@ -300,8 +301,6 @@ async function main(): Promise<number> {
   }
 
   if (!finishing && forced === null && options.pty) {
-    // stdout carries the command's output (or the dump) alone: the PTY host's choice is logged to stderr
-    console.log = console.error;
     try {
       ptyRun = startPty(options.pty, options.command, env, options.limitSeconds);
     } catch (error) {

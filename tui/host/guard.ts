@@ -40,14 +40,17 @@ export interface TerminalPort {
   readNow(): void;
   stopReading(): void;
   timer(ms: number, fire: () => void): () => void;
+  /** the clock the timers run on, in ms */
+  now(): number;
   /** installs the hooks; returns their removal */
   hook(hooks: HostHooks): () => void;
   exit(code: number): void;
 }
 
+/** EIO and EPIPE: the terminal is gone; EAGAIN reaches here only once the port gave up waiting for it. */
 const isGone = (error: unknown) => {
   const code = (error as { code?: unknown } | null)?.code;
-  return code === "EIO" || code === "EPIPE";
+  return code === "EIO" || code === "EPIPE" || code === "EAGAIN";
 };
 
 /**
@@ -76,6 +79,7 @@ export function guardedHost(port: TerminalPort): Host {
   let probePromise: Promise<ProbeResult> | null = null;
   let settleProbe: ((result: ProbeResult) => void) | null = null;
   let cancelProbeTimer: (() => void) | null = null;
+  let cancelHoldTimer: (() => void) | null = null;
   let focusTail: Uint8Array = new Uint8Array(0);
 
   let drainState: { chunks: Uint8Array[]; cancel: () => void; resolve: (bytes: Uint8Array) => void } | null = null;
@@ -140,19 +144,8 @@ export function guardedHost(port: TerminalPort): Host {
     return found;
   };
 
-  const take = (chunk: Uint8Array) => {
-    if (state !== "entered") return;
-    let input = chunk;
-    if (phase === "probing" || phase === "late") {
-      const taken = filter.take(chunk, phase);
-      if (phase === "probing") for (const reply of taken.replies) probeResult = withReply(probeResult, reply);
-      input = taken.input;
-      if (taken.rest) {
-        if (phase === "probing") finishProbe(true);
-        phase = "done";
-        input = Buffer.concat([taken.input, taken.rest]);
-      }
-    }
+  /** Input bytes, in order: to a drain while one runs, else to the listeners (after a focus-in, the modes again). */
+  const deliver = (input: Uint8Array) => {
     if (drainState) {
       drainState.chunks.push(input);
       drainState.cancel();
@@ -164,10 +157,39 @@ export function guardedHost(port: TerminalPort): Host {
     for (const listener of inputs) listener(input);
   };
 
+  /** One timer for the sequence the filter holds: when its wait ends, it goes out whole. */
+  const armHold = () => {
+    cancelHoldTimer?.();
+    cancelHoldTimer = null;
+    const due = filter.deadline();
+    if (due === undefined) return;
+    cancelHoldTimer = port.timer(Math.max(0, due - port.now()), () => {
+      cancelHoldTimer = null;
+      if (state !== "entered") return;
+      deliver(filter.expire(port.now()));
+      armHold();
+    });
+  };
+
+  const take = (chunk: Uint8Array) => {
+    if (state !== "entered") return;
+    if (phase !== "probing" && phase !== "late") { deliver(chunk); return; }
+    const taken = filter.feed(chunk, port.now());
+    if (phase === "probing") for (const reply of taken.replies) probeResult = withReply(probeResult, reply);
+    if (taken.rest) {
+      if (phase === "probing") finishProbe(true);
+      phase = "done";
+      deliver(Buffer.concat([taken.input, taken.rest]));
+    } else deliver(taken.input);
+    armHold();
+  };
+
   const leave = () => {
     if (state !== "entered") return;
     state = "left";
     port.stopReading();
+    cancelHoldTimer?.();
+    cancelHoldTimer = null;
     finishProbe(false);
     finishDrain();
     if (modesOn) send(encoder.encode(LEAVE));

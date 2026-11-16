@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { emptyProbe, PROBE_QUERY, type Reply, ReplyFilter, replyAt, themeOf, withReply } from "./probe.ts";
+import { emptyProbe, PROBE_QUERY, type Reply, ReplyFilter, themeOf, withReply } from "./probe.ts";
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 const text = (data: Uint8Array) => new TextDecoder().decode(data);
 const ESC = "\x1b";
 const ST = `${ESC}\\`;
+const reply = (kind: Reply["kind"], data: string): Reply => ({ type: "reply", kind, data });
 
 describe("the start probe's question", () => {
   it("asks for kitty flags, DECRQM 2026, OSC 10, 11 and 12, the cell size, then DA1 last", () => {
@@ -12,56 +13,30 @@ describe("the start probe's question", () => {
   });
 });
 
-describe("replyAt", () => {
-  const at = (data: string) => replyAt(bytes(data), 0);
-
-  it("reads every reply the probe asks for, with its length", () => {
-    expect(at(`${ESC}[?1u`)).toEqual({ reply: { kind: "kitty", flags: 1 }, length: 5 });
-    expect(at(`${ESC}[?2026;2$y`)).toEqual({ reply: { kind: "mode", mode: 2026, value: 2 }, length: 11 });
-    expect(at(`${ESC}]11;rgb:ffff/0000/8080${ST}`)).toEqual({ reply: { kind: "color", which: 11, rgb: [255, 0, 128] }, length: 25 });
-    expect(at(`${ESC}]10;rgb:f/0/8\x07`)).toEqual({ reply: { kind: "color", which: 10, rgb: [255, 0, 136] }, length: 15 });
-    expect(at(`${ESC}]12;#ff0080${ST}`)).toEqual({ reply: { kind: "color", which: 12, rgb: [255, 0, 128] }, length: 14 });
-    expect(at(`${ESC}]11;nonsense${ST}`)).toEqual({ reply: { kind: "color", which: 11, rgb: null }, length: 15 });
-    expect(at(`${ESC}[6;18;9t`)).toEqual({ reply: { kind: "cell", height: 18, width: 9 }, length: 9 });
-    expect(at(`${ESC}[?62;22c`)).toEqual({ reply: { kind: "da1", params: [62, 22] }, length: 9 });
-  });
-
-  it("asks for more bytes while a reply can still be completing", () => {
-    for (const start of [ESC, `${ESC}[`, `${ESC}[?`, `${ESC}[?62;2`, `${ESC}[?2026;2$`, `${ESC}]`, `${ESC}]1`, `${ESC}]11;rgb:ff`, `${ESC}]11;x${ESC}`, `${ESC}[6`, `${ESC}[6;18;`]) {
-      expect([start, at(start)]).toEqual([start, "more"]);
-    }
-  });
-
-  it("takes no key and no other sequence for a reply", () => {
-    for (const other of [`${ESC}[6~`, `${ESC}[6;5~`, `${ESC}[97;5u`, `${ESC}[1;2R`, `${ESC}[I`, `${ESC}[A`, `${ESC}a`, `${ESC}]13;?${ST}`, `${ESC}[?1;2;3u`, "x"]) {
-      expect([other, at(other)]).toEqual([other, null]);
-    }
-  });
-
-  it("gives up on a sequence longer than any reply", () => {
-    expect(at(`${ESC}[?${"1".repeat(100)}`)).toBeNull();
-    expect(at(`${ESC}]11;${"a".repeat(300)}`)).toBeNull();
-  });
-});
-
 describe("the probe's result", () => {
   it("collects the replies and reads light or dark from the background", () => {
     let result = emptyProbe();
-    for (const reply of [
-      { kind: "kitty", flags: 1 }, { kind: "mode", mode: 2026, value: 2 }, { kind: "color", which: 10, rgb: [0, 0, 0] },
-      { kind: "color", which: 11, rgb: [250, 250, 240] }, { kind: "color", which: 12, rgb: [1, 2, 3] }, { kind: "cell", height: 18, width: 9 },
-      { kind: "da1", params: [62, 22] },
-    ] satisfies Reply[]) result = withReply(result, reply);
+    for (const each of [
+      reply("kittyFlags", "1"), reply("mode", "2026;2"), reply("color", "10;rgb:0/0/0"), reply("color", "11;rgb:fafa/fafa/f0f0"),
+      reply("color", "12;#010203"), reply("cellSize", "18;9"), reply("deviceAttributes", "62;22"),
+    ]) result = withReply(result, each);
     expect(result).toEqual({
       answered: true, kittyFlags: 1, syncOutput: true, foreground: [0, 0, 0], background: [250, 250, 240], cursorColor: [1, 2, 3],
       cellPixels: { width: 9, height: 18 }, deviceAttributes: [62, 22], theme: "light",
     });
   });
 
-  it("reads DECRQM 0 and 4 as no synchronized output", () => {
-    expect(withReply(emptyProbe(), { kind: "mode", mode: 2026, value: 0 }).syncOutput).toBe(false);
-    expect(withReply(emptyProbe(), { kind: "mode", mode: 2026, value: 4 }).syncOutput).toBe(false);
-    expect(withReply(emptyProbe(), { kind: "mode", mode: 2026, value: 1 }).syncOutput).toBe(true);
+  it("reads 1 to 4 hex digits a channel, and a colour it cannot read as none", () => {
+    expect(withReply(emptyProbe(), reply("color", "11;rgb:ffff/0000/8080")).background).toEqual([255, 0, 128]);
+    expect(withReply(emptyProbe(), reply("color", "10;rgb:f/0/8")).foreground).toEqual([255, 0, 136]);
+    expect(withReply(emptyProbe(), reply("color", "11;nonsense"))).toMatchObject({ background: null, theme: null });
+  });
+
+  it("reads DECRQM 0 and 4 as no synchronized output, and another mode as nothing", () => {
+    expect(withReply(emptyProbe(), reply("mode", "2026;0")).syncOutput).toBe(false);
+    expect(withReply(emptyProbe(), reply("mode", "2026;4")).syncOutput).toBe(false);
+    expect(withReply(emptyProbe(), reply("mode", "2026;1")).syncOutput).toBe(true);
+    expect(withReply(emptyProbe(), reply("mode", "1004;1")).syncOutput).toBeNull();
   });
 
   it("calls a dark background dark and a light one light", () => {
@@ -76,55 +51,61 @@ describe("the probe's result", () => {
 describe("ReplyFilter", () => {
   const DA1 = `${ESC}[?62;22c`;
 
-  it("keeps everything while probing and hands back what follows the DA1 reply", () => {
+  it("keeps the replies, passes what is no reply, and hands back what follows the DA1 reply", () => {
     const filter = new ReplyFilter();
-    const taken = filter.take(bytes(`typed${ESC}[?1u${ESC}]11;rgb:0/0/0${ST}garbage${DA1}after`), "probing");
-    expect(text(taken.input)).toBe("");
-    expect(taken.replies.map((reply) => reply.kind)).toEqual(["kitty", "color", "da1"]);
-    expect(text(taken.rest!)).toBe("after");
+    const taken = filter.feed(bytes(`typed${ESC}[?1u${ESC}]11;rgb:0/0/0${ST}${ESC}[A${DA1}after${ESC}[?1u`), 0);
+    expect(text(taken.input)).toBe(`typed${ESC}[A`);
+    expect(taken.replies.map((each) => each.kind)).toEqual(["kittyFlags", "color", "deviceAttributes"]);
+    expect(text(taken.rest!)).toBe(`after${ESC}[?1u`);
   });
 
-  it("joins a reply split across reads", () => {
+  it("holds an unfinished sequence however many reads it takes, and keeps it when it ends as a reply", () => {
     const filter = new ReplyFilter();
-    expect(filter.take(bytes(`${ESC}]11;rgb:ff`), "probing").replies).toEqual([]);
-    expect(filter.holding).toBe(11);
-    const second = filter.take(bytes(`ff/ffff/ffff${ST}${ESC}[?6`), "probing");
-    expect(second.replies).toEqual([{ kind: "color", which: 11, rgb: [255, 255, 255] }]);
-    expect(filter.take(bytes("2c"), "probing").replies).toEqual([{ kind: "da1", params: [62] }]);
-  });
-
-  it("after the probe passes typing through and swallows late replies", () => {
-    const filter = new ReplyFilter();
-    const taken = filter.take(bytes(`a${ESC}[?1u${ESC}[Ab${ESC}]10;rgb:0/0/0\x07${ESC}c${DA1}${ESC}[?1u`), "late");
-    expect(text(taken.input)).toBe(`a${ESC}[Ab${ESC}c`);
-    expect(taken.replies.map((reply) => reply.kind)).toEqual(["kitty", "color", "da1"]);
-    expect(text(taken.rest!)).toBe(`${ESC}[?1u`);
-  });
-
-  it("after the probe never holds a lone Escape or the start of a key", () => {
-    const filter = new ReplyFilter();
-    expect(text(filter.take(bytes(ESC), "late").input)).toBe(ESC);
-    expect(text(filter.take(bytes(`${ESC}[`), "late").input)).toBe(`${ESC}[`);
-    expect(text(filter.take(bytes(`${ESC}[6`), "late").input)).toBe(`${ESC}[6`);
+    for (const read of [ESC, "]", "1", "1;rgb:ff", "ff/ffff/ffff", ESC]) expect(filter.feed(bytes(read), 0).input.length).toBe(0);
+    expect(filter.feed(bytes("\\"), 0).replies).toEqual([reply("color", "11;rgb:ffff/ffff/ffff")]);
     expect(filter.holding).toBe(0);
   });
 
-  it("after the probe drops a held reply that the next read does not finish, and keeps that read's typing", () => {
-    const filter = new ReplyFilter();
-    filter.take(bytes(`${ESC}]11;rgb:ff`), "probing");
-    expect(text(filter.take(bytes("x"), "late").input)).toBe("x");
-    expect(filter.holding).toBe(0);
-    filter.take(bytes(`${ESC}[?62`), "late");
-    expect(filter.holding).toBe(5);
-    expect(text(filter.take(bytes(";1c"), "late").input)).toBe("");
-  });
-
-  it("holds little however much garbage arrives", () => {
-    const filter = new ReplyFilter();
-    const chunk = bytes(`${"A".repeat(4000)}${ESC}]11;${"b".repeat(90)}`);
-    for (let i = 0; i < 260; i++) {
-      expect(filter.take(chunk, "probing").input.length).toBe(0);
-      expect(filter.holding).toBeLessThan(300);
+  it("lets a held sequence go whole when its wait ends: ESC_WAIT_SLOW_MS for ESC, `ESC [` and `ESC O`, SEQUENCE_DROP_MS for a longer one", () => {
+    for (const [held, wait] of [[ESC, 150], [`${ESC}[`, 150], [`${ESC}O`, 150], [`${ESC}[6;`, 500], [`${ESC}]11;`, 500]] as const) {
+      const filter = new ReplyFilter();
+      filter.feed(bytes(held), 1000);
+      expect([held, filter.deadline()]).toEqual([held, 1000 + wait]);
+      expect(filter.expire(999 + wait).length).toBe(0);
+      expect(text(filter.expire(1000 + wait))).toBe(held);
+      expect(filter.deadline()).toBeUndefined();
     }
+  });
+
+  it("times a longer held sequence from its first byte", () => {
+    const filter = new ReplyFilter();
+    filter.feed(bytes(ESC), 0);
+    filter.feed(bytes("[6;"), 100);
+    expect(filter.deadline()).toBe(500);
+  });
+
+  it("holds at most SEQUENCE_LIMIT_BYTES of an endless sequence and streams the rest", () => {
+    const filter = new ReplyFilter();
+    let out = text(filter.feed(bytes(`${ESC}[`), 0).input);
+    const chunk = bytes("1".repeat(65536));
+    for (let i = 0; i < 16; i++) {
+      out += text(filter.feed(chunk, 0).input);
+      expect(filter.holding).toBeLessThanOrEqual(4096);
+    }
+    out += text(filter.feed(bytes("m"), 0).input);
+    expect(out).toBe(`${ESC}[${"1".repeat(16 * 65536)}m`);
+  });
+
+  it("gives back a broken OSC whole when an ESC that does not end it comes, and goes on from that ESC", () => {
+    const filter = new ReplyFilter();
+    const taken = filter.feed(bytes(`${ESC}]11;rgb${ESC}[A`), 0);
+    expect(text(taken.input)).toBe(`${ESC}]11;rgb${ESC}[A`);
+  });
+
+  it("never reads a bracketed paste's text for replies", () => {
+    const filter = new ReplyFilter();
+    const taken = filter.feed(bytes(`${ESC}[200~${DA1}${ESC}[?1u${ESC}[201~${ESC}[?1u`), 0);
+    expect(text(taken.input)).toBe(`${ESC}[200~${DA1}${ESC}[?1u${ESC}[201~`);
+    expect(taken.replies).toEqual([reply("kittyFlags", "1")]);
   });
 });

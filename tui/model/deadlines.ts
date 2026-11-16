@@ -29,6 +29,10 @@ export const SEQUENCE_LIMIT_BYTES = 4096;
 export const DRAIN_WAIT_MS = 50;
 /** After a signal gave the terminal back, the host ends the process once its end listeners settle, or after this long. */
 export const SIGNAL_END_WAIT_MS = 2000;
+/** A write the terminal refuses with EAGAIN (a tty another program left non-blocking) is tried again this often... */
+export const WRITE_AGAIN_LIMIT = 2000;
+/** ...this long apart; past the limit the write fails and the host reports the terminal gone. */
+export const WRITE_AGAIN_PAUSE_MS = 1;
 
 export const NO_DEADLINES: Deadlines = new Map();
 

@@ -306,18 +306,32 @@ describe("the start probe", () => {
     expect(seen).toEqual(["x", `${ESC}[?1u`]);
   });
 
-  it("keeps garbage, partial replies and 1 MiB of bytes out of the input; the probe still ends at its limit", async () => {
-    for (const answer of ["garbage", `${ESC}[?zz${ESC}]11;`, `${ESC}]11;rgb:ff`, "A".repeat(1024 * 1024)]) {
-      const host = new HeadlessHost();
-      const seen = inputs(host);
-      host.enter();
-      const probed = host.probe();
-      for (let at = 0; at < answer.length; at += 65536) host.feed(answer.slice(at, at + 65536));
-      host.advance(500);
-      expect((await probed).answered).toBe(false);
-      host.feed("x");
-      expect(seen).toEqual(["x"]);
-    }
+  it("garbage is input, a whole reply inside it is not, and a broken reply is delivered whole at SEQUENCE_DROP_MS; the probe still ends at its limit", async () => {
+    const host = new HeadlessHost();
+    const seen = inputs(host);
+    host.enter();
+    const probed = host.probe();
+    host.feed(`garbage${ESC}[?1u${ESC}]11;rgb:ff`);
+    expect(seen).toEqual(["garbage"]);
+    host.advance(499);
+    expect(seen).toEqual(["garbage"]);
+    host.advance(1);
+    expect(await probed).toMatchObject({ answered: false, kittyFlags: 1, background: null });
+    expect(seen).toEqual(["garbage", `${ESC}]11;rgb:ff`]);
+    host.feed("x");
+    expect(seen).toEqual(["garbage", `${ESC}]11;rgb:ff`, "x"]);
+  });
+
+  it("1 MiB of text during the probe is input, all of it, in order; the probe still ends at its limit", async () => {
+    const host = new HeadlessHost();
+    const seen = inputs(host);
+    host.enter();
+    const probed = host.probe();
+    const text = "A".repeat(1024 * 1024);
+    for (let at = 0; at < text.length; at += 65536) host.feed(text.slice(at, at + 65536));
+    host.advance(500);
+    expect((await probed).answered).toBe(false);
+    expect(seen.join("")).toBe(text);
   });
 
   it("typing that arrives in the same read after the DA1 reply is input", async () => {
@@ -345,6 +359,167 @@ describe("the start probe", () => {
     expect((await probed).answered).toBe(false);
     expect(host.timers()).toBe(0);
     expect(host.output()).toBe(ENTER + PROBE + LEAVE);
+  });
+});
+
+// The filter works on whole sequences, the same way during the probe and after its limit: bytes that
+// cannot start a reply pass at once, an unfinished sequence is held across reads, a finished one of a
+// probe reply's shape stays in the module, any other is delivered whole, and a held one whose wait ends
+// is delivered whole. Time only passes where a case says so.
+const REPLIES = [
+  `${ESC}[?1u`, `${ESC}[?2026;2$y`, `${ESC}]10;rgb:1111/2222/3333${ST}`, `${ESC}]11;rgb:ffff/ffff/ffff\x07`,
+  `${ESC}]12;rgb:0000/0000/0000${ST}`, `${ESC}[6;18;9t`, `${ESC}[?62;22c`,
+];
+const KEYS = ["x", `${ESC}[A`, "\ud55c", `${ESC}[6;5~`];
+const latin = (data: string) => Buffer.from(data, "utf8").toString("latin1");
+const fromLatin = (data: string) => Buffer.from(data, "latin1");
+
+/** A host whose probe is waiting (`probing`) or gave up (`late`), and what reached onInput, byte for byte. */
+async function filtering(phase: "probing" | "late") {
+  const host = new HeadlessHost();
+  const seen: string[] = [];
+  host.onInput((bytes) => seen.push(Buffer.from(bytes).toString("latin1")));
+  host.enter();
+  const probed = host.probe();
+  if (phase === "late") { host.advance(500); await probed; }
+  const feed = (reads: string[]) => { for (const read of reads) host.feed(fromLatin(read)); };
+  return { host, seen, feed, probed };
+}
+
+/** Every way to cut `data` into two and three reads, and byte by byte. */
+function cuts(data: string): string[][] {
+  const out: string[][] = [[...data]];
+  for (let i = 1; i < data.length; i++) {
+    out.push([data.slice(0, i), data.slice(i)]);
+    for (let j = i + 1; j < data.length; j++) out.push([data.slice(0, i), data.slice(i, j), data.slice(j)]);
+  }
+  return out;
+}
+
+describe("probe replies never reach the input, whatever the read boundaries", () => {
+  for (const phase of ["probing", "late"] as const) {
+    it(`${phase}: every reply, cut in two at every offset, in three reads and byte by byte, is never input`, async () => {
+      for (const reply of REPLIES) {
+        for (const reads of cuts(latin(reply))) {
+          const { seen, feed } = await filtering(phase);
+          feed(reads);
+          feed(["k"]);
+          expect([reply, reads, seen]).toEqual([reply, reads, ["k"]]);
+        }
+      }
+    });
+  }
+
+  it("while probing, a reply cut across reads still counts for the result", async () => {
+    const { feed, probed } = await filtering("probing");
+    feed([ESC, "]11;rgb:ffff/ff", "ff/ffff", ST, `${ESC}[?6`, "2c"]);
+    expect(await probed).toMatchObject({ answered: true, background: [255, 255, 255], theme: "light" });
+  });
+});
+
+describe("keys typed during the probe are input, whole and in order", () => {
+  it("each key, whole and cut at every offset, between replies, is delivered and an escape key arrives in one piece", async () => {
+    for (const key of KEYS) {
+      const bytes = latin(key);
+      for (let cut = 0; cut <= bytes.length; cut++) {
+        const { seen, feed, probed } = await filtering("probing");
+        feed([`${latin(REPLIES[0]!)}${bytes.slice(0, cut)}`, `${bytes.slice(cut)}${latin(REPLIES[3]!)}`, latin(REPLIES[6]!)]);
+        expect([key, cut, seen.join("")]).toEqual([key, cut, bytes]);
+        if (key.startsWith(ESC)) expect([key, cut, seen.includes(bytes)]).toEqual([key, cut, true]);
+        expect((await probed).answered).toBe(true);
+      }
+    }
+  });
+
+  it("keys before, between and after the replies come out in the order typed", async () => {
+    const { seen, feed } = await filtering("probing");
+    feed([`x${ESC}[?1u${ESC}[A`, `\xed\x95\x9c${ESC}]10;rgb:0/0/0${ST}${ESC}[6;5~`, `${ESC}[?62c`, "after"]);
+    expect(seen.join("")).toBe(`x${ESC}[A\xed\x95\x9c${ESC}[6;5~after`);
+  });
+});
+
+describe("after the probe's limit", () => {
+  it("ctrl+PageDown in three reads is delivered as one whole sequence", async () => {
+    const { seen, feed } = await filtering("late");
+    feed([`${ESC}[6;`, "5", "~"]);
+    expect(seen).toEqual([`${ESC}[6;5~`]);
+  });
+
+  it("a lone ESC is delivered after ESC_WAIT_SLOW_MS, not before; ESC then a key within it is one Alt chord", async () => {
+    const { host, seen, feed } = await filtering("late");
+    feed([ESC]);
+    host.advance(149);
+    expect(seen).toEqual([]);
+    host.advance(1);
+    expect(seen).toEqual([ESC]);
+    feed([ESC]);
+    host.advance(100);
+    feed(["x"]);
+    expect(seen).toEqual([ESC, `${ESC}x`]);
+  });
+
+  it("an unfinished longer sequence is held until SEQUENCE_DROP_MS after its first byte, then delivered whole", async () => {
+    const { host, seen, feed } = await filtering("late");
+    feed([`${ESC}[6;`]);
+    host.advance(400);
+    feed(["5"]);
+    host.advance(99);
+    expect(seen).toEqual([]);
+    host.advance(1);
+    expect(seen).toEqual([`${ESC}[6;5`]);
+  });
+
+  it("a mouse report and a bracketed-paste start, cut at every offset, arrive whole; the paste's text passes as it comes", async () => {
+    for (const sequence of [`${ESC}[<0;10;5M`, `${ESC}[200~`]) {
+      for (const reads of cuts(sequence).filter((reads) => reads.length <= 2)) {
+        const { seen, feed } = await filtering("late");
+        feed(reads);
+        expect([sequence, reads, seen]).toEqual([sequence, reads, [sequence]]);
+      }
+    }
+    const { seen, feed } = await filtering("late");
+    feed([`${ESC}[200~pasted ${ESC}[?62c text`, `${ESC}[201~`]);
+    expect(seen.join("")).toBe(`${ESC}[200~pasted ${ESC}[?62c text${ESC}[201~`);
+  });
+
+  it("an endless sequence loses none of its bytes (the holding bound is pinned in probe.test.ts)", async () => {
+    const { seen, feed } = await filtering("late");
+    const body = "1".repeat(1024 * 1024);
+    feed([`${ESC}[`]);
+    for (let at = 0; at < body.length; at += 65536) {
+      feed([body.slice(at, at + 65536)]);
+    }
+    feed(["m"]);
+    expect(seen.join("")).toBe(`${ESC}[${body}m`);
+  });
+});
+
+describe("the filter loses and reorders nothing that is not a reply", () => {
+  it("200 seeded interleavings of keys and replies with random cuts give back the keys byte for byte", async () => {
+    const tokens = ["x", "hello", "\xed\x95\x9c", `${ESC}[A`, `${ESC}[6;5~`, `${ESC}[<0;10;5M`, `${ESC}[1;5C`, `${ESC}OP`, `${ESC}[I`, `${ESC}[97;5u`, `${ESC}x`];
+    const replies = REPLIES.slice(0, 6).map(latin);
+    for (let seed = 1; seed <= 200; seed++) {
+      let state = seed;
+      const random = () => { state = (state * 1103515245 + 12345) % 2147483648; return state / 2147483648; };
+      const pick = <T,>(list: readonly T[]) => list[Math.floor(random() * list.length)]!;
+      const parts: string[] = [];
+      let keys = "";
+      for (let n = 0; n < 12; n++) {
+        if (random() < 0.4) parts.push(pick(replies));
+        else { const key = pick(tokens); parts.push(key); keys += key; }
+      }
+      parts.push(latin(REPLIES[6]!));
+      const tail = pick(tokens);
+      parts.push(tail);
+      keys += tail;
+      const stream = parts.join("");
+      const reads: string[] = [];
+      for (let at = 0; at < stream.length;) { const size = 1 + Math.floor(random() * 9); reads.push(stream.slice(at, at + size)); at += size; }
+      const { host, seen, feed } = await filtering(random() < 0.5 ? "probing" : "late");
+      feed(reads);
+      host.advance(1000);
+      expect([seed, seen.join("")]).toEqual([seed, keys]);
+    }
   });
 });
 
