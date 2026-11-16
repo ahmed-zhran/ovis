@@ -41,8 +41,9 @@ export async function connectCoreSocket(path: string = coreSocket().path): Promi
           if (ended) return;
           ended = true;
           queue.length = 0;
-          reading.close();
           settle();
+          // a reader that cancelled the stream closed it already
+          try { reading.close(); } catch { /* cancelled */ }
         },
         // the close that follows ends the line
         error: () => {},

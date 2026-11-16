@@ -177,6 +177,18 @@ describe.skipIf(process.platform === "win32")("the socket transport", () => {
     expect((await transport.readable.getReader().read()).done).toBe(true);
   });
 
+  it("settles exited on kill after the reader was cancelled", async () => {
+    const path = join(dir, "cancel.sock");
+    const core = listen(path);
+    const transport = await connect(path);
+    await until("the transport's connection", () => core.peers.length === 1);
+    let settled = false;
+    void transport.exited.then(() => { settled = true; wake(); });
+    await transport.readable.getReader().cancel();
+    transport.kill();
+    await until("exited", () => settled);
+  });
+
   it("settles exited and ends readable when the core closes the socket", async () => {
     const path = join(dir, "end.sock");
     const core = listen(path);
