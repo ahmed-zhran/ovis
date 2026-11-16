@@ -2,7 +2,7 @@ import { afterAll, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, recordedStarts, signalChildGroup, stopTestCores, stoppedCleanly } from "./test-hc.ts";
+import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, recordStaleStartForTest, signalChildGroup, stopTestCores, stoppedCleanly } from "./test-hc.ts";
 
 // A stand-in hc that writes down how it was run: no real core is started or stopped.
 const root = mkdtempSync(join(tmpdir(), "ovis-test-hc-"));
@@ -110,7 +110,7 @@ it("kills no recorded pid whose start time is not the one recorded with it", asy
   try {
     expect(await corePids(naming("hc-restarted", [other.pid]), env)).toEqual([other.pid]);
     // what a pid recorded for a process that has since ended and whose number came back would carry
-    recordedStarts.set(other.pid, "1");
+    recordStaleStartForTest(other.pid);
     const result = await stopTestCores(silent, [{ env, pids: [other.pid] }], 200);
     expect({ result, alive: alive(other.pid) }).toEqual({ result: { stopped: [0], killed: [], unproven: [other.pid], socketsLeft: [env["HC_SOCKET"]] }, alive: true });
   } finally {
@@ -231,13 +231,22 @@ it("waits for the socket of a core it has no pid for, and names one that stays",
 
 it("waits for the core's pids after its socket went, and kills nothing that ends within the wait", async () => {
   const env = withSocket("early");
-  const core = await sleeper(env);
-  // this core's stop removes its socket at once and its process a moment later, as hc's own stop returns early
+  // a stand-in core that ends by itself once its stop writes to this fifo: nothing signals it
+  const fifo = join(root, "early-stop");
+  expect(Bun.spawnSync(["mkfifo", fifo], { env: { PATH: "/usr/bin:/bin" } }).exitCode).toBe(0);
+  const core = Bun.spawn(["sh", "-c", 'read _ < "$0"', fifo], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"]! } });
+  // its stop removes the socket at once and lets the core go a moment after the stop returned, as hc's own stop does:
+  // that delay is the behaviour under test (the helper must wait for the pid, not only for the socket)
   const early = join(root, "hc-early");
-  writeFileSync(early, `#!/bin/sh\ncase "$1 $2" in\n  "server status") echo '{"pid":${core},"holder":null}' ;;\n  "server stop") rm -f "$HC_SOCKET"; (sleep 0.3; kill ${core}) >/dev/null 2>&1 & ;;\nesac\nexit 0\n`);
+  writeFileSync(early, `#!/bin/sh\ncase "$1 $2" in\n  "server status") echo '{"pid":${core.pid},"holder":null}' ;;\n  "server stop") rm -f "$HC_SOCKET"; (sleep 0.3; timeout 20 sh -c 'echo go > "$0"' '${fifo}') >/dev/null 2>&1 & ;;\nesac\nexit 0\n`);
   chmodSync(early, 0o755);
-  expect(await stopTestCores(early, [{ env, pids: [core] }])).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [] });
-  expect(alive(core)).toBe(false);
+  try {
+    expect(await stopTestCores(early, [{ env, pids: [core.pid] }])).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [] });
+    expect({ exitCode: core.exitCode, signalCode: core.signalCode }).toEqual({ exitCode: 0, signalCode: null });
+  } finally {
+    core.kill();
+    await core.exited;
+  }
 });
 
 it.skipIf(!proc)("asks no status of a core whose pids live but whose socket is gone: status there could start a core", async () => {

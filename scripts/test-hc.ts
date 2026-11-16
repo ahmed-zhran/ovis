@@ -96,9 +96,16 @@ function processGroup(pid: number): number | null {
 /**
  * Every pid a status read of this helper named, with its start time read right then: a later process
  * that gets the same number has another start time. Where there is no /proc nothing is recorded.
- * Exported so a test can give a pid the start time of a process that has since ended.
  */
-export const recordedStarts = new Map<number, string>();
+const recordedStarts = new Map<number, string>();
+
+/**
+ * Test seam, for scripts/test-hc.test.ts alone: records `pid` with a start time no process has, as a
+ * pid whose number came back after its process ended would carry. It can only make a pid unprovable.
+ */
+export function recordStaleStartForTest(pid: number): void {
+  recordedStarts.set(pid, "stale");
+}
 
 function record(pids: number[]): number[] {
   for (const pid of pids) {
@@ -114,7 +121,7 @@ function record(pids: number[]): number[] {
  * keep) names that core's own socket: by HC_SOCKET, or without one through HC_SESSION and
  * XDG_RUNTIME_DIR, as hc works it out (coreSocket). Without /proc nothing is proven.
  */
-export function provenCore(pid: number, socket: string): boolean {
+function provenCore(pid: number, socket: string): boolean {
   const recorded = recordedStarts.get(pid);
   if (recorded === undefined || startTime(pid) !== recorded) return false;
   let environ: string;
@@ -123,6 +130,8 @@ export function provenCore(pid: number, socket: string): boolean {
   } catch {
     return false;
   }
+  // terminal-env.ts's envBlock parses the same way, but it is private there, and its exported processEnv is async: an
+  // await between this proof and the kill would widen the gap a reused pid could slip into
   const env = Object.fromEntries(environ.split("\0").filter((entry) => entry.includes("=")).map((entry) => [entry.slice(0, entry.indexOf("=")), entry.slice(entry.indexOf("=") + 1)]));
   return coreSocket({ env }).path === socket;
 }
