@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodeFrame, FRAME_CLOSE, FRAME_DATA, HcError, type HcTransport, makeFrameReader } from "../../server/herdr-core/connection.ts";
 import { FakeHcCore } from "../../server/herdr-core/core.fake.ts";
-import { LINE_SILENCE_MS, RECONNECT_FIRST_MS, RECONNECT_MOST_MS } from "../model/deadlines.ts";
+import { LINE_SILENCE_MS, LINE_STABLE_MS, RECONNECT_FIRST_MS, RECONNECT_MOST_MS } from "../model/deadlines.ts";
 import type { CoreLink, LinkNotice, LinkOptions } from "./link.ts";
 
 const WAIT_MS = 5000;
@@ -16,7 +16,7 @@ const WAIT_MS = 5000;
  */
 const standInRun = process.env["OVIS_STANDIN_RUN"];
 /** the cases of the first block: the last block checks that the stand-in run passed every one */
-const LINK_CASES = 17;
+const LINK_CASES = 21;
 /** the cases the plan names (row 22), which the last block finds by name among those that passed */
 const NAMED = ["EOF", "missed", "stale socket", "incompatible names the methods", "a call while offline opens no socket"];
 
@@ -72,12 +72,12 @@ class ScriptedCore implements HcTransport {
     this.line(channel, JSON.stringify({ jsonrpc: "2.0", method, params }));
   }
 
-  /** EOF: the core went */
+  /** EOF: the core went. `exited` settles before `readable` ends, in the socket transport's order. */
   end(): void {
     if (this.ended) return;
     this.ended = true;
-    try { this.controller.close(); } catch { /* closed */ }
     this.settle();
+    try { this.controller.close(); } catch { /* closed */ }
   }
 
   private enqueue(bytes: Uint8Array): void {
@@ -215,7 +215,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     await until("Offline", () => link.state.kind === "Offline");
     expect(heard).toEqual([{ reason: "connection_lost" }]);
     expect(timeline.slice(timeline.indexOf("channel closed"))).toEqual(["channel closed", "state Offline"]);
-    expect(link.state).toEqual({ kind: "Offline", retryAt: 1_000 + RECONNECT_FIRST_MS, reason: expect.any(String) });
+    expect(link.state).toEqual({ kind: "Offline", code: "closed", retryAt: 1_000 + RECONNECT_FIRST_MS, reason: expect.any(String) });
     expect([...link.deadlines()]).toEqual([["reconnect", 1_000 + RECONNECT_FIRST_MS]]);
     now = 1_000 + RECONNECT_FIRST_MS - 1;
     link.fire();
@@ -269,7 +269,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     expect(existsSync(stale)).toBe(true);
     const link = start(stale);
     await until("NoCore", () => link.state.kind === "NoCore");
-    expect(link.state).toEqual({ kind: "NoCore", reason: expect.stringContaining("no herdr-core") });
+    expect(link.state).toEqual({ kind: "NoCore", code: "no_core", reason: expect.any(String) });
     // the link waits for whoever starts a core: no retry of its own
     expect([...link.deadlines()]).toEqual([]);
     now = 60_000;
@@ -285,6 +285,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     expect(existsSync(live)).toBe(false);
     const missing = start(join(dir, "absent.sock"));
     await until("NoCore for a missing socket", () => missing.state.kind === "NoCore");
+    expect(missing.state).toEqual({ kind: "NoCore", code: "no_core", reason: expect.any(String) });
   });
 
   it("incompatible names the methods", async () => {
@@ -293,7 +294,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     await serve(core, path);
     const link = start(path);
     await until("Incompatible", () => link.state.kind === "Incompatible");
-    expect(link.state).toEqual({ kind: "Incompatible", missing: ["doc.get", "terminal.attach"], reason: expect.stringMatching(/doc\.get.*terminal\.attach/) });
+    expect(link.state).toEqual({ kind: "Incompatible", code: "missing_methods", missing: ["doc.get", "terminal.attach"], reason: expect.any(String) });
     // nothing after hello, and nothing later: a core that cannot serve the screen is not tried again
     expect(callsByLine(core)).toEqual([["hello"]]);
     expect([...link.deadlines()]).toEqual([]);
@@ -350,7 +351,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     expect(link.state.kind).toBe("Online");
     now = 30_000 + LINE_SILENCE_MS;
     link.fire();
-    expect(link.state).toEqual({ kind: "Offline", retryAt: now + RECONNECT_FIRST_MS, reason: expect.any(String) });
+    expect(link.state).toEqual({ kind: "Offline", code: "silent", retryAt: now + RECONNECT_FIRST_MS, reason: expect.any(String) });
     expect(lost).toBe(1);
     await read(() => core.viewers().length === 0);
     expect(core.viewers()).toEqual([]);
@@ -368,6 +369,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     const waits: number[] = [];
     for (let attempt = 0; attempt < 7; attempt++) {
       const state = link.state as { kind: "Offline"; retryAt: number };
+      if (attempt > 0) expect(link.state).toMatchObject({ code: "no_core" });
       waits.push(state.retryAt - now);
       now = state.retryAt;
       link.fire();
@@ -380,9 +382,11 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     now = (link.state as { retryAt: number }).retryAt;
     link.fire();
     await online(link, 2);
+    // a line that stayed up LINE_STABLE_MS was healthy: after it the wait starts again at the first
+    now += LINE_STABLE_MS;
     again.restart();
     await until("Offline again", () => link.state.kind === "Offline");
-    expect(link.state).toMatchObject({ retryAt: now + RECONNECT_FIRST_MS });
+    expect(link.state).toMatchObject({ code: "closed", retryAt: now + RECONNECT_FIRST_MS });
   });
 
   for (const step of ["hello", "events.subscribe", "herdr-app", "ovis-layout"]) {
@@ -419,6 +423,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
       await online(link, 1);
       cores[0]!.line(1, bad);
       await until("Offline", () => link.state.kind === "Offline");
+      expect(link.state).toMatchObject({ code: "bad_line" });
       expect(cores[0]!.ended).toBe(true);
       await link.close();
     }
@@ -430,14 +435,14 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     await until("Offline", () => link.state.kind === "Offline");
     expect(cores[0]!.calls).toEqual(["hello", "events.subscribe"]);
     expect(cores[0]!.ended).toBe(true);
-    expect(link.state).toMatchObject({ retryAt: RECONNECT_FIRST_MS });
+    expect(link.state).toMatchObject({ code: "bad_line", retryAt: RECONNECT_FIRST_MS });
   });
 
   it("is incompatible with a core of another protocol generation", async () => {
     const { cores, connect } = scripted(subscribing(), { ...HELLO, generation: 2 });
     const link = start("scripted", connect);
     await until("Incompatible", () => link.state.kind === "Incompatible");
-    expect(link.state).toEqual({ kind: "Incompatible", missing: [], reason: expect.stringContaining("generation 2") });
+    expect(link.state).toEqual({ kind: "Incompatible", code: "bad_hello", missing: [], reason: expect.any(String) });
     expect(cores[0]!.calls).toEqual(["hello"]);
     expect([...link.deadlines()]).toEqual([]);
   });
@@ -472,12 +477,116 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     await until("the call at the core", () => cores[0]!.calls.includes("terminal.get"));
     cores[0]!.end();
     expect(await pending).not.toBe("answered");
+    expect(link.state).toMatchObject({ kind: "Offline", code: "closed" });
     hold = false;
     now = RECONNECT_FIRST_MS;
     link.fire();
     await online(link, 2);
     // the new line was asked only what coming up asks: the old call was not sent again
     expect(cores[1]!.calls).toEqual(COMING_UP);
+  });
+
+  it("reads a layout document again when hc says it changed, and only then", async () => {
+    const versions: Record<string, number> = { "herdr-app": 0, "ovis-layout": 0 };
+    const { cores, connect } = scripted((method, params) => {
+      if (method === "doc.get") return { value: null, version: versions[String(params["name"])] };
+      if (method === "machine.list") return { machines: [] };
+      return subscribing()(method);
+    });
+    const link = start("scripted", connect);
+    await online(link, 1);
+    const core = cores[0]!;
+    const reads = () => core.calls.filter((call) => call.startsWith("doc.get"));
+    const docNotices = (name: string) => notices.flatMap((notice) => (notice.type === "doc" && notice.name === name ? [notice.doc.version] : []));
+    let seq = 2;
+    for (const name of ["ovis-layout", "herdr-app"]) {
+      versions[name] = 2;
+      core.notify(1, "event", { seq: seq++, type: "doc", data: { name, version: 2 } });
+      await until(`${name} read again`, () => docNotices(name).includes(2));
+      // the same version and an older one: nothing is read
+      core.notify(1, "event", { seq: seq++, type: "doc", data: { name, version: 2 } });
+      core.notify(1, "event", { seq: seq++, type: "doc", data: { name, version: 1 } });
+      const told = notices.length;
+      await until("both events told", () => notices.length >= told + 2);
+      // a call after them goes out behind any read they would have asked for
+      await link.call("machine.list", {});
+      expect(docNotices(name)).toEqual([0, 2]);
+    }
+    expect(reads()).toEqual(["doc.get herdr-app", "doc.get ovis-layout", "doc.get ovis-layout", "doc.get herdr-app"]);
+  });
+
+  it("can be read from inside its first notice, which comes after openLink returned", async () => {
+    const path = socket();
+    const core = new FakeHcCore();
+    await serve(core, path);
+    const seen: string[] = [];
+    const link: CoreLink = openLink({
+      socket: path,
+      now: () => now,
+      model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
+      notify: (notice) => { seen.push(`${notice.type} ${link.state.kind}`); wake(); },
+    });
+    links.push(link);
+    expect(seen).toEqual([]);
+    expect(link.state.kind).toBe("Connecting");
+    await until("Online", () => link.state.kind === "Online");
+    expect(seen).toEqual(["state Connecting", "state Online", "snapshot Online", "doc Online", "doc Online"]);
+  });
+
+  it("a notify that throws strands nothing: the line it broke ends, and the next fire() throws it", async () => {
+    const path = socket();
+    const core = new FakeHcCore();
+    await serve(core, path);
+    core.spawn();
+    const broken = new Error("the owner's handler broke");
+    let breakOn: (notice: LinkNotice) => boolean = (notice) => notice.type === "state" && notice.state.kind === "Connecting";
+    const link = openLink({
+      socket: path,
+      now: () => now,
+      model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
+      notify: (notice) => {
+        notices.push(notice);
+        wake();
+        if (breakOn(notice)) { breakOn = () => false; throw broken; }
+      },
+    });
+    links.push(link);
+    // thrown on the first notice: the link still comes up, and asks to be fired at once
+    await online(link, 1);
+    expect(link.deadlines().get("failure")).toBe(now);
+    expect(() => link.fire()).toThrow(broken);
+    expect([...link.deadlines()]).toEqual([["silence", LINE_SILENCE_MS]]);
+    // thrown on an event: what the owner was told can no longer be trusted, so the line ends as an unreadable one does
+    now = 1_000;
+    breakOn = (notice) => notice.type === "event";
+    core.spawn();
+    await until("Offline", () => link.state.kind === "Offline");
+    expect(link.state).toEqual({ kind: "Offline", code: "notify_failed", retryAt: 1_000 + RECONNECT_FIRST_MS, reason: expect.any(String) });
+    expect(() => link.fire()).toThrow(broken);
+    now = 1_000 + RECONNECT_FIRST_MS;
+    link.fire();
+    await online(link, 2);
+  });
+
+  it("backs off a core that breaks its line right after coming up, and starts again at the first wait only after a stable line", async () => {
+    const { cores, connect } = scripted(subscribing());
+    const link = start("scripted", connect);
+    const waits: number[] = [];
+    for (let epoch = 1; epoch <= 6; epoch++) {
+      await online(link, epoch);
+      cores.at(-1)!.line(1, "not json");
+      await until(`Offline after epoch ${epoch}`, () => link.state.kind === "Offline");
+      const state = link.state as { kind: "Offline"; retryAt: number };
+      waits.push(state.retryAt - now);
+      now = state.retryAt;
+      link.fire();
+    }
+    expect(waits).toEqual([250, 500, 1_000, 2_000, 4_000, RECONNECT_MOST_MS]);
+    await online(link, 7);
+    now += LINE_STABLE_MS;
+    cores.at(-1)!.line(1, "not json");
+    await until("Offline after a stable line", () => link.state.kind === "Offline");
+    expect(link.state).toMatchObject({ code: "bad_line", retryAt: now + RECONNECT_FIRST_MS });
   });
 
   it("refuses calls once closed, and closes the event stream before its line", async () => {
@@ -487,7 +596,7 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
     const link = start(path);
     await online(link, 1);
     await link.close();
-    expect(link.state).toEqual({ kind: "Offline", retryAt: null, reason: expect.any(String) });
+    expect(link.state).toEqual({ kind: "Offline", code: "link_closed", retryAt: null, reason: expect.any(String) });
     expect(core.log.filter((entry) => entry.what === "frame" && entry.from === "viewer" && entry.kind === FRAME_CLOSE)).toHaveLength(1);
     expect(await failure(link.call("terminal.list", {}))).toBe("offline");
     expect([...link.deadlines()]).toEqual([]);

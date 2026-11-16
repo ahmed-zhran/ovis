@@ -13,7 +13,9 @@
  * The line ends on an EOF, on an event stream hc closed or that sent what cannot be read, and after
  * LINE_SILENCE_MS without an event or heartbeat. Then every channel on it hears `connection_lost`,
  * the link is Offline, and a new line is tried after RECONNECT_FIRST_MS, doubling to
- * RECONNECT_MOST_MS. Nothing written on the old line is written again. Every call of the screen
+ * RECONNECT_MOST_MS; the wait starts again at the first only after a line that stayed up
+ * LINE_STABLE_MS. Nothing written on the old line is written again. Every state without a core
+ * carries a stable `code` beside its `reason`, which is for people. Every call of the screen
  * goes through `call`, `hello` or `attach` and is refused with `offline` unless the link is Online,
  * so a call never opens a line by itself (an HcConnection would).
  *
@@ -28,7 +30,7 @@ import type { DocGetResult, HcMethod, HcMethods, TerminalAttachParams } from "..
 import { OVIS_LAYOUT_DOC } from "../../server/herdr-core/layout-doc.ts";
 import { LAYOUT_DOC } from "../../server/herdr-core/snapshot.ts";
 import { connectCoreSocket } from "../../server/herdr-core/socket-transport.ts";
-import { type Deadlines, LINE_SILENCE_MS, NO_DEADLINES, RECONNECT_FIRST_MS, RECONNECT_MOST_MS, setDeadline } from "../model/deadlines.ts";
+import { type Deadlines, LINE_SILENCE_MS, LINE_STABLE_MS, NO_DEADLINES, RECONNECT_FIRST_MS, RECONNECT_MOST_MS, setDeadline } from "../model/deadlines.ts";
 
 /**
  * The calls the screen makes, which a core's hello must name: the event stream, documents, attach,
@@ -46,6 +48,27 @@ export const OFFLINE = "offline";
 /** The names under which the link's deadlines appear in `deadlines()`. */
 export const RECONNECT_DEADLINE = "reconnect";
 export const SILENCE_DEADLINE = "silence";
+/** due at once while an error thrown by `notify` waits to be thrown by `fire` */
+export const FAILURE_DEADLINE = "failure";
+
+/**
+ * Why there is no core to talk to, from the socket transport's error kind: `no_core` (no socket file,
+ * or one nobody listens on), `refused` (the test-session guard kept the user's own core out of
+ * reach), `unreachable` (the socket could not be opened at all).
+ */
+export type NoCoreCode = "no_core" | "refused" | "unreachable";
+/**
+ * Why the link is Offline: a NoCoreCode when a retry found no core; else why the line ended:
+ * `closed` (EOF, or the connection's own `closed`), `timeout` (a call or hello went unanswered),
+ * `bad_line` (the event stream closed while the line stayed, or brought what cannot be read: a line
+ * that is not JSON or too long, a `missed` or a subscribe answer without its snapshot, an invalid
+ * frame), `call_failed` (the core refused a call the link needs), `silent` (LINE_SILENCE_MS without
+ * an event or heartbeat), `notify_failed` (the owner's `notify` threw); or `link_closed` (closed by
+ * its owner, never retried).
+ */
+export type OfflineCode = NoCoreCode | "closed" | "timeout" | "bad_line" | "call_failed" | "silent" | "notify_failed" | "link_closed";
+/** Why the core cannot serve the screen: `bad_hello` (the connection's kind for a hello it cannot speak to: another protocol generation, no framed mode) or `missing_methods`. */
+export type IncompatibleCode = "bad_hello" | "missing_methods";
 
 /**
  * Where the link stands:
@@ -56,25 +79,25 @@ export const SILENCE_DEADLINE = "silence";
  * - Incompatible: the core cannot serve the screen (another protocol, or without `missing`); it is not tried again.
  */
 export type LinkState =
-  | { kind: "NoCore"; reason: string }
+  | { kind: "NoCore"; code: NoCoreCode; reason: string }
   | { kind: "Connecting" }
   | { kind: "Online"; epoch: number }
-  | { kind: "Offline"; retryAt: number | null; reason: string }
-  | { kind: "Incompatible"; reason: string; missing: string[] };
+  | { kind: "Offline"; code: OfflineCode; retryAt: number | null; reason: string }
+  | { kind: "Incompatible"; code: IncompatibleCode; reason: string; missing: string[] };
 
 /**
  * What the link tells its owner, in the order it happened:
  * - `state`: the link's state changed;
- * - `snapshot`: the terminals as hc gave them, as a whole, in a fresh core model (`connect`: the
+ * - `snapshot`: the terminals as hc gave them, as a whole, now in a fresh core model (`connect`: the
  *   first on a new line, `seq` its subscribe answer's; `missed`: hc's snapshot after events were
- *   lost). `changes` are only those of events read meanwhile: each terminal's own state is in `terminals`;
+ *   lost). It makes no change records: each terminal's state is read from `terminals`;
  * - `doc`: a layout document as read;
  * - `event`: one hc event above the snapshot's seq, and the change records the model made of it.
  * Each carries the epoch of the line it came from.
  */
 export type LinkNotice =
   | { type: "state"; state: LinkState }
-  | { type: "snapshot"; epoch: number; cause: "connect" | "missed"; seq: number; terminals: unknown[]; changes: CoreChange[] }
+  | { type: "snapshot"; epoch: number; cause: "connect" | "missed"; seq: number; terminals: unknown[] }
   | { type: "doc"; epoch: number; name: string; doc: DocGetResult }
   | { type: "event"; epoch: number; seq: number | null; event: HcEvent; changes: CoreChange[] };
 
@@ -85,7 +108,11 @@ export interface LinkOptions {
   now: () => number;
   /** what each fresh core model is made with: one on every new line and after every `missed` */
   model: Parameters<typeof coreModel>[0];
-  /** hears every notice, in order */
+  /**
+   * hears every notice, in order, the first after `openLink` returned. What it throws ends the line
+   * in use (`notify_failed`), as a line that cannot be read does, and is thrown by the next `fire`
+   * or `connect` (FAILURE_DEADLINE asks for that `fire` at once).
+   */
   notify: (notice: LinkNotice) => void;
   /** one attempt at the socket: socket-transport.ts's own, which a test may wrap */
   connect?: (path: string) => Promise<HcTransport>;
@@ -94,11 +121,11 @@ export interface LinkOptions {
 /** The link as the screen uses it; `call` and `hello` stand in for an HcConnection's (seen-label.ts, layout-ops.ts). */
 export interface CoreLink {
   readonly state: LinkState;
-  /** One attempt at a new line now, from NoCore (a core was started) or Offline (in place of the waiting retry). */
+  /** One attempt at a new line now, from NoCore (a core was started) or Offline (in place of the waiting retry); then throws what `notify` threw, if anything. */
   connect(): void;
-  /** Acts on what is due by the clock: a retry, or the end of a silent line. */
+  /** Acts on what is due by the clock (a retry, or the end of a silent line), then throws what `notify` threw, if anything. */
   fire(): void;
-  /** When `fire` has something to do next: RECONNECT_DEADLINE while Offline, SILENCE_DEADLINE while Online. */
+  /** When `fire` has something to do next: RECONNECT_DEADLINE while Offline, SILENCE_DEADLINE while Online, FAILURE_DEADLINE now while `notify` threw. */
   deadlines(): Deadlines;
   call<M extends HcMethod>(method: M, params: HcMethods[M]["params"], timeoutMs?: number): Promise<HcMethods[M]["result"]>;
   hello(): Promise<HelloInfo>;
@@ -129,19 +156,36 @@ interface Line {
   docs: Map<string, DocGetResult>;
   /** when the event stream last brought a line */
   heardAt: number;
+  /** when the line came up (null: not yet): one that stayed up LINE_STABLE_MS was healthy */
+  onlineAt: number | null;
 }
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/** A link to the core at `options.socket`, connecting at once. */
+/** Why there is no core, from the socket transport's error kind (socket-transport.ts). */
+function noCoreCode(error: unknown): NoCoreCode {
+  const kind = error instanceof HcError ? error.kind : null;
+  return kind === "no_core" ? "no_core" : kind === "live_core_refused" ? "refused" : "unreachable";
+}
+
+/** Why a call the link needs failed, from the connection's error kind (connection.ts). */
+function callCode(error: unknown): OfflineCode {
+  const kind = error instanceof HcError ? error.kind : null;
+  if (kind === "closed" || kind === OFFLINE) return "closed";
+  if (kind === "timeout") return "timeout";
+  if (kind === "bad_frame") return "bad_line";
+  return "call_failed";
+}
+
+/** A link to the core at `options.socket`: Connecting at once, with its first notice after this returned. */
 export function openLink(options: LinkOptions): CoreLink {
   const link = new Link(options);
-  link.connect();
+  link.start();
   return link;
 }
 
 class Link implements CoreLink {
-  private current: LinkState = { kind: "NoCore", reason: "not connected yet" };
+  private current: LinkState = { kind: "Connecting" };
   private line: Line | null = null;
   private epochs = 0;
   private delay = RECONNECT_FIRST_MS;
@@ -150,6 +194,8 @@ class Link implements CoreLink {
   /** a line ended and no new one came up since: a failed attempt waits and tries again, instead of NoCore */
   private retrying = false;
   private closed = false;
+  /** what `notify` threw, until `fire` or `connect` throws it */
+  private failure: { error: unknown } | null = null;
   private readonly open: (path: string) => Promise<HcTransport>;
 
   constructor(private readonly options: LinkOptions) {
@@ -160,27 +206,36 @@ class Link implements CoreLink {
     return this.current;
   }
 
+  /** The first attempt, begun once `openLink` returned, so that its first notice can read the link. */
+  start(): void {
+    const attempt = ++this.attempt;
+    queueMicrotask(() => { if (attempt === this.attempt) void this.newLine(); });
+  }
+
   connect(): void {
-    if (this.closed || (this.current.kind !== "NoCore" && this.current.kind !== "Offline")) return;
-    void this.newLine();
+    if (!this.closed && (this.current.kind === "NoCore" || this.current.kind === "Offline")) void this.newLine();
+    this.raise();
   }
 
   fire(): void {
     const now = this.options.now();
     const state = this.current;
-    if (state.kind === "Offline" && state.retryAt !== null && now >= state.retryAt) {
-      this.connect();
-      return;
-    }
     const line = this.line;
-    if (state.kind === "Online" && line && now >= line.heardAt + LINE_SILENCE_MS) this.lineEnded(line, `herdr-core sent no event and no heartbeat for ${LINE_SILENCE_MS} ms`);
+    if (state.kind === "Offline" && state.retryAt !== null && now >= state.retryAt) {
+      if (!this.closed) void this.newLine();
+    } else if (state.kind === "Online" && line && now >= line.heardAt + LINE_SILENCE_MS) {
+      this.lineEnded(line, "silent", `herdr-core sent no event and no heartbeat for ${LINE_SILENCE_MS} ms`);
+    }
+    this.raise();
   }
 
   deadlines(): Deadlines {
     const state = this.current;
-    if (state.kind === "Offline" && state.retryAt !== null) return setDeadline(NO_DEADLINES, RECONNECT_DEADLINE, state.retryAt);
-    if (state.kind === "Online" && this.line) return setDeadline(NO_DEADLINES, SILENCE_DEADLINE, this.line.heardAt + LINE_SILENCE_MS);
-    return NO_DEADLINES;
+    let deadlines = NO_DEADLINES;
+    if (state.kind === "Offline" && state.retryAt !== null) deadlines = setDeadline(deadlines, RECONNECT_DEADLINE, state.retryAt);
+    if (state.kind === "Online" && this.line) deadlines = setDeadline(deadlines, SILENCE_DEADLINE, this.line.heardAt + LINE_SILENCE_MS);
+    if (this.failure) deadlines = setDeadline(deadlines, FAILURE_DEADLINE, this.options.now());
+    return deadlines;
   }
 
   async call<M extends HcMethod>(method: M, params: HcMethods[M]["params"], timeoutMs?: number): Promise<HcMethods[M]["result"]> {
@@ -206,7 +261,7 @@ class Link implements CoreLink {
       await line.events?.close();
       line.hc.close();
     }
-    this.setState({ kind: "Offline", retryAt: null, reason: "the link was closed" });
+    this.setState({ kind: "Offline", code: "link_closed", retryAt: null, reason: "the link was closed" });
   }
 
   /** The current line, when the link is Online; otherwise the call is refused. */
@@ -218,7 +273,28 @@ class Link implements CoreLink {
 
   private setState(state: LinkState): void {
     this.current = state;
-    this.options.notify({ type: "state", state });
+    this.deliver({ type: "state", state });
+  }
+
+  /**
+   * Tells the owner. What `notify` throws is kept for `fire` to throw, and ends the line in use: the
+   * owner missed what it was told, so what it holds can no longer be trusted, as after a bad line.
+   */
+  private deliver(notice: LinkNotice): void {
+    try {
+      this.options.notify(notice);
+    } catch (error) {
+      this.failure ??= { error };
+      const line = this.line;
+      if (line && !line.over) this.lineEnded(line, "notify_failed", `the link's owner failed on a notice: ${messageOf(error)}`);
+    }
+  }
+
+  /** Throws what `notify` threw, once. */
+  private raise(): void {
+    const failure = this.failure;
+    this.failure = null;
+    if (failure) throw failure.error;
   }
 
   private async newLine(): Promise<void> {
@@ -229,9 +305,9 @@ class Link implements CoreLink {
       transport = await this.open(this.options.socket);
     } catch (error) {
       if (attempt !== this.attempt) return;
-      // no core there (`no_core`), or a socket that cannot be opened at all (`closed`): either way none to talk to
-      if (this.retrying) this.retryLater(messageOf(error));
-      else this.setState({ kind: "NoCore", reason: messageOf(error) });
+      // no core there (`no_core`), or a socket that cannot be opened at all: either way none to talk to
+      if (this.retrying) this.retryLater(noCoreCode(error), messageOf(error));
+      else this.setState({ kind: "NoCore", code: noCoreCode(error), reason: messageOf(error) });
       return;
     }
     if (attempt !== this.attempt) {
@@ -245,23 +321,25 @@ class Link implements CoreLink {
       handedOut = true;
       return transport;
     });
-    const line: Line = { hc, over: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, held: null, docs: new Map(), heardAt: this.options.now() };
+    const line: Line = { hc, over: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, held: null, docs: new Map(), heardAt: this.options.now(), onlineAt: null };
     this.line = line;
-    void transport.exited.then(() => this.lineEnded(line, "herdr-core's line ended"));
+    // before the connection's own watch: the socket transport settles `exited` before it ends `readable`,
+    // so an EOF is told here as `closed` before the event stream's close could tell it as a bad line
+    void transport.exited.then(() => this.lineEnded(line, "closed", "herdr-core's line ended"));
 
     let hello: HelloInfo;
     try {
       hello = await hc.hello();
     } catch (error) {
-      if (error instanceof HcError && error.kind === "bad_hello") this.incompatible(line, error.message, []);
-      else this.lineEnded(line, messageOf(error));
+      if (error instanceof HcError && error.kind === "bad_hello") this.incompatible(line, "bad_hello", error.message, []);
+      else this.lineEnded(line, callCode(error), messageOf(error));
       return;
     }
     if (line.over) return;
     line.hello = hello;
     const missing = SCREEN_METHODS.filter((method) => !hello.methods.includes(method));
     if (missing.length > 0) {
-      this.incompatible(line, `herdr-core ${hello.version} does not answer ${missing.join(", ")}`, missing);
+      this.incompatible(line, "missing_methods", `herdr-core ${hello.version} does not answer ${missing.join(", ")}`, missing);
       return;
     }
 
@@ -270,22 +348,22 @@ class Link implements CoreLink {
       subscribed = await openEventStream(hc, {
         event: (event, seq) => this.onEvent(line, event, seq),
         resync: (missed) => {
-          if (!missed) this.lineEnded(line, "herdr-core's event stream ended or sent what cannot be read");
+          if (!missed) this.lineEnded(line, "bad_line", "herdr-core's event stream ended or sent what cannot be read");
           else if (line.early) line.early.push({ missed });
           else void this.resync(line, missed);
         },
-        tooLong: () => this.lineEnded(line, "herdr-core sent an event line over its size limit"),
+        tooLong: () => this.lineEnded(line, "bad_line", "herdr-core sent an event line over its size limit"),
         heard: () => { line.heardAt = this.options.now(); },
       });
     } catch (error) {
-      this.lineEnded(line, messageOf(error));
+      this.lineEnded(line, callCode(error), messageOf(error));
       return;
     }
     if (line.over) return;
     line.events = subscribed.channel;
     const { seq, terminals } = subscribed.result as { seq: unknown; terminals: unknown };
     if (typeof seq !== "number" || !Array.isArray(terminals)) {
-      this.lineEnded(line, "herdr-core answered events.subscribe without a snapshot");
+      this.lineEnded(line, "bad_line", "herdr-core answered events.subscribe without a snapshot");
       return;
     }
     // what came with or right after the answer: a `missed` among it is the newer snapshot
@@ -308,33 +386,36 @@ class Link implements CoreLink {
     const round = ++line.round;
     line.floor = snapshot.seq;
     line.model = coreModel(this.options.model);
-    const changes = line.model.seed(snapshot.terminals);
+    // a fresh model has no event waiting for its snapshot, so seeding it makes no change record
+    line.model.seed(snapshot.terminals);
     const held: ((epoch: number) => LinkNotice)[] = [];
     line.held = held;
     let docs: DocGetResult[];
     try {
       docs = await Promise.all(LINK_DOCS.map((name) => line.hc.call("doc.get", { name })));
     } catch (error) {
-      this.lineEnded(line, `herdr-core's layout documents could not be read: ${messageOf(error)}`);
+      this.lineEnded(line, callCode(error), `herdr-core's layout documents could not be read: ${messageOf(error)}`);
       return;
     }
     if (line.over || round !== line.round) return;
     line.held = null;
+    LINK_DOCS.forEach((name, at) => line.docs.set(name, docs[at]!));
     const cause = line.epoch === 0 ? "connect" : "missed";
     if (cause === "connect") {
       line.epoch = ++this.epochs;
       line.heardAt = this.options.now();
-      this.delay = RECONNECT_FIRST_MS;
+      line.onlineAt = line.heardAt;
       this.retrying = false;
       this.setState({ kind: "Online", epoch: line.epoch });
     }
     const { epoch } = line;
-    this.options.notify({ type: "snapshot", epoch, cause, seq: snapshot.seq, terminals: snapshot.terminals, changes });
-    LINK_DOCS.forEach((name, at) => {
-      line.docs.set(name, docs[at]!);
-      this.options.notify({ type: "doc", epoch, name, doc: docs[at]! });
-    });
-    for (const notice of held) this.options.notify(notice(epoch));
+    const notices: LinkNotice[] = [
+      { type: "snapshot", epoch, cause, seq: snapshot.seq, terminals: snapshot.terminals },
+      ...LINK_DOCS.map((name, at): LinkNotice => ({ type: "doc", epoch, name, doc: docs[at]! })),
+      ...held.map((notice) => notice(epoch)),
+    ];
+    // a notice the owner failed on ends the line: nothing after it is told
+    for (const notice of notices) if (!line.over) this.deliver(notice);
   }
 
   private onEvent(line: Line, event: HcEvent, seq: number | null): void {
@@ -359,7 +440,7 @@ class Link implements CoreLink {
     try {
       doc = await line.hc.call("doc.get", { name });
     } catch (error) {
-      this.lineEnded(line, `herdr-core's ${name} document could not be read: ${messageOf(error)}`);
+      this.lineEnded(line, callCode(error), `herdr-core's ${name} document could not be read: ${messageOf(error)}`);
       return;
     }
     if (line.over || doc.version <= (line.docs.get(name)?.version ?? -1)) return;
@@ -369,14 +450,15 @@ class Link implements CoreLink {
 
   private tell(line: Line, notice: (epoch: number) => LinkNotice): void {
     if (line.held) line.held.push(notice);
-    else this.options.notify(notice(line.epoch));
+    else this.deliver(notice(line.epoch));
   }
 
   /**
    * The line is over, once: every channel on it hears `connection_lost` (HcConnection's close), and
-   * the link waits to try a new one.
+   * the link waits to try a new one. After a line that stayed up LINE_STABLE_MS the wait starts
+   * again at the first; after a shorter one it keeps doubling.
    */
-  private lineEnded(line: Line, reason: string): void {
+  private lineEnded(line: Line, code: OfflineCode, reason: string): void {
     if (line.over) return;
     line.over = true;
     line.held = null;
@@ -384,19 +466,20 @@ class Link implements CoreLink {
     if (this.line !== line) return;
     this.line = null;
     this.retrying = true;
-    this.retryLater(reason);
+    if (line.onlineAt !== null && this.options.now() - line.onlineAt >= LINE_STABLE_MS) this.delay = RECONNECT_FIRST_MS;
+    this.retryLater(code, reason);
   }
 
-  private retryLater(reason: string): void {
+  private retryLater(code: OfflineCode, reason: string): void {
     const retryAt = this.options.now() + this.delay;
     this.delay = Math.min(this.delay * 2, RECONNECT_MOST_MS);
-    this.setState({ kind: "Offline", retryAt, reason });
+    this.setState({ kind: "Offline", code, retryAt, reason });
   }
 
-  private incompatible(line: Line, reason: string, missing: string[]): void {
+  private incompatible(line: Line, code: IncompatibleCode, reason: string, missing: string[]): void {
     line.over = true;
     line.hc.close();
     if (this.line === line) this.line = null;
-    this.setState({ kind: "Incompatible", reason, missing });
+    this.setState({ kind: "Incompatible", code, reason, missing });
   }
 }

@@ -93,7 +93,7 @@ describe.skipIf(!bin || process.platform === "win32")("the core link against a r
       link.fire();
       await until(`attempt ${attempt} to fail`, () => link!.state.kind === "Offline" && (link!.state as { retryAt: number }).retryAt > now);
     }
-    expect(link.state).toMatchObject({ kind: "Offline", reason: expect.stringContaining("no herdr-core") });
+    expect(link.state).toMatchObject({ kind: "Offline", code: "no_core" });
     expect(existsSync(first.socket)).toBe(false);
     expect(runningIn(folder.root)).toEqual([]);
 
