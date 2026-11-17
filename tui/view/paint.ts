@@ -57,7 +57,12 @@ export interface PaneScene {
   scrolledBack: boolean;
   /** dimmed last picture while the pane or the core link is not live */
   dim?: boolean;
+  /** cells of its grid drawn inverted: from `start` to `end` (either order) row by row, both included */
+  selection?: { start: GridCell; end: GridCell };
 }
+
+/** A cell of a pane's terminal grid: x the column, y the row, both from 0. */
+export interface GridCell { x: number; y: number }
 
 export interface Scene {
   width: number;
@@ -163,6 +168,8 @@ export class Painter {
   private layout: string | null = null;
   private readonly versions = new Map<string, string | number>();
   private readonly partHits = new Map<string, Hit[]>();
+  /** each pane's selection as last drawn: a pane whose selection changed is drawn again whole */
+  private readonly selections = new Map<string, string>();
   private written: HostCursor | null = null;
   private shape: string | null = null;
   private cut = false;
@@ -198,6 +205,7 @@ export class Painter {
       this.touched.fill(1);
       this.versions.clear();
       this.partHits.clear();
+      this.selections.clear();
     }
 
     const screen: Rect = { x: 0, y: 0, width, height };
@@ -329,8 +337,11 @@ export class Painter {
     hits.push({ rect: clip, target: { pane: pane.id } });
     const source = pane.grid;
     const view = pane.view ?? { col: 0, row: 0 };
+    const selection = pane.selection ? JSON.stringify(ordered(pane.selection)) : "";
+    const reselected = (this.selections.get(pane.id) ?? "") !== selection;
+    this.selections.set(pane.id, selection);
     if (clip.width > 0) {
-      const rows = new Set(full || source.allDirty ? range(clip.y, clip.y + clip.height) : [...source.dirty].map((gy) => pane.rect.y + gy - view.row));
+      const rows = new Set(full || source.allDirty || reselected ? range(clip.y, clip.y + clip.height) : [...source.dirty].map((gy) => pane.rect.y + gy - view.row));
       for (const rect of redrawn) {
         const under = intersect(rect, clip);
         for (let row = under.y; row < under.y + under.height; row++) rows.add(row);
@@ -345,6 +356,7 @@ export class Painter {
     const grid = pane.grid.grid;
     const gy = row - pane.rect.y + view.row;
     const right = clip.x + clip.width;
+    const selection = pane.selection ? ordered(pane.selection) : null;
     for (let col = clip.x; col < right; col++) {
       const gx = col - pane.rect.x + view.col;
       if (gy < 0 || gy >= grid.rows || gx < 0 || gx >= grid.cols) {
@@ -355,7 +367,9 @@ export class Painter {
       const width = grid.width[i]!;
       const rawStyle = grid.style[i]!;
       const baseStyle = this.styles.get(rawStyle);
-      const style = pane.dim ? this.styles.id(baseStyle.fg, baseStyle.bg, baseStyle.flags | STYLE_FAINT) : rawStyle;
+      const selected = selection !== null && inside(selection, gx, gy);
+      const flags = (pane.dim ? baseStyle.flags | STYLE_FAINT : baseStyle.flags) ^ (selected ? STYLE_INVERSE : 0);
+      const style = flags === baseStyle.flags ? rawStyle : this.styles.id(baseStyle.fg, baseStyle.bg, flags);
       if (width === 0) {
         // the covered column of a wide cell whose first column lies left of the clip
         if (col === clip.x) this.put(col, row, " ", 1, this.styles.blank(style));
@@ -486,6 +500,17 @@ export class Painter {
     if (this.options.sync) out += `${ESC}[?2026l`;
     return new TextEncoder().encode(out);
   }
+}
+
+/** a selection with its first cell first, row by row */
+function ordered({ start, end }: { start: GridCell; end: GridCell }): { start: GridCell; end: GridCell } {
+  return start.y < end.y || (start.y === end.y && start.x <= end.x) ? { start, end } : { start: end, end: start };
+}
+
+/** whether cell (x, y) lies in an ordered selection */
+function inside({ start, end }: { start: GridCell; end: GridCell }, x: number, y: number): boolean {
+  if (y < start.y || y > end.y) return false;
+  return (y > start.y || x >= start.x) && (y < end.y || x <= end.x);
 }
 
 function sameCell(a: Grid, b: Grid, i: number): boolean {

@@ -3,7 +3,7 @@ import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { Terminal } from "@xterm/xterm";
 import type { LayoutNode } from "../../server/herdr-core/layout-doc.ts";
 import { createEmulator } from "../emulator/ghostty.ts";
-import type { Emulator, EngineEvents, WrittenColor } from "../emulator/index.ts";
+import { type Emulator, type EngineEvents, STYLE_INVERSE, type WrittenColor } from "../emulator/index.ts";
 import { cellsOf, holds, intersect, type PaneCells, regions, type Rect, type Regions } from "./geometry.ts";
 import { PaneGrid } from "./grid.ts";
 import { hostLayout } from "./host-layout.ts";
@@ -892,6 +892,39 @@ describe("a neighbour's change", () => {
     }
     await incrementalAgainstFresh(sideBySide(before), sideBySide(after));
   }, 60_000);
+});
+
+describe("selection", () => {
+  test("a pane's selection is drawn inverted from its first cell to its last, row by row, and drawn away when it ends", async () => {
+    const painter = new Painter({ sync: false });
+    const [W, H] = [8, 4];
+    const host = await hostOf(W, H);
+    const shown = await shownPane(painter, 6, 3, "abcdef\r\nghijkl\r\nmnopqr");
+    const rect = { x: 1, y: 1, width: 6, height: 3 };
+    step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, rect)] }));
+    const inverted = () => {
+      const out: string[] = [];
+      for (let row = 0; row < H; row++) for (let col = 0; col < W; col++) {
+        const at = row * W + col;
+        if (painter.styles.get(painter.screen.style[at]!).flags & STYLE_INVERSE) out.push(painter.screen.text[at]!);
+      }
+      return out.join("");
+    };
+    expect(inverted()).toBe("");
+    // grid cells (4,0) to (1,1): "ef" of the first row and "gh" of the second
+    let frame = step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, rect, { selection: { start: { x: 4, y: 0 }, end: { x: 1, y: 1 } } })] }));
+    expect(inverted()).toBe("efgh");
+    expect(mismatch(host, painter)).toBeNull();
+    expect(frame.bytes.length).toBeGreaterThan(0);
+    // a range given end first is the same range: "l" of the second row and "mn" of the third
+    frame = step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, rect, { selection: { start: { x: 1, y: 2 }, end: { x: 5, y: 1 } } })] }));
+    expect(inverted()).toBe("lmn");
+    expect(mismatch(host, painter)).toBeNull();
+    frame = step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, rect)] }));
+    expect(inverted()).toBe("");
+    expect(mismatch(host, painter)).toBeNull();
+    expect(frame.bytes.length).toBeGreaterThan(0);
+  });
 });
 
 describe("edges", () => {
