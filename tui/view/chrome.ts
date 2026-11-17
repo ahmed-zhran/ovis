@@ -22,9 +22,9 @@ import { type Field, type Overlay, OVERLAYS } from "../model/overlays.ts";
 import type { ModelState, Notice } from "../model/reduce.ts";
 import { STRINGS } from "../strings.ts";
 import { TUI_THEMES, type TuiColorRole, type TuiThemeMode } from "../theme.generated.ts";
-import type { PaneCells, Rect, Regions, SplitCells } from "./geometry.ts";
+import type { Rect, Regions, SplitCells } from "./geometry.ts";
 import { hostLayout, type LaidCell } from "./host-layout.ts";
-import { nearest256, type Canvas, type Part } from "./paint.ts";
+import { nearest256, type Canvas, type Part, type Scene } from "./paint.ts";
 import type { PaneSpot } from "./screen.ts";
 
 type ThemeColors = Readonly<Record<TuiColorRole, WrittenColor>>;
@@ -45,42 +45,6 @@ export function sessionFromSocket(socket: string): string {
   const stripped = base.replace(/\.sock$/, "");
   if (stripped === "hc" || stripped === "") return "default";
   return stripped.replace(/^herdr-core-[^-]*-/, "") || "default";
-}
-
-/**
- * Placeholder chrome used by low-level painter tests (paint.test.ts): each part fills its rectangle
- * with a mark and a colour of its own, and names its whole rectangle in the hit map.
- */
-export function placeholderChrome(regions: Regions, panes: readonly PaneCells[]): Part[] {
-  const filled = (key: string, rect: Part["rect"], mark: string, color: number): Part => ({
-    key, rect, version: 0,
-    draw: (canvas) => {
-      canvas.fill(canvas.style({ fg: color }), mark);
-      canvas.hit(rect, key);
-    },
-  });
-  const borders = panes.filter(({ outer, inner }) => outer.width !== inner.width).map(({ pane, outer }): Part => ({
-    key: `border ${pane}`, rect: outer, version: 0,
-    draw: (canvas) => {
-      const style = canvas.style({ fg: 8 });
-      const right = outer.x + outer.width - 1;
-      const bottom = outer.y + outer.height - 1;
-      for (let col = outer.x; col <= right; col++) {
-        canvas.put(col, outer.y, col === outer.x || col === right ? "+" : "-", 1, style);
-        canvas.put(col, bottom, col === outer.x || col === right ? "+" : "-", 1, style);
-      }
-      for (let row = outer.y + 1; row < bottom; row++) {
-        canvas.put(outer.x, row, "|", 1, style);
-        canvas.put(right, row, "|", 1, style);
-      }
-    },
-  }));
-  return [
-    filled("sidebar", regions.sidebar, ".", 4),
-    filled("tabs", regions.tabBar, "-", 6),
-    filled("mode", regions.modeBar, "=", 3),
-    ...borders,
-  ];
 }
 
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/gu;
@@ -158,7 +122,7 @@ interface ChromeInput {
 interface BuiltChrome {
   readonly parts: Part[];
   readonly overlays: Part[];
-  readonly input: { col: number; row: number } | "overlay" | null;
+  readonly input: Scene["input"];
 }
 
 function folderBase(path: string): string {
@@ -478,7 +442,7 @@ function buildTabBarPart(input: ChromeInput, colors: ThemeColors): Part {
 
 function paneStatusBanner(view: PaneView | undefined, linkKind: LinkState["kind"], _linkCode: string | null): { text: string; tone: "error" | "warn" | "info" } | null {
   if (linkKind !== "Online") {
-    return { text: STRINGS.offlinePaneBanner, tone: "warn" };
+    return { text: STRINGS.offlinePaneBanner(), tone: "warn" };
   }
   if (!view) return null;
   const { state, sizedBy } = view;
@@ -919,10 +883,10 @@ export function buildOverlays(
   world: CoreView,
   theme: TuiThemeMode = "dark",
   depth: ColorDepth = "truecolor",
-): { overlays: Part[]; input: { col: number; row: number } | "overlay" | null } {
+): { overlays: Part[]; input: Scene["input"] } {
   const colors = themeColors(theme, depth);
   const overlays: Part[] = [];
-  let input: { col: number; row: number } | "overlay" | null = null;
+  let input: Scene["input"] = null;
 
   // Toast overlay in top-right corner for active notices
   if (state.notices.length > 0 && width >= 16 && height >= 3) {

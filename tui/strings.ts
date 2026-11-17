@@ -10,8 +10,6 @@ export const STRINGS = {
   agentsSection: "Agents",
   noSpaces: "No workspaces",
   noAgents: "No agents",
-  newWorkspaceAction: "New workspace",
-  sidebarToggleExpand: ">>",
   sidebarToggleCollapse: "<<",
   worktreeMark: "|-",
 
@@ -45,9 +43,8 @@ export const STRINGS = {
   // Visible states & banners
   offlineTitle: "herdr-core is not answering",
   offlineCommand: "hc server start",
-  offlineDetail: (code: string | null): string =>
-    `herdr-core is not answering: hc server start${code ? ` (${code})` : ""}`,
-  offlinePaneBanner: "herdr-core is not answering · hc server start",
+  offlineDetail: (code: string | null): string => `${STRINGS.offlineTitle}: ${STRINGS.offlineCommand}${code ? ` (${code})` : ""}`,
+  offlinePaneBanner: (): string => `${STRINGS.offlineTitle} · ${STRINGS.offlineCommand}`,
   appOwnedCore: "the Herdr app arranges this core",
   emptyCoreTitle: "No workspaces yet",
   emptyCoreOffer: (folder: string, key: string): string => `New workspace in ${folder} (${key})`,

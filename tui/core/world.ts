@@ -63,7 +63,6 @@ export interface CoreView {
   readonly world: World;
   readonly tabs: ReadonlyMap<string, TabShape>;
   readonly panes: ReadonlyMap<string, PaneSummary>;
-  readonly workspaceStatuses: ReadonlyMap<string, KnownStatus>;
   readonly tabStatuses: ReadonlyMap<string, KnownStatus>;
   readonly workspaceGroups: readonly WorkspaceGroupView[];
   readonly agents: readonly AgentRowView[];
@@ -75,7 +74,6 @@ const EMPTY: CoreView = {
   world: { workspaces: [] },
   tabs: new Map(),
   panes: new Map(),
-  workspaceStatuses: new Map(),
   tabStatuses: new Map(),
   workspaceGroups: [],
   agents: [],
@@ -304,7 +302,6 @@ export class CoreWorld {
     this.shown = {
       tabs,
       panes,
-      workspaceStatuses,
       tabStatuses,
       workspaceGroups,
       agents,
