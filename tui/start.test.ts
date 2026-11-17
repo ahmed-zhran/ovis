@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { insideOwnCore, parseArgs, stateFolder, targetEnv } from "./start.ts";
+import { insideOwnCore, parseArgs, SCREEN_FOLDER, screenFolder, stateFolder, targetEnv } from "./start.ts";
 
 describe("the entry's arguments", () => {
   it("answers -h, -V and --session NAME", () => {
@@ -39,5 +39,13 @@ describe("the state folder", () => {
     expect(stateFolder({ OVIS_TUI_STATE_DIR: "/s", XDG_STATE_HOME: "/x" }, "/home/u")).toBe("/s");
     expect(stateFolder({ XDG_STATE_HOME: "/x" }, "/home/u")).toBe("/x/ovis-tui");
     expect(stateFolder({}, "/home/u")).toBe("/home/u/.local/state/ovis-tui");
+  });
+});
+
+describe("the folder the screen offers a new workspace in", () => {
+  it("is the one `ovis tui` was typed in, as the launcher names it, else the screen's own working folder", () => {
+    expect(screenFolder({ [SCREEN_FOLDER]: "/home/me/project" }, "/install")).toBe("/home/me/project");
+    expect(screenFolder({}, "/home/me/elsewhere")).toBe("/home/me/elsewhere");
+    expect(screenFolder({ [SCREEN_FOLDER]: "" }, "/home/me/elsewhere")).toBe("/home/me/elsewhere");
   });
 });

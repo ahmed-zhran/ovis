@@ -61,6 +61,14 @@ export function insideOwnCore(env: Env, target: string, envCore: string, same: (
   return same(env["HC_TERMINAL_SOCKET"] || envCore) === same(target);
 }
 
+/** Where `ovis tui` hands the screen the folder it was typed in: the screen itself runs in the install's folder. */
+export const SCREEN_FOLDER = "OVIS_TUI_CWD";
+
+/** The folder the screen offers a new workspace in: the one the launcher names, else the screen's own working folder. */
+export function screenFolder(env: Env, cwd: string): string {
+  return env[SCREEN_FOLDER] || cwd;
+}
+
 /** The screen's state folder: OVIS_TUI_STATE_DIR, else `ovis-tui` under XDG_STATE_HOME, else under `~/.local/state`. */
 export function stateFolder(env: Env, home: string): string {
   if (env["OVIS_TUI_STATE_DIR"]) return env["OVIS_TUI_STATE_DIR"];

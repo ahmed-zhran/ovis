@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { version } from "../package.json";
-import { ending, EXIT_CRASH, EXIT_FAILED, EXIT_OK, EXIT_USAGE, insideOwnCore, parseArgs, stateFolder, targetEnv, USAGE } from "./start.ts";
+import { ending, EXIT_CRASH, EXIT_FAILED, EXIT_OK, EXIT_USAGE, insideOwnCore, parseArgs, screenFolder, stateFolder, targetEnv, USAGE } from "./start.ts";
 
 const say = (code: string, text: string) => process.stderr.write(`ovis tui: ${code}: ${text}\n`);
 
@@ -50,7 +50,7 @@ const loop = startLoop({
   clock: { now: () => performance.now(), arm: (at, fire) => { const timer = setTimeout(fire, Math.max(0, at - performance.now())); return () => clearTimeout(timer); } },
   socket: target.path,
   session: target.session,
-  cwd: process.cwd(),
+  cwd: screenFolder(env, process.cwd()),
   keys: readKeys(),
   readKeys,
 });
