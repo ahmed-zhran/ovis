@@ -85,6 +85,10 @@ export interface Faults {
   holdReplies: boolean;
   /** the core's answer to a CLOSE of the machine reaches it only at `release()` */
   holdCloses: boolean;
+  /** the core's answer to a call of the machine (`terminal.get`) reaches it only at `release()` */
+  holdCalls: boolean;
+  /** what the link says its state is, whatever it is: the machine must ask the link, not only its own panes */
+  linkState: CoreLink["state"] | null;
   /** the 9001 mark is taken out of every stream, as a core that changed it would send it */
   stripMark: boolean;
   /** the next emulator cannot be made */
@@ -99,9 +103,6 @@ const MARK = /\x1b\[\?9001[hl]/g;
 const hex = (payload: Uint8Array | string) => (typeof payload === "string" ? Buffer.from(payload, "latin1") : Buffer.from(payload)).toString("hex");
 const injected = (kind: EmulatorError["kind"]): { ok: false; error: EmulatorError } => ({ ok: false, error: { kind, message: `injected ${kind}` } });
 
-/** The bytes that open attach `index`'s stream when a screen tags its streams: an OSC no terminal knows, so the emulator drops it. */
-export const streamTag = (index: number): Uint8Array => Buffer.from(`\x1b]6973;${index}\x07`, "latin1");
-
 export class Screen {
   readonly link: CoreLink;
   readonly panes: Panes;
@@ -110,7 +111,7 @@ export class Screen {
   readonly attaches: AttachRecord[] = [];
   readonly emulators: EmulatorRecord[] = [];
   readonly calls: ChannelCall[] = [];
-  readonly faults: Faults = { attach: null, holdReplies: false, holdCloses: false, stripMark: false, create: false, write: null, resize: null, encode: null };
+  readonly faults: Faults = { attach: null, holdReplies: false, holdCloses: false, holdCalls: false, linkState: null, stripMark: false, create: false, write: null, resize: null, encode: null };
   /** called as each thing happens, for a test that checks rules at that very moment */
   hooks: { call?: (call: ChannelCall) => void; attach?: (record: AttachRecord) => void; write?: (record: EmulatorRecord, bytes: Uint8Array) => void; notice?: (notice: PaneNotice) => void } = {};
   /** work of this screen that has not come back yet */
@@ -125,7 +126,7 @@ export class Screen {
   /** whether the link goes through the real socket transport */
   readonly overSocket: boolean;
 
-  constructor(private readonly stage: Stage, private readonly options: { socket?: string; tag?: boolean } = {}) {
+  constructor(private readonly stage: Stage, options: { socket?: string } = {}) {
     this.overSocket = options.socket !== undefined;
     this.link = openLink({
       socket: options.socket ?? "memory",
@@ -147,10 +148,13 @@ export class Screen {
     });
     const link: PaneLink = {
       state: this.link.state,
-      call: (method, params, timeoutMs) => this.track(this.link.call(method, params, timeoutMs)),
+      call: (method, params, timeoutMs) => {
+        const answered = this.track(this.link.call(method, params, timeoutMs));
+        return this.faults.holdCalls ? answered.then((answer) => new Promise<typeof answer>((resolve) => this.held.push(() => resolve(answer)))) : answered;
+      },
       attach: (params, handlers) => this.attach(params, handlers),
     };
-    Object.defineProperty(link, "state", { get: () => this.link.state });
+    Object.defineProperty(link, "state", { get: () => this.faults.linkState ?? this.link.state });
     this.panes = createPanes({
       link,
       now: () => stage.clock.now,
@@ -183,15 +187,12 @@ export class Screen {
       record.state = "refused";
       throw new HcError(fault.reject, `injected ${fault.reject}`);
     }
-    let first = true;
     let opened: Awaited<ReturnType<CoreLink["attach"]>>;
     try {
       opened = await this.track(this.link.attach(params, {
         ...(handlers.credit === undefined ? {} : { credit: handlers.credit }),
         onData: (payload) => {
-          let bytes = this.faults.stripMark ? new Uint8Array(Buffer.from(Buffer.from(payload).toString("latin1").replace(MARK, ""), "latin1")) : payload;
-          if (first && this.options.tag) bytes = new Uint8Array(Buffer.concat([streamTag(record.index), bytes]));
-          first = false;
+          const bytes = this.faults.stripMark ? new Uint8Array(Buffer.from(Buffer.from(payload).toString("latin1").replace(MARK, ""), "latin1")) : payload;
           if (bytes.length === 0) return;
           record.received.push(bytes);
           record.receivedBytes += bytes.length;
@@ -317,10 +318,11 @@ export class Screen {
     return { ok: true, value: emulator };
   }
 
-  /** Lets the held attach replies and CLOSE answers through to the machine. */
+  /** Lets the held attach replies, CLOSE answers and call answers through to the machine. */
   release(): void {
     this.faults.holdReplies = false;
     this.faults.holdCloses = false;
+    this.faults.holdCalls = false;
     for (const resolve of [...this.held.splice(0), ...this.heldCloses.splice(0)]) resolve();
   }
 
@@ -474,7 +476,7 @@ export class Stage {
   constructor(public core: FakeHcCore) {}
 
   /** A screen whose link is up (when a core is there). `socket`: through the real socket transport, to a path the fake listens on. */
-  async screen(options: { socket?: string; tag?: boolean } = {}): Promise<Screen> {
+  async screen(options: { socket?: string } = {}): Promise<Screen> {
     const screen = new Screen(this, options);
     this.screens.push(screen);
     await this.settle();

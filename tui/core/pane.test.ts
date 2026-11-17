@@ -582,6 +582,11 @@ describe("the pane attach machine under hostile conditions", () => {
     await stage.settle();
     expect([screen.emulators.length, screen.attaches.length, screen.state(t)]).toEqual([1, 1, "Live"]);
     expect(screen.view(t).owed).toBe(screen.attaches[0]!.receivedBytes - core.credited(t) - "waited\r\n".length);
+    // credit is asked for while the emulator is still busy: what it has not consumed is not credited
+    screen.faults.write = "busy";
+    screen.pass();
+    await stage.settle();
+    expect([core.credited(t), screen.view(t).owed]).toEqual([dataBytes(core, t) - "waited\r\n".length, 0]);
     await stage.pass();
     expect(Buffer.concat(screen.emulators[0]!.written).equals(Buffer.concat(screen.attaches[0]!.received))).toBe(true);
     expect(picture(screen.view(t).emulator!).filter((row) => row.trim() !== "")).toEqual(["applied", "waited"]);
@@ -649,6 +654,52 @@ describe("the pane attach machine under hostile conditions", () => {
     screen.attaches.at(-1)!.handlers.onClose(null);
     await stage.settle();
     expect(screen.state(t)).toBe("Painting");
+  });
+
+  it("an answer about a dropped stream that comes after the program ended is not used", async () => {
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    // a relay drops the stream; the core's answer to the question about it is slow, and the program ends meanwhile
+    screen.faults.holdCalls = true;
+    screen.attaches[0]!.handlers.onClose(null);
+    await stage.settle();
+    expect(screen.state(t)).toBe("Waiting(closed)");
+    core.program(t).exit(3);
+    await stage.settle();
+    expect(screen.state(t)).toBe("Ended(exited 3)");
+    screen.release();
+    await stage.settle();
+    // the old answer said "it lives": it is not used to attach a finished terminal again
+    expect([screen.state(t), screen.attaches.length]).toEqual(["Ended(exited 3)", 1]);
+  });
+
+  it("a pane shown again counts its re-attaches anew", async () => {
+    const { stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    for (let round = 1; round <= PANE_REOPEN_LIMIT; round++) {
+      screen.attaches.at(-1)!.handlers.onClose(null);
+      await stage.settle();
+    }
+    expect([screen.state(t), screen.attaches.length]).toEqual(["Painting", PANE_REOPEN_LIMIT + 1]);
+    // the user leaves the tab and comes back before the core answered the CLOSE: the same pane, asked for anew
+    screen.show();
+    screen.show([t, 80, 24]);
+    await stage.settle();
+    screen.attaches.at(-1)!.handlers.onClose(null);
+    await stage.settle();
+    expect([screen.state(t), screen.attaches.length]).toEqual(["Painting", PANE_REOPEN_LIMIT + 3]);
+  });
+
+  it("the gate asks the link as well: a live pane takes no input while the link is not online", async () => {
+    const { stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    // the link says it is down before any channel of the pane heard of it
+    screen.faults.linkState = { kind: "Offline", code: "closed", retryAt: null, reason: "said by the test" };
+    expect([screen.state(t), screen.type("a")]).toEqual(["Live", [{ sent: false, code: "offline", notice: true }]]);
+    expect(screen.sent(t)).toEqual([]);
+    screen.faults.linkState = null;
+    expect(screen.type("b")).toEqual([{ sent: true }]);
+    expect(screen.sent(t)).toEqual(["DATA 62"]);
   });
 
   it("what the owner's notify throws is kept and thrown by the next fire, once", async () => {

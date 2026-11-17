@@ -1,6 +1,7 @@
 import { expect, it } from "bun:test";
 import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17 } from "../../server/herdr-core/core.fake.ts";
 import { typedKey } from "../input/decode.ts";
+import { PANE_REOPEN_LIMIT } from "../model/deadlines.ts";
 import { type AttachRecord, type ChannelCall, type EmulatorRecord, type Rival, type Screen, Stage } from "../testing/pane-harness.ts";
 import type { PaneInput } from "./pane.ts";
 
@@ -15,12 +16,20 @@ import type { PaneInput } from "./pane.ts";
  * it sees each call on a channel and each write into an emulator as it is made, and reads the fake
  * core's own record of what each viewer advertises.
  *
- * PANE_MODEL_SEED picks the run (default 23), PANE_MODEL_SEQUENCES its length (default 2000) and
- * PANE_MODEL_ONLY replays one sequence by the seed a failure printed.
+ * Every sequence ends with the row's settle property in its strong form, on a pane that lived through
+ * the run: nobody types and the host does not change any more; another viewer comes, resizes and
+ * undoes it, the rectangle becomes what the channel advertises, a shell is replaced in the middle of a
+ * repaint, the pane is shown again, an old answer arrives late, a new core comes up. For each the
+ * number of attaches must be exactly what the row allows ("once per change"), and the terminal's size
+ * must not move while nobody types.
+ *
+ * OVIS_TUI_MODEL_SEQUENCES sets how many sequences run (default 500, about 10 s, which is what the
+ * unit lane runs; the evidence runs use 2000 and several seeds), OVIS_TUI_MODEL_SEED picks the run
+ * (default 23) and OVIS_TUI_MODEL_ONLY replays one sequence by the seed a failure printed.
  */
-const SEED = Number(process.env["PANE_MODEL_SEED"] ?? 23);
-const SEQUENCES = Number(process.env["PANE_MODEL_SEQUENCES"] ?? 2000);
-const ONLY = process.env["PANE_MODEL_ONLY"];
+const SEED = Number(process.env["OVIS_TUI_MODEL_SEED"] ?? 23);
+const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 500);
+const ONLY = process.env["OVIS_TUI_MODEL_ONLY"];
 const STEPS = 28;
 const RECTANGLES = [[20, 6], [30, 8], [40, 10], [24, 7]] as const;
 const OUTPUTS = [
@@ -38,9 +47,10 @@ function mulberry(seed: number): () => number {
   };
 }
 
-interface Totals { steps: number; attaches: number; lives: number; accepted: number; refused: number; takes: number; reattaches: number; lines: number }
+interface Totals { steps: number; attaches: number; lives: number; accepted: number; refused: number; takes: number; reattaches: number; lines: number; settled: number; deep: number }
 
-async function sequence(seed: number, totals: Totals): Promise<void> {
+/** `deep`: the sequence also ends with the probes that replace a shell, a line and a core (each costs several attaches, and every attach a real emulator) */
+async function sequence(seed: number, totals: Totals, deep: boolean): Promise<void> {
   const random = mulberry(seed);
   const chance = (share: number) => random() < share;
   const pick = <T>(list: readonly T[]): T => list[Math.floor(random() * list.length)]!;
@@ -176,6 +186,13 @@ async function sequence(seed: number, totals: Totals): Promise<void> {
     return { type: "mouse", action: pick(["press", "press", "release", "motion"] as const), button: pick(["left", "wheelUp"] as const), mods: {}, col: 2, row: 1, at };
   };
 
+  /** a relay closes the stream with no reason while the terminal lives */
+  const drop = (record: AttachRecord | undefined) => {
+    if (!open(record)) return;
+    record.closeHeard = true;
+    record.state = "closed";
+    record.handlers.onClose(null);
+  };
   const apply = () => screen.show(...[...shown].map(([terminal, pane]) => [terminal, pane.cols, pane.rows, pane.covered] as [string, number, number, boolean]));
   const pass = (budget: number) => {
     for (const view of screen.panes.views()) {
@@ -212,6 +229,28 @@ async function sequence(seed: number, totals: Totals): Promise<void> {
     [8, "resize", () => {
       for (const pane of shown.values()) if (chance(0.6)) [pane.cols, pane.rows] = pick(RECTANGLES);
       apply();
+    }],
+    [4, "rectangle flickers inside the wait", () => {
+      // a rectangle that changes and is back 50 ms later: nothing of it may be left to count later
+      const panes = [...shown.values()];
+      if (panes.length === 0) return;
+      const pane = pick(panes);
+      const { cols, rows } = pane;
+      [pane.cols, pane.rows] = pick(RECTANGLES.filter(([otherCols, otherRows]) => otherCols !== cols || otherRows !== rows));
+      apply();
+      stage.clock.now += 50;
+      screen.fire();
+      Object.assign(pane, { cols, rows });
+      apply();
+    }],
+    [4, "take inside the wait", () => {
+      const pane = focus === null ? undefined : shown.get(focus);
+      if (!pane) return;
+      [pane.cols, pane.rows] = pick(RECTANGLES);
+      apply();
+      stage.clock.now += 50;
+      screen.fire();
+      input({ ...typedKey("t", {}), at: screen.stamp() });
     }],
     [3, "cover", () => {
       for (const pane of shown.values()) pane.covered = chance(0.3);
@@ -292,14 +331,7 @@ async function sequence(seed: number, totals: Totals): Promise<void> {
       else screen.faults.holdCloses = true;
     }],
     [4, "held answers let go", () => screen.release()],
-    [2, "stream dropped", () => {
-      // a relay closes the stream with no reason while the terminal lives
-      const record = terminals.map(latest).find(open);
-      if (!record) return;
-      record.closeHeard = true;
-      record.state = "closed";
-      record.handlers.onClose(null);
-    }],
+    [2, "stream dropped", () => drop(terminals.map(latest).find(open))],
     [2, "owner calls back from a draw", () => {
       const view = screen.panes.views().find((seen) => seen.emulator && seen.state.kind === "Live");
       if (!view) return;
@@ -391,34 +423,229 @@ async function sequence(seed: number, totals: Totals): Promise<void> {
     await rival.detach();
     await stage.settle();
     await reconnect();
-    const quiet = () => `${screen.attaches.length} attaches, ${screen.calls.filter((call) => call.op !== "credit").length} frames`;
+    const quiet = () => `${screen.attaches.length} attaches, ${screen.calls.filter((call) => call.op !== "credit").length} frames, terminals at ${terminals.filter(alive).map((terminal) => stage.core.size(terminal)).join(" ")}`;
     let rest = "";
-    for (let turn = 0; turn < 14; turn++) {
+    for (let turn = 0; turn < 9; turn++) {
       stage.clock.now += 150;
       screen.fire();
       await stage.settle();
       pass(512 * 1024);
       await stage.settle();
-      if (turn === 5) rest = quiet();
-      if (turn > 5 && quiet() !== rest) broken.push(`I11 turn ${turn} of the quiet tail: ${quiet()}, after ${rest}`);
+      if (turn === 4) rest = quiet();
+      if (turn > 4 && quiet() !== rest) broken.push(`I11 turn ${turn} of the quiet tail: ${quiet()}, after ${rest}`);
       trace.push("tail");
       check("the quiet tail");
+    }
+    // I11 in its strong form: what the row allows a settled pane to do when others act and nobody types here
+    const turns = async (count: number, each?: (turn: number) => void) => {
+      for (let turn = 0; turn < count; turn++) {
+        stage.clock.now += 150;
+        screen.fire();
+        await stage.settle();
+        pass(512 * 1024);
+        await stage.settle();
+        each?.(turn);
+      }
+    };
+    const livePane = (terminal: string) => alive(terminal) && screen.panes.view(terminal)?.state.kind === "Live" && open(latest(terminal)) && shown.get(terminal)?.covered === false;
+    let t = screen.link.state.kind === "Online" ? terminals.find(livePane) : undefined;
+    if (!t && screen.link.state.kind === "Online") {
+      // no pane of the run is live at its end: a new terminal stands in
+      const made = stage.core.spawn().address;
+      terminals = [...terminals, made];
+      await stage.settle();
+      shown.set(made, { cols: 30, rows: 8, covered: false });
+      apply();
+      await turns(2);
+      if (livePane(made)) t = made;
+    }
+    probes: if (t) {
+      const pane = t;
+      totals.settled++;
+      const countOf = () => screen.attaches.filter((record) => record.terminal === pane).length;
+      const sizeOf = (record: AttachRecord | undefined) => (record ? `${String(record.params["cols"])}x${String(record.params["rows"])}` : "none");
+      /** four deadline steps (a wait is one): the terminal's size must not move, and exactly `allowed` attaches may follow (asking `asks`) */
+      const watch = async (label: string, before: number, allowed: number, asks: string | null) => {
+        const size = stage.core.size(pane);
+        await turns(4, (turn) => {
+          if (alive(pane) && stage.core.size(pane) !== size) broken.push(`I11 ${label}: the terminal went from ${size} to ${stage.core.size(pane)} at turn ${turn} with nobody typing`);
+        });
+        const made = countOf() - before;
+        if (made !== allowed) broken.push(`I11 ${label}: ${made} attach(es) followed, the row allows ${allowed}; the last asked ${screen.attaches.filter((record) => record.terminal === pane).slice(-3).map(sizeOf).join(", ")}`);
+        else if (asks !== null && allowed > 0 && sizeOf(latest(pane)) !== asks) broken.push(`I11 ${label}: the attach asked ${sizeOf(latest(pane))}, not ${asks}`);
+        check(label);
+      };
+      // only this pane stays in the tab, focused, on a focused host; then it is left alone
+      for (const terminal of [...shown.keys()]) if (terminal !== pane) shown.delete(terminal);
+      apply();
+      focus = pane;
+      screen.panes.focus(pane);
+      hostFocused = true;
+      screen.panes.hostFocus(true);
+      await turns(2);
+
+      // the last user input: the rectangle changes and the user types inside the wait. The take tells the core, and nothing follows
+      let before = countOf();
+      const [nextCols, nextRows] = RECTANGLES.find(([otherCols, otherRows]) => `${otherCols}x${otherRows}` !== wantedOf(pane))!;
+      shown.set(pane, { cols: nextCols, rows: nextRows, covered: false });
+      apply();
+      stage.clock.now += 50;
+      screen.fire();
+      input({ ...typedKey("s", {}), at: screen.stamp() });
+      await stage.settle();
+      await watch("a take inside the wait", before, 0, null);
+
+      // the last host change: the rectangle changes and is back 50 ms later, at what the channel advertises
+      before = countOf();
+      const [awayCols, awayRows] = RECTANGLES.find(([otherCols, otherRows]) => otherCols !== nextCols || otherRows !== nextRows)!;
+      shown.set(pane, { cols: awayCols, rows: awayRows, covered: false });
+      apply();
+      stage.clock.now += 50;
+      screen.fire();
+      shown.set(pane, { cols: nextCols, rows: nextRows, covered: false });
+      apply();
+      await stage.settle();
+      await watch("the rectangle came back inside the wait", before, 0, null);
+      const rectangle = wantedOf(pane)!;
+
+      // another viewer comes (idle, or typing): one repaint at the terminal's size if the size moved, else nothing
+      before = countOf();
+      const sizeBefore = stage.core.size(pane);
+      const driving = chance(0.5);
+      await rival.attach(pane, 120, 40, !driving);
+      if (driving) rival.type("r");
+      await stage.settle();
+      const taken = stage.core.size(pane);
+      await watch("another viewer comes", before, taken !== sizeBefore && taken !== rectangle ? 1 : 0, taken);
+
+      // it resizes, and 50 ms later it is at the pane's own rectangle: nothing is owed
+      before = countOf();
+      rival.resize(100, 30);
+      await stage.settle();
+      stage.clock.now += 50;
+      screen.fire();
+      await stage.settle();
+      const [cols, rows] = rectangle.split("x").map(Number) as [number, number];
+      rival.resize(cols, rows);
+      await stage.settle();
+      await watch("another viewer's resize undone inside the wait", before, 0, null);
+
+      // the host is resized to what the channel advertises already: nothing to tell the core
+      const told = screen.advertisedTo(latest(pane)!);
+      if (told !== null && told !== rectangle) {
+        before = countOf();
+        const [toldCols, toldRows] = told.split("x").map(Number) as [number, number];
+        shown.set(pane, { cols: toldCols, rows: toldRows, covered: false });
+        apply();
+        await watch("the rectangle becomes what the channel advertises", before, 0, null);
+      }
+
+      if (!deep) break probes;
+      totals.deep++;
+
+      // a repaint begins, and before the core answered its CLOSE a new shell is announced: it is attached with the rectangle
+      screen.faults.holdCloses = true;
+      rival.resize(90, 28);
+      await stage.settle();
+      stage.clock.now += 150;
+      screen.fire();
+      await stage.settle();
+      stage.core.emit("restarted", pane, stage.core.terminal(pane));
+      await stage.settle();
+      screen.release();
+      await turns(2);
+      if (sizeOf(latest(pane)) !== wantedOf(pane) || !livePane(pane)) {
+        broken.push(`I11 a new shell during a repaint: ${screen.state(pane)}, attached at ${sizeOf(latest(pane))}, the rectangle ${wantedOf(pane)}`);
+      }
+      check("a new shell during a repaint");
+
+      // the other viewer resizes, and inside the wait the pane leaves the tab and is back: it is attached with its rectangle, as any pane shown
+      rival.resize(91, 28);
+      await stage.settle();
+      const held = shown.get(pane)!;
+      shown.delete(pane);
+      apply();
+      shown.set(pane, held);
+      apply();
+      await turns(2);
+      if (sizeOf(latest(pane)) !== wantedOf(pane) || !livePane(pane)) broken.push(`I11 shown again during a waiting repaint: ${screen.state(pane)}, attached at ${sizeOf(latest(pane))}, the rectangle ${wantedOf(pane)}`);
+      check("shown again during a waiting repaint");
+
+      // another viewer takes the terminal, and before the repaint is due the line ends: on the next line the pane attaches with its rectangle
+      await rival.detach();
+      await stage.settle();
+      await rival.attach(pane, 100, 30);
+      rival.type("r");
+      await stage.settle();
+      stage.core.restart();
+      await stage.settle();
+      await reconnect();
+      await turns(2);
+      if (sizeOf(latest(pane)) !== wantedOf(pane) || stage.core.size(pane) !== wantedOf(pane) || !livePane(pane)) {
+        broken.push(`I11 a new line during a waiting repaint: ${screen.state(pane)}, attached at ${sizeOf(latest(pane))}, the terminal at ${stage.core.size(pane)}, the rectangle ${wantedOf(pane)}`);
+      }
+      check("a new line during a waiting repaint");
+
+      // the stream is dropped as often as the pane re-attaches by itself; shown again, it starts counting anew
+      for (let round = 0; round < PANE_REOPEN_LIMIT; round++) {
+        drop(latest(pane));
+        await stage.settle();
+      }
+      const kept = shown.get(pane)!;
+      shown.delete(pane);
+      apply();
+      shown.set(pane, kept);
+      apply();
+      await stage.settle();
+      drop(latest(pane));
+      await turns(2);
+      if (!livePane(pane)) broken.push(`I11 shown again: the pane is ${screen.state(pane)} after one more dropped stream`);
+      check("shown again");
+
+      // the core is stopped, and a new one has a terminal at this pane's address whose program asks for focus reports
+      stage.core.stop();
+      await stage.settle();
+      stage.core = new FakeHcCore(options);
+      let again = "";
+      while (again !== pane) again = stage.core.spawn().address;
+      stage.core.setPaint(pane, { body: "\x1b[?1004h" });
+      terminals = [pane];
+      await reconnect();
+      await turns(2);
+      const heard = stage.core.program(pane).receivedHex();
+      const report = options.features ? "" : "1b5b49";
+      if (!livePane(pane) || heard !== report) broken.push(`I6 a new core: the pane is ${screen.state(pane)} and its program heard "${heard}", the focus contract says "${report}"`);
+      check("a new core");
+
+      // an answer about a dropped stream arrives after the program ended: it is not used
+      before = countOf();
+      screen.faults.holdCalls = true;
+      drop(latest(pane));
+      await stage.settle();
+      stage.core.program(pane).exit(3);
+      await stage.settle();
+      screen.release();
+      await stage.settle();
+      const ended = screen.panes.view(pane)?.state;
+      if (countOf() !== before || ended?.kind !== "Ended" || ended.code !== 3) broken.push(`I11 a late answer: ${screen.state(pane)} and ${countOf() - before} attach(es) after the program ended with 3`);
+      check("a late answer");
     }
     // at rest every byte delivered to a pane that still shows a picture was fed
     for (const [emulator, feed] of fedBy) if (open(feed.attach) && !emulator.disposed && feed.next !== feed.attach.received.length) broken.push(`I13 emulator ${emulator.index} was fed ${feed.next} of ${feed.attach.received.length} frames`);
     check("the end");
   } catch (error) {
     // I12 too: nothing the machine does may throw
-    throw new Error(`sequence seed ${seed} failed (replay: PANE_MODEL_ONLY=${seed}) ${error instanceof Error ? error.message : String(error)}\nsteps: ${trace.join(" > ")}`);
+    throw new Error(`sequence seed ${seed} failed (replay: OVIS_TUI_MODEL_ONLY=${seed}) ${error instanceof Error ? error.message : String(error)}\nsteps: ${trace.join(" > ")}`);
   } finally {
     await stage.close();
   }
 }
 
 it(`${ONLY ? 1 : SEQUENCES} seeded sequences keep every invariant after every step (seed ${ONLY ?? SEED})`, async () => {
-  const totals: Totals = { steps: 0, attaches: 0, lives: 0, accepted: 0, refused: 0, takes: 0, reattaches: 0, lines: 0 };
+  const totals: Totals = { steps: 0, attaches: 0, lives: 0, accepted: 0, refused: 0, takes: 0, reattaches: 0, lines: 0, settled: 0, deep: 0 };
   const seeds = ONLY ? [Number(ONLY)] : Array.from({ length: SEQUENCES }, (_, index) => SEED * 100_003 + index);
-  for (const seed of seeds) await sequence(seed, totals);
+  // every sequence ends with the settle probes on the two size waits; every fourth goes on through the heavy ones
+  for (const [index, seed] of seeds.entries()) await sequence(seed, totals, ONLY !== undefined || index % 4 === 0);
   console.log(`pane model: seed ${ONLY ?? SEED}, ${seeds.length} sequences, ${JSON.stringify(totals)}`);
   // the runs did reach what the invariants are about
   if (!ONLY) {
@@ -428,5 +655,7 @@ it(`${ONLY ? 1 : SEQUENCES} seeded sequences keep every invariant after every st
     expect(totals.refused).toBeGreaterThan(SEQUENCES * 2);
     expect(totals.takes).toBeGreaterThan(SEQUENCES / 20);
     expect(totals.reattaches).toBeGreaterThan(SEQUENCES);
+    expect(totals.settled).toBeGreaterThan(SEQUENCES * 0.9);
+    expect(totals.deep).toBeGreaterThan(SEQUENCES * 0.2);
   }
 }, 1_500_000);

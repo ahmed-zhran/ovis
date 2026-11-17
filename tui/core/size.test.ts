@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { FRAME_CLOSE, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE } from "../../server/herdr-core/connection.ts";
 import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../../server/herdr-core/core.fake.ts";
 import { REATTACH_SETTLE_MS } from "../model/deadlines.ts";
-import { Stage } from "../testing/pane-harness.ts";
-import { attachSent, attachSize, clipTop, newPaneSize, type PaneSize, reattachDue, rectangleChanged, replied, sizedBy, sizeTold, took } from "./size.ts";
+import { type Screen, Stage } from "../testing/pane-harness.ts";
+import { attachSent, attachSize, clipTop, detached, newPaneSize, type PaneSize, reattachDue, rectangleChanged, replied, sizedBy, sizeTold, took } from "./size.ts";
 
 // The size rules of the pane machine on the fake core, which carries herdr-core's own size rule as
 // probe c measured it: the eleven cases of the design (UB Q3) as row 23 narrows them (only the
@@ -447,6 +447,186 @@ describe("the size rules of a pane", () => {
   });
 });
 
+describe("a pane forgets what no longer waits", () => {
+  const asked = (screen: Screen, terminal: string) => screen.asked(terminal).map((params) => `${String(params["cols"])}x${String(params["rows"])}`);
+  /** ten deadline steps with a frame pass each: what a screen does when it is left alone */
+  const rest = async (stage: Stage, seen?: () => void) => {
+    for (let step = 0; step < 10; step++) {
+      await stage.advance(REATTACH_SETTLE_MS);
+      await stage.pass();
+      seen?.();
+    }
+  };
+
+  it("a rectangle that came back inside the wait leaves nothing behind", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      await stage.live(screen, [t, 80, 24]);
+      screen.show([t, 90, 24]);
+      await stage.advance(50);
+      screen.show([t, 80, 24]);
+      await stage.advance(5_000);
+      expect(asked(screen, t)).toEqual(["80x24"]);
+      // five seconds later another viewer takes the terminal: one repaint at its size, and that is all
+      const rival = stage.rival();
+      await rival.attach(t, 120, 40);
+      rival.type("x");
+      await stage.settle();
+      await rest(stage);
+      expect([asked(screen, t), screen.view(t).advertised, core.size(t)]).toEqual([["80x24", "120x40"], { cols: 120, rows: 40 }, "120x40"]);
+    }
+  });
+
+  it("two idle screens settle after a rectangle flickered", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen: first, t } = await scene(options);
+      const second = await stage.screen();
+      second.panes.focus(t);
+      await stage.live(first, [t, 80, 24]);
+      first.show([t, 81, 24]);
+      await stage.advance(50);
+      first.show([t, 80, 24]);
+      await stage.advance(5_000);
+      await stage.live(second, [t, 120, 40]);
+      const seen: string[] = [];
+      await rest(stage, () => seen.push(`${traffic(core).attaches}/${core.size(t)}`));
+      // nobody typed: the terminal keeps the size of the screen that attached last, and no attach follows the one repaint
+      expect(seen).toEqual(Array(10).fill("3/120x40"));
+      expect([asked(first, t), asked(second, t), core.events(t, "size")]).toEqual([["80x24", "120x40"], ["120x40"], ["size 80x24", "size 120x40"]]);
+      expect([first.view(t).sizedBy, second.view(t).sizedBy]).toEqual([{ cols: 120, rows: 40 }, null]);
+    }
+  });
+
+  it("a take inside the wait leaves nothing behind", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      await stage.live(screen, [t, 80, 24]);
+      screen.show([t, 100, 30]);
+      await stage.advance(50);
+      expect(screen.type("k")).toEqual([{ sent: true }]);
+      await stage.advance(5_000);
+      expect([asked(screen, t), core.size(t)]).toEqual([["80x24"], "100x30"]);
+      const rival = stage.rival();
+      await rival.attach(t, 120, 40);
+      rival.type("x");
+      await stage.settle();
+      await rest(stage);
+      // one attach more, the repaint, not two
+      expect([asked(screen, t), screen.view(t).advertised, core.size(t)]).toEqual([["80x24", "120x40"], { cols: 120, rows: 40 }, "120x40"]);
+    }
+  });
+
+  it("a size event that was undone inside the wait leaves nothing behind", async () => {
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    const rival = stage.rival();
+    await rival.attach(t, 120, 40);
+    rival.type("x");
+    await stage.settle();
+    await rest(stage);
+    expect([asked(screen, t), screen.view(t).advertised]).toEqual([["80x24", "120x40"], { cols: 120, rows: 40 }]);
+    // the other viewer resizes, and 50 ms later it is back at the pane's own rectangle
+    rival.resize(100, 30);
+    await stage.settle();
+    await stage.advance(50);
+    rival.resize(80, 24);
+    await stage.settle();
+    await stage.advance(5_000);
+    await stage.pass();
+    expect([asked(screen, t), core.size(t), screen.view(t).sizedBy]).toEqual([["80x24", "120x40"], "80x24", null]);
+    // the host is resized to what the channel already advertises: no repaint is owed for a size event long undone
+    screen.show([t, 120, 40]);
+    await rest(stage);
+    expect([asked(screen, t), core.size(t), screen.view(t).sizedBy]).toEqual([["80x24", "120x40"], "80x24", { cols: 80, rows: 24 }]);
+  });
+
+  it("a repaint that waits is not owed to a new shell", async () => {
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    const rival = stage.rival();
+    await rival.attach(t, 120, 40);
+    rival.type("x");
+    await stage.settle();
+    // the repaint begins, and the core's answer to its CLOSE is still out when the shell dies and a new one starts
+    screen.faults.holdCloses = true;
+    await stage.advance(REATTACH_SETTLE_MS);
+    expect([screen.state(t), asked(screen, t)]).toEqual(["Closing", ["80x24"]]);
+    core.lose(t);
+    core.restartTerminal(t);
+    await stage.settle();
+    screen.release();
+    await stage.settle();
+    await stage.pass();
+    // the new shell's pane is attached with its rectangle, as any first attach, and alone it fits
+    expect([screen.state(t), asked(screen, t), core.size(t), screen.view(t).sizedBy]).toEqual(["Live", ["80x24", "80x24"], "80x24", null]);
+  });
+
+  it("a repaint that waits is not owed to a new line, to a pane shown again or to a new shell", async () => {
+    const line = await scene();
+    await line.stage.live(line.screen, [line.t, 80, 24]);
+    const rival = line.stage.rival();
+    await rival.attach(line.t, 120, 40);
+    rival.type("x");
+    await line.stage.settle();
+    expect(line.screen.panes.deadlines().has("reattach")).toBe(true);
+    // the line ends before the repaint is due: on the next line the pane attaches with its rectangle, as any first attach
+    line.core.restart();
+    await line.stage.settle();
+    expect(line.screen.view(line.t).advertised).toBeNull();
+    const waiting = line.screen.link.state;
+    if (waiting.kind !== "Offline" || waiting.retryAt === null) throw new Error(`the link is ${waiting.kind}`);
+    await line.stage.advance(waiting.retryAt - line.stage.clock.now);
+    await line.stage.pass();
+    expect([line.screen.state(line.t), asked(line.screen, line.t), line.core.size(line.t)]).toEqual(["Live", ["80x24", "80x24"], "80x24"]);
+
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    const other = stage.rival();
+    await other.attach(t, 120, 40);
+    other.type("x");
+    await stage.settle();
+    // the pane leaves the tab and is back before the core answered its CLOSE
+    screen.show();
+    screen.show([t, 80, 24]);
+    await stage.settle();
+    await stage.pass();
+    expect([screen.state(t), asked(screen, t), core.size(t), screen.view(t).sizedBy]).toEqual(["Live", ["80x24", "80x24"], "120x40", { cols: 120, rows: 40 }]);
+    await rest(stage);
+    expect(asked(screen, t)).toEqual(["80x24", "80x24"]);
+
+    // a new shell is announced with no loss before it: an order the core does not send today, and still a first attach
+    const shell = await scene();
+    await shell.stage.live(shell.screen, [shell.t, 80, 24]);
+    const third = shell.stage.rival();
+    await third.attach(shell.t, 120, 40);
+    third.type("x");
+    await shell.stage.settle();
+    shell.core.emit("restarted", shell.t, shell.core.terminal(shell.t));
+    await shell.stage.settle();
+    await shell.stage.pass();
+    expect([shell.screen.state(shell.t), asked(shell.screen, shell.t)]).toEqual(["Live", ["80x24", "80x24"]]);
+  });
+
+  it("the program of a new core is told the focus anew", async () => {
+    const { core, stage, screen, t } = await scene();
+    core.setPaint(t, { body: "\x1b[?1004h" });
+    await stage.live(screen, [t, 80, 24]);
+    expect(screen.sent(t)).toEqual(["AUTOMATIC_INPUT 1b5b49"]);
+    // the core is stopped; another comes up with a terminal at the same address, whose program asks for focus reports too
+    core.stop();
+    await stage.settle();
+    const next = new FakeHcCore();
+    const again = next.spawn().address;
+    next.setPaint(again, { body: "\x1b[?1004h" });
+    stage.core = next;
+    const waiting = screen.link.state;
+    if (waiting.kind !== "Offline" || waiting.retryAt === null) throw new Error(`the link is ${waiting.kind}`);
+    await stage.advance(waiting.retryAt - stage.clock.now);
+    await stage.pass();
+    expect([again, screen.state(again), screen.sent(again), next.program(again).receivedHex()]).toEqual([t, "Live", ["AUTOMATIC_INPUT 1b5b49"], "1b5b49"]);
+  });
+});
+
 describe("the size rules as values", () => {
   const at = (size: PaneSize) => reattachDue(size);
   const attached = (wanted: { cols: number; rows: number }, actual = wanted) => replied(attachSent(newPaneSize(wanted), wanted), actual);
@@ -462,7 +642,7 @@ describe("the size rules as values", () => {
   it("a changed rectangle waits from its last change and attaches with the rectangle", () => {
     const first = rectangleChanged(attached(A), C, 1000);
     const last = rectangleChanged(first, B, 1100);
-    expect([at(first), at(last), attachSize(last, false), attachSize(last, true)]).toEqual([{ at: 1150, repaint: false }, { at: 1250, repaint: false }, B, B]);
+    expect([at(first), at(last), attachSize(last)]).toEqual([1150, 1250, B]);
     // back to what the channel advertises: nothing waits
     expect(at(rectangleChanged(last, A, 1200))).toBeNull();
     expect(rectangleChanged(last, B, 5000)).toBe(last);
@@ -471,7 +651,7 @@ describe("the size rules as values", () => {
   it("another viewer's size event waits from the last one and repaints at the terminal's own size", () => {
     const one = sizeTold(attached(A), B, 2000, true);
     const two = sizeTold(one, C, 2100, true);
-    expect([at(one), at(two), attachSize(two, true)]).toEqual([{ at: 2150, repaint: true }, { at: 2250, repaint: true }, C]);
+    expect([at(one), at(two), attachSize(two), attachSize(attached(A, B))]).toEqual([2150, 2250, C, A]);
     // an event before the reply, and one that brings the size back, make nothing wait
     expect([at(sizeTold(attached(A), B, 2000, false)), at(sizeTold(two, A, 2200, true))]).toEqual([null, null]);
     const repainted = replied(attachSent(two, C), C);
@@ -480,11 +660,31 @@ describe("the size rules as values", () => {
 
   it("both causes at once make one attach, with the rectangle; the take ends the wait", () => {
     const both = rectangleChanged(sizeTold(attached(A), B, 3000, true), C, 3050);
-    expect([at(both), attachSize(both, true)]).toEqual([{ at: 3200, repaint: false }, C]);
+    expect([at(both), attachSize(both)]).toEqual([3200, C]);
     // the user's input ends both waits at once; a later size event of another viewer starts a new one
     const taken = took(both);
     expect([taken.advertised, at(taken), at(sizeTold(taken, C, 3060, true))]).toEqual([C, null, null]);
-    expect(at(sizeTold(taken, B, 3070, true))).toEqual({ at: 3220, repaint: true });
+    expect(at(sizeTold(taken, B, 3070, true))).toEqual(3220);
+  });
+
+  it("what was told, cancelled or ended no longer waits", () => {
+    // the rectangle changed and came back inside the wait; later another viewer resized, and the pane repainted
+    const flickered = rectangleChanged(rectangleChanged(attached(A), C, 1000), A, 1050);
+    const repainted = replied(attachSent(sizeTold(flickered, B, 2000, true), B), B);
+    expect([at(flickered), flickered.ownAt, at(repainted), repainted.ownAt]).toEqual([null, null, null, null]);
+    // the take told the core the rectangle: the same later resize makes one repaint, and nothing after it
+    const taken = took(rectangleChanged(attached(A), C, 1000));
+    const afterTake = replied(attachSent(sizeTold(taken, B, 6000, true), B), B);
+    expect([taken.ownAt, at(sizeTold(taken, B, 6000, true)), at(afterTake)]).toEqual([null, 6150, null]);
+    // a size event that a later one undid, then a rectangle the channel already advertises
+    const undone = sizeTold(sizeTold(repainted, C, 7000, true), A, 7050, true);
+    expect([undone.foreignAt, at(undone), at(rectangleChanged(undone, B, 9000))]).toEqual([null, null, null]);
+    // a rectangle that becomes the terminal's own size owes no repaint any more
+    expect(at(rectangleChanged(sizeTold(attached(A), B, 1000, true), B, 1020))).toEqual(1170);
+    expect(rectangleChanged(sizeTold(attached(A), B, 1000, true), B, 1020).foreignAt).toBeNull();
+    // an attach that ended takes its waits with it: the next one starts from the rectangle
+    const ended = detached(rectangleChanged(sizeTold(attached(A), B, 1000, true), C, 1010));
+    expect([ended.ownAt, ended.foreignAt, ended.advertised, at(ended), attachSize(ended), at(rectangleChanged(ended, A, 2000))]).toEqual([null, null, null, null, C, null]);
   });
 
   it("a clipped pane shows the part of the real grid that holds the cursor", () => {

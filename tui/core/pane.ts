@@ -39,7 +39,7 @@ import type { Emulator, EmulatorOptions, EmulatorResult, EngineEvents } from "..
 import type { InputEvent } from "../input/decode.ts";
 import { type Deadlines, NO_DEADLINES, PAINT_QUIET_MS, PANE_REOPEN_LIMIT, setDeadline } from "../model/deadlines.ts";
 import type { CoreLink, LinkNotice } from "./link.ts";
-import { attachSent, attachSize, newPaneSize, type PaneSize, reattachDue, rectangleChanged, replied, sameSize, type Size, sizedBy, sizeTold, took } from "./size.ts";
+import { attachSent, attachSize, detached, newPaneSize, type PaneSize, reattachDue, rectangleChanged, replied, sameSize, type Size, sizedBy, sizeTold, took } from "./size.ts";
 
 /** Why a pane is Failed: the stable code beside its `reason`, which is for people. */
 export type FailedCode = "attach" | "bad_reply" | "emulator" | "size" | "closed" | "record";
@@ -172,8 +172,6 @@ interface Attempt {
   emulator: Emulator | null;
   /** the emulator's grid */
   grid: Size;
-  /** this attach only repaints: it advertises the terminal's current size */
-  repaint: boolean;
   /** null until the attach reply was applied */
   channel: Channel | null;
   /** what the stream (and the event stream, after its first bytes) brought before the reply was applied, in order */
@@ -238,18 +236,22 @@ class Pane {
   /** the picture to draw */
   shown: Emulator | null = null;
   dropped = false;
+  // What follows remembers something across steps. Each describes one thing and is cleared when that thing is over: a memory that
+  // outlives what it describes is counted again later (the waits of `size` follow the same rule, in size.ts).
   private attempt: Attempt | null = null;
-  /** attaches given up whose channel the core has not closed yet: the next attach waits for them */
+  /** attaches given up whose channel the core has not closed yet: the next attach waits for them; each ends when the core answered or its line ended */
   private unsettled = 0;
   private liveSince = 0;
   private noticed = false;
-  /** whether the program was last told (or would have been, had it asked for focus reports) that its pane has the focus */
+  /**
+   * whether the program was last told (or would have been, had it asked for focus reports) that its pane has the focus. It is the
+   * program's belief, so it ends with the program (finished, lost, a new shell), with the line (the screen cannot know what is at
+   * the other end of the next one) and when the pane leaves the tab, where the program is told
+   */
   private inFocus = false;
-  /** attaches made in a row without the user, since the pane was last Live */
+  /** attaches made in a row without the user. The row ends when the pane is Live, when the user asks anew (retry, shown again), with a new shell and with the line */
   private reopens = 0;
-  /** the next attach only repaints: it advertises the terminal's current size */
-  private repaint = false;
-  /** the `terminal.get` whose answer decides a Waiting(closed) pane */
+  /** the `terminal.get` whose answer decides a Waiting(closed) pane: it belongs to that state and ends when the pane leaves it */
   private probing: object | null = null;
 
   constructor(private readonly set: PaneSet, readonly terminal: string, rectangle: Size) {
@@ -270,7 +272,9 @@ class Pane {
     if (JSON.stringify(state) === JSON.stringify(this.state)) return;
     this.state = state;
     this.noticed = false;
-    if (state.kind !== "Closing" && state.kind !== "Idle") this.repaint = false;
+    this.probing = null;
+    // no attach is in use any more (one that still drains takes no input): what it advertised and what waited for it are over
+    if (state.kind === "Waiting" || state.kind === "Ended" || state.kind === "Failed") this.size = detached(this.size);
     this.set.tell({ type: "state", terminal: this.terminal });
   }
 
@@ -297,7 +301,7 @@ class Pane {
     const record = this.set.records.get(this.terminal);
     if (this.state.kind !== "Idle" || this.attempt || this.unsettled > 0 || !this.inTab || !this.set.online() || !record || record.finished || record.reason !== null) return;
     const attempt: Attempt = {
-      abandoned: false, emulator: null, grid: attachSize(this.size, this.repaint), repaint: this.repaint, channel: null, early: [], closed: null, backlog: [], out: [],
+      abandoned: false, emulator: null, grid: attachSize(this.size), channel: null, early: [], closed: null, backlog: [], out: [],
       mark: new PaintMark(), painted: false, quietFrom: 0, owed: 0, focusSent: false, keyDown: false, mouseDown: false, toldDisplay: "{}",
     };
     this.attempt = attempt;
@@ -333,7 +337,7 @@ class Pane {
       });
     }
     // the size is read as the attach leaves: the rectangle may have changed while the emulator was made
-    const size = attachSize(this.size, attempt.repaint);
+    const size = attachSize(this.size);
     this.size = attachSent(this.size, size);
     const display = this.set.display;
     const caller = this.set.options.caller;
@@ -501,7 +505,7 @@ class Pane {
     const channel = attempt.channel;
     if (this.state.kind !== "Live" || !channel || this.covered) return;
     if (channel.automaticInput) channel.writeAutomatic(bytes);
-    else if (this.set.owns(this) && attempt.focusSent && sameSize(this.size.wanted, this.size.advertised)) channel.write(bytes);
+    else if (this.set.owns(this) && attempt.focusSent && this.advertisesRectangle()) channel.write(bytes);
   }
 
   /** The frame pass that drew the new picture is over, and what stdin still held was read: input counts from now. */
@@ -525,12 +529,12 @@ class Pane {
     if (typeof reason?.["finished_ms"] === "number") {
       const code = typeof reason["exit_code"] === "number" ? reason["exit_code"] : null;
       this.set.records.set(this.terminal, { finished: true, reason: why, code });
-      return this.become({ kind: "Ended", reason: why ?? "finished", code });
+      return this.finished(why ?? "finished", code);
     }
     const record = this.set.records.get(this.terminal);
     if (why === "signaled" && record && !record.finished) record.reason = why;
-    if (record?.finished) return this.become({ kind: "Ended", reason: record.reason ?? "finished", code: record.code });
-    if (record && record.reason !== null) return this.become({ kind: "Waiting", why: "lost" });
+    if (record?.finished) return this.finished(record.reason ?? "finished", record.code);
+    if (record && record.reason !== null) return this.lost();
     this.become({ kind: "Waiting", why: "closed" });
     this.probe();
   }
@@ -538,10 +542,9 @@ class Pane {
   /** One `terminal.get` decides a stream closed without a cause: finished, lost, or still live (a relay dropped it), which is attached again a bounded number of times. */
   private probe(): void {
     const token = (this.probing = {});
+    // an answer counts only while the pane still waits for it: `become` drops the token with the state
     const decide = (apply: () => void) => this.set.enter(() => {
-      if (this.probing !== token) return;
-      this.probing = null;
-      apply();
+      if (this.probing === token) apply();
     });
     this.set.track(this.set.options.link.call("terminal.get", { terminal: this.terminal }).then(
       (answer) => decide(() => {
@@ -562,24 +565,27 @@ class Pane {
 
   /** T11: there is no line; Ended and Failed stay what they are. */
   private offline(): void {
+    this.inFocus = false;
+    this.reopens = 0;
     if (this.state.kind !== "Ended" && this.state.kind !== "Failed") this.become({ kind: "Waiting", why: "offline" });
   }
 
   /** The link is not Online: whatever attach there was is over with its line. */
   linkDown(): void {
-    this.probing = null;
     this.abandon();
     this.offline();
   }
 
   /** T7: the gate shuts at once; the stream is still fed until the core closes it. */
   lost(): void {
+    this.inFocus = false;
     if (this.attempt && !this.attempt.channel) this.abandon();
     this.become({ kind: "Waiting", why: "lost" });
   }
 
   /** T9: the gate shuts; what the program still had to say is fed until the core's CLOSE. */
   finished(reason: string, code: number | null): void {
+    this.inFocus = false;
     if (this.attempt && !this.attempt.channel) this.abandon();
     this.become({ kind: "Ended", reason, code });
   }
@@ -587,9 +593,10 @@ class Pane {
   /** T8: the terminal has a new shell: a new generation, once the old channel is closed. */
   restarted(): void {
     this.inFocus = false;
-    this.probing = null;
     this.reopens = 0;
     this.abandon();
+    // the new shell is attached as any first attach: what waited belonged to the old one
+    this.size = detached(this.size);
     this.settle();
   }
 
@@ -599,10 +606,7 @@ class Pane {
     if (!record) return this.gone();
     if (record.finished) return this.finished(record.reason ?? "finished", record.code);
     if (record.reason !== null) return this.lost();
-    if (this.state.kind === "Waiting" || this.state.kind === "Ended" || this.state.kind === "Idle") {
-      this.probing = null;
-      this.settle();
-    }
+    if (this.state.kind === "Waiting" || this.state.kind === "Ended" || this.state.kind === "Idle") this.settle();
   }
 
   /** T12: the terminal no longer exists. */
@@ -618,8 +622,8 @@ class Pane {
   /** T6: the shown tab no longer holds this pane. The program hears the focus leave where it heard it come, then the channel is closed. */
   hide(): void {
     this.inTab = false;
-    this.repaint = false;
     this.probing = null;
+    this.reopens = 0;
     const attempt = this.attempt;
     if (attempt?.channel) {
       this.focus(false);
@@ -628,6 +632,7 @@ class Pane {
     }
     this.inFocus = false;
     this.abandon();
+    this.size = detached(this.size);
     this.shown?.dispose();
     this.shown = null;
     if (this.unsettled > 0) this.become({ kind: "Closing" });
@@ -670,6 +675,7 @@ class Pane {
     if (attempt.emulator === this.shown) this.shown = null;
     attempt.emulator?.dispose();
     this.abandon();
+    this.size = detached(this.size);
     if (++this.reopens > PANE_REOPEN_LIMIT) this.fail("emulator", reason);
     else this.toIdle();
   }
@@ -681,7 +687,6 @@ class Pane {
   retry(): void {
     if (this.state.kind !== "Failed" && this.state.kind !== "Waiting") return;
     this.reopens = 0;
-    this.probing = null;
     this.settle();
   }
 
@@ -709,12 +714,12 @@ class Pane {
     const due: { paint?: number; reattach?: number } = {};
     if (this.state.kind === "Painting" && attempt?.channel && !attempt.painted && attempt.owed === 0 && attempt.backlog.length === 0) due.paint = attempt.quietFrom + PAINT_QUIET_MS;
     const reattach = this.reattach();
-    if (reattach) due.reattach = reattach.at;
+    if (reattach !== null) due.reattach = reattach;
     return due;
   }
 
   /** A pane attaches again only where a picture is shown and frames may leave: attached, and not under a zoom. */
-  private reattach(): { at: number; repaint: boolean } | null {
+  private reattach(): number | null {
     if (this.covered || !this.attempt?.channel || (this.state.kind !== "Painting" && this.state.kind !== "Live")) return null;
     return reattachDue(this.size);
   }
@@ -725,9 +730,9 @@ class Pane {
     const { paint } = this.due();
     if (paint !== undefined && now >= paint && this.attempt) this.painted(this.attempt);
     const reattach = this.reattach();
-    if (reattach && now >= reattach.at) {
-      // close, wait for the core's CLOSE, then attach: with the rectangle, or (after another viewer's resize) only to repaint
-      this.repaint = reattach.repaint;
+    if (reattach !== null && now >= reattach) {
+      // close, wait for the core's CLOSE, then attach. The size keeps what waits until that attach leaves, which reads from it
+      // whether it carries the rectangle or (after another viewer's resize) only repaints
       this.abandon();
       this.toIdle();
     }
@@ -758,6 +763,11 @@ class Pane {
     if (!modes.ok) return;
     this.inFocus = owner;
     if (modes.value.focusReports) attempt.channel.writeAutomatic(owner ? "\x1b[I" : "\x1b[O");
+  }
+
+  /** Whether DATA may leave as it is: it makes this viewer the active one with the size its channel advertises, which must be the rectangle. */
+  private advertisesRectangle(): boolean {
+    return sameSize(this.size.wanted, this.size.advertised);
   }
 
   /** The input gate, and behind it the take. */
@@ -791,12 +801,12 @@ class Pane {
     if (!press) {
       // a release or a move belongs to a press sent on this attach; it never takes the size, so it never leaves ahead of one
       const down = event.type === "key" ? attempt.keyDown : attempt.mouseDown;
-      if (!down || !sameSize(this.size.wanted, this.size.advertised)) return { sent: false, code: "release", notice: false };
+      if (!down || !this.advertisesRectangle()) return { sent: false, code: "release", notice: false };
       channel.write(encoded.value);
       return { sent: true };
     }
     // the take: the one place a RESIZE leaves. DATA makes this viewer the active one with the size it advertises, so the rectangle is advertised first
-    if (!sameSize(this.size.wanted, this.size.advertised)) channel.resize(this.size.wanted.cols, this.size.wanted.rows);
+    if (!this.advertisesRectangle()) channel.resize(this.size.wanted.cols, this.size.wanted.rows);
     this.size = took(this.size);
     if (!channel.automaticInput && !attempt.focusSent) {
       channel.focus(true);
