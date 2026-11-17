@@ -104,3 +104,26 @@ export const REATTACH_SETTLE_MS = 150;
  * the last time the pane was live.
  */
 export const PANE_REOPEN_LIMIT = 3;
+
+// The loop's waits and limits (tui/loop.ts) and the entry's (tui/main.ts).
+
+/** A frame pass runs at most this often: changes closer together than this share one pass. */
+export const FRAME_PASS_MS = 8;
+/** The most bytes of credit one frame pass hands back to the core, the focused pane first. */
+export const PASS_CREDIT_BYTES = 512 * 1024;
+/** Quit and a hang-up close every pane channel and the event stream within this long, answered or not. */
+export const QUIT_BOUND_MS = 2_000;
+/** A program's synchronized-output hold is ended this long after it began, if the program did not end it. */
+export const HOLD_RELEASE_MS = 1_000;
+/**
+ * After a paste the input layer refused, it swallows input until the paste's end mark. When no read brought an
+ * event for this long, the mark is taken as lost and the input layer is reset, so the keyboard is back. Not
+ * shorter: a long paste over a slow link arrives with gaps, and a reset inside one would type the rest of it.
+ */
+export const PASTE_ABANDON_MS = 3_000;
+/** The painter's style table never shrinks: the painter and its grids are made anew once it holds this many styles. */
+export const STYLE_TABLE_LIMIT = 65_536;
+/** The crash records kept in the screen's state folder: the newest this many. */
+export const CRASH_RECORDS_KEPT = 10;
+/** The action codes a crash record carries: the last this many. */
+export const CRASH_ACTIONS_KEPT = 32;
