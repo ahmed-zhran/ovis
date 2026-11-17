@@ -21,6 +21,7 @@ import type { InputEvent } from "./input/decode.ts";
 import { Framer } from "./input/framer.ts";
 import type { TuiThemeMode } from "./theme.generated.ts";
 import { buildChrome, sessionFromSocket } from "./view/chrome.ts";
+import { LINK_UNKNOWN, paneLive, shownLink, type ShownLink } from "./view/link-view.ts";
 import { type Deadlines, earliest, FRAME_PASS_MS, HOLD_RELEASE_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, QUIT_BOUND_MS, STYLE_TABLE_LIMIT, CRASH_ACTIONS_KEPT } from "./model/deadlines.ts";
 import type { Effect } from "./model/effects.ts";
 import { focused } from "./model/focus.ts";
@@ -114,7 +115,7 @@ export function startLoop(options: LoopOptions): Loop {
   /** the host answered DECRQM 2026 at start */
   let sync = false;
   let theme: TuiThemeMode = "dark";
-  let lastOfflineCode: string | null = null;
+  let shown: ShownLink = LINK_UNKNOWN;
   const session = options.session ?? sessionFromSocket(options.socket);
   const cwd = options.cwd ?? "~";
   let grids = new Map<string, { emulator: unknown; grid: PaneGrid }>();
@@ -198,9 +199,8 @@ export function startLoop(options: LoopOptions): Loop {
         firstState = null;
         told(notice.state);
       }
-      if ("code" in notice.state) lastOfflineCode = notice.state.code;
+      shown = shownLink(shown, notice.state);
       if (notice.state.kind === "Online") {
-        lastOfflineCode = null;
         const epoch = notice.state.epoch;
         void link.hello().then((info) => {
           if (link.state.kind === "Online" && link.state.epoch === epoch) {
@@ -388,12 +388,11 @@ export function startLoop(options: LoopOptions): Loop {
         held.grid.copy(emulator, held.grid.allDirty);
         drawn.add(spot.pane);
       }
-      const live = view?.state.kind === "Live" && link.state.kind === "Online";
+      const live = paneLive(view, shown);
       scenes.push(paneScene(spot, held.grid, actual, { live, hold: holds.has(spot.pane), dim: !live }));
     }
     const size = host.size();
     const paneViews = new Map(panes.views().map((v) => [v.terminal, v]));
-    const linkInfo = { kind: link.state.kind === "Online" ? ("Online" as const) : ("Offline" as const), code: link.state.kind === "Online" ? null : ("code" in link.state ? link.state.code : lastOfflineCode) };
     const chrome = buildChrome({
       regions: shape.regions,
       spots: shape.spots,
@@ -401,7 +400,7 @@ export function startLoop(options: LoopOptions): Loop {
       state,
       world: world.view(),
       panes: paneViews,
-      link: linkInfo,
+      link: shown,
       session,
       cwd,
       theme,

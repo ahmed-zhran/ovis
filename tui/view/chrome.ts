@@ -1,16 +1,15 @@
 /**
- * The terminal screen's chrome, following herdr's client screen (src/AGENTS.md):
- * the sidebar (session header with collapse toggle, Spaces with rollupStatus dots and linked
- * worktree grouping, Agents ordered by shared/attention.ts with name, folder and state glyph/word),
- * the tab bar (focused accent, bold when custom-named, zoom mark, overflow reveal keeping the last
- * tab's full label), pane borders with focus colour, title (name, folder, agent), state notices and
- * divider hit targets, the mode bar and hint line generated from the one keymap table, and the
- * overlays (help generated from the same keymap table with unreachable/fallback notes, text modal,
- * confirm dialog, goto picker, and notice toasts).
+ * The terminal screen's chrome, following herdr's own client screen (src/AGENTS.md): the sidebar (the session header
+ * with its collapse toggle, workspaces with roll-up state marks and their linked worktrees, agents in shared/attention.ts
+ * order), the tab bar, pane borders with titles and state banners, the mode bar and hint line from the one key table,
+ * and the overlays (help from the same table, the text field, the confirm dialog, the goto picker, notice toasts).
+ *
+ * Each part is built in two steps: its builder works out everything the part shows as plain data, and `draw` paints
+ * only that data. A part's `version` is that data, so a part is drawn again exactly when something it shows changed.
  */
 
 import { knownStatus, type KnownStatus } from "../../shared/attention.ts";
-import type { LinkState } from "../core/link.ts";
+import { folderName } from "../../shared/pane-title.ts";
 import type { PaneView } from "../core/pane.ts";
 import type { CoreView } from "../core/world.ts";
 import { STYLE_BOLD, STYLE_INVERSE, type WrittenColor } from "../emulator/index.ts";
@@ -19,27 +18,31 @@ import { focused } from "../model/focus.ts";
 import { helpRows, modeBar, shownRefusals } from "../model/hints.ts";
 import type { KeymapNote } from "../model/keymap.ts";
 import { type Field, type Overlay, OVERLAYS } from "../model/overlays.ts";
-import type { ModelState, Notice } from "../model/reduce.ts";
+import type { ModelState } from "../model/reduce.ts";
 import { STRINGS } from "../strings.ts";
 import { TUI_THEMES, type TuiColorRole, type TuiThemeMode } from "../theme.generated.ts";
 import type { Rect, Regions, SplitCells } from "./geometry.ts";
 import { hostLayout, type LaidCell } from "./host-layout.ts";
+import type { ShownLink } from "./link-view.ts";
 import { nearest256, type Canvas, type Part, type Scene } from "./paint.ts";
 import type { PaneSpot } from "./screen.ts";
 
-type ThemeColors = Readonly<Record<TuiColorRole, WrittenColor>>;
+type Colors = Readonly<Record<TuiColorRole, WrittenColor>>;
 
-/** Theme tokens resolved for the host's colour depth: RGB on truecolor, nearest xterm-256 index on 256-colour hosts. */
-export function themeColors(mode: TuiThemeMode = "dark", depth: ColorDepth = "truecolor"): ThemeColors {
+const palettes = new Map<string, Colors>();
+
+/** The theme's colours for the host: RGB on a truecolor host, the nearest xterm-256 index on a 256-colour one. */
+function themeColors(mode: TuiThemeMode, depth: ColorDepth): Colors {
+  const look = `${mode}/${depth}`;
+  const known = palettes.get(look);
+  if (known) return known;
   const palette = TUI_THEMES[mode];
-  const entries = (Object.keys(palette) as TuiColorRole[]).map((role) => {
-    const rgb = palette[role];
-    return [role, depth === "256" ? nearest256(rgb) : rgb] as const;
-  });
-  return Object.fromEntries(entries) as ThemeColors;
+  const colors = Object.fromEntries((Object.keys(palette) as TuiColorRole[]).map((role) => [role, depth === "256" ? nearest256(palette[role]) : palette[role]])) as Colors;
+  palettes.set(look, colors);
+  return colors;
 }
 
-/** The hc session name inferred from a socket path when no explicit session name was handed in. */
+/** The hc session named by a socket path, for the header when the entry was handed no session name. */
 export function sessionFromSocket(socket: string): string {
   const base = socket.split(/[\\/]/).at(-1) ?? "default";
   const stripped = base.replace(/\.sock$/, "");
@@ -48,62 +51,72 @@ export function sessionFromSocket(socket: string): string {
 }
 
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/gu;
+const PRINTABLE_ASCII = /^[\u0020-\u007e]*$/;
 
-/** Lays `text` out through the engine's HostLayout (never Bun.stringWidth). */
-function measure(text: string): { cells: LaidCell[]; width: number } {
+/**
+ * `text` as the host lays it out (host-layout.ts, never Bun.stringWidth). Printable ASCII takes one cell a character on
+ * every host, so it skips the engine: a cold first frame lays out hundreds of such labels.
+ */
+function measure(text: string): { cells: readonly LaidCell[]; width: number } {
   if (text === "") return { cells: [], width: 0 };
+  if (PRINTABLE_ASCII.test(text)) return { cells: [...text].map((char, col): LaidCell => ({ col, text: char, width: 1 })), width: text.length };
   const laid = hostLayout.layout(text.replace(CONTROL, "\ufffd"));
   return { cells: laid.cells, width: laid.end };
 }
 
-/** Prints `text` at `(col, row)` clipped to at most `maxCols` display columns, using Canvas.put with each cell's real width. */
-function printClipped(canvas: Canvas, col: number, row: number, text: string, maxCols: number, style: number, ellipsis = false): number {
-  if (maxCols <= 0 || text === "") return col;
+/**
+ * Prints `text` from `col` in at most `room` columns, each cell at the width the host gives it; a wide cell that would
+ * cross the edge is left out whole. With `ellipsis`, a cut text ends in `…`. Answers the column after the last cell.
+ */
+function printFit(canvas: Canvas, col: number, row: number, text: string, room: number, style: number, ellipsis = false): number {
+  if (room <= 0 || text === "") return col;
   const { cells, width } = measure(text);
-  if (width <= maxCols) {
-    for (const cell of cells) canvas.put(col + cell.col, row, cell.text, cell.width, style);
-    return col + width;
-  }
-  const limit = ellipsis && maxCols >= 2 ? maxCols - 1 : maxCols;
+  const cut = width > room;
+  const limit = cut && ellipsis && room >= 2 ? room - 1 : room;
   let end = 0;
   for (const cell of cells) {
     if (cell.col + cell.width > limit) break;
     canvas.put(col + cell.col, row, cell.text, cell.width, style);
     end = cell.col + cell.width;
   }
-  if (ellipsis && maxCols >= 2 && end < maxCols) {
+  if (cut && ellipsis && room >= 2) {
     canvas.put(col + end, row, "…", 1, style);
     end += 1;
   }
   return col + end;
 }
 
-/** Fills a horizontal span of cells on `row` from `col` for `width` columns. */
-function fillSpan(canvas: Canvas, col: number, row: number, width: number, style: number, char = " "): void {
-  for (let c = col; c < col + width; c++) canvas.put(c, row, char, 1, style);
+function fillSpan(canvas: Canvas, col: number, row: number, width: number, style: number): void {
+  for (let c = col; c < col + width; c++) canvas.put(c, row, " ", 1, style);
 }
 
-/** Fills a sub-rectangle on `canvas`. */
-function fillBox(canvas: Canvas, rect: Rect, style: number, char = " "): void {
-  for (let r = rect.y; r < rect.y + rect.height; r++) fillSpan(canvas, rect.x, r, rect.width, style, char);
-}
-
-function stateVisual(status: KnownStatus | string | undefined, colors: ThemeColors): { glyph: string; word: string; color: WrittenColor } {
-  const known = knownStatus(status);
-  switch (known) {
-    case "blocked":
-      return { glyph: STRINGS.glyphBlocked, word: STRINGS.stateBlocked, color: colors.statusBlocked };
-    case "done":
-      return { glyph: STRINGS.glyphDone, word: STRINGS.stateDone, color: colors.statusDone };
-    case "working":
-    case "waiting":
-      return { glyph: STRINGS.glyphWorking, word: STRINGS.stateWorking, color: colors.statusWorking };
-    case "idle":
-      return { glyph: STRINGS.glyphIdle, word: STRINGS.stateIdle, color: colors.statusIdle };
-    case "unknown":
-      return { glyph: STRINGS.glyphUnknown, word: "", color: colors.indicatorUnknown };
+function box(canvas: Canvas, rect: Rect, style: number): void {
+  const right = rect.x + rect.width - 1;
+  const bottom = rect.y + rect.height - 1;
+  for (let col = rect.x; col <= right; col++) {
+    const edge = col === rect.x || col === right ? "+" : "-";
+    canvas.put(col, rect.y, edge, 1, style);
+    canvas.put(col, bottom, edge, 1, style);
+  }
+  for (let row = rect.y + 1; row < bottom; row++) {
+    canvas.put(rect.x, row, "|", 1, style);
+    canvas.put(right, row, "|", 1, style);
   }
 }
+
+/** Each state's own glyph and word, so a state never shows by colour alone. */
+const STATE_LOOK: Readonly<Record<KnownStatus, { glyph: string; word: string; role: TuiColorRole }>> = {
+  blocked: { glyph: STRINGS.glyphBlocked, word: STRINGS.stateBlocked, role: "statusBlocked" },
+  done: { glyph: STRINGS.glyphDone, word: STRINGS.stateDone, role: "statusDone" },
+  working: { glyph: STRINGS.glyphWorking, word: STRINGS.stateWorking, role: "statusWorking" },
+  waiting: { glyph: STRINGS.glyphWorking, word: STRINGS.stateWorking, role: "statusWorking" },
+  idle: { glyph: STRINGS.glyphIdle, word: STRINGS.stateIdle, role: "statusIdle" },
+  unknown: { glyph: STRINGS.glyphUnknown, word: "", role: "indicatorUnknown" },
+};
+
+const stateLook = (status: string | undefined) => STATE_LOOK[knownStatus(status)];
+
+const actionLabel = (action: string): string => STRINGS.actions[action] ?? action.replaceAll("_", " ");
 
 interface ChromeInput {
   readonly regions: Regions;
@@ -112,8 +125,9 @@ interface ChromeInput {
   readonly state: ModelState;
   readonly world: CoreView;
   readonly panes: ReadonlyMap<string, PaneView>;
-  readonly link: { readonly kind: LinkState["kind"]; readonly code: string | null };
+  readonly link: ShownLink;
   readonly session: string;
+  /** the folder `ovis` was typed in, offered for a first workspace on an empty core */
   readonly cwd: string;
   readonly theme?: TuiThemeMode;
   readonly colors?: ColorDepth;
@@ -125,336 +139,215 @@ interface BuiltChrome {
   readonly input: Scene["input"];
 }
 
-function folderBase(path: string): string {
-  if (!path) return "~";
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? path;
+/** A part whose version is exactly the data it draws (and the colours it draws them in). */
+function part<T>(key: string, rect: Rect, look: string, data: T, draw: (canvas: Canvas, data: T) => void): Part {
+  return { key, rect, version: JSON.stringify([look, data]), draw: (canvas) => draw(canvas, data) };
 }
 
-function keyForAction(state: ModelState, action: string, fallback: string): string {
-  const row = state.keymap.rows.find((r) => r.action === action);
-  return row?.bindings[0]?.text ?? fallback;
+interface WorkspaceLine { readonly id: string; readonly label: string; readonly status: KnownStatus; readonly name: string; readonly selected: boolean }
+interface AgentLine { readonly id: string; readonly helper: boolean; readonly status: KnownStatus; readonly text: string; readonly selected: boolean }
+
+/** The first index of a window of `size` items over `count` that keeps `focus` in its middle. */
+function windowStart(count: number, size: number, focus: number): number {
+  return count <= size ? 0 : Math.min(Math.max(0, focus - Math.floor(size / 2)), count - size);
 }
 
-/** Builds the sidebar part (header with session + collapse toggle, Spaces with rollupStatus and worktrees, Agents). */
-function buildSidebarPart(input: ChromeInput, colors: ThemeColors): Part {
-  const { regions, state, world, link, session } = input;
+function sidebarPart(input: ChromeInput, colors: Colors, look: string): Part {
+  const { regions, state, world, session } = input;
   const rect = regions.sidebar;
   const shown = focused(state.world, state.focus);
-  const activeWsId = state.mode.name === "navigate" && state.mode.preview !== null ? state.mode.preview : shown.workspace?.id ?? null;
-  const version = JSON.stringify({
-    rect,
-    session,
-    ownsLayout: world.ownsLayout,
-    linkKind: link.kind,
-    activeWsId,
-    focusedPane: shown.pane?.id ?? null,
-    groups: world.workspaceGroups,
-    agents: world.agents,
+  const activeWorkspace = state.mode.name === "navigate" && state.mode.preview !== null ? state.mode.preview : shown.workspace?.id ?? null;
+  const focusedPane = shown.pane?.id ?? null;
+  const fixedRows = 1 + (world.ownsLayout ? 0 : 1) + 1;
+  const left = Math.max(0, rect.height - fixedRows);
+  const workspaces = world.workspaceGroups.flatMap((group) => [
+    { ...group, label: `${group.number}:` },
+    ...group.children.map((child) => ({ ...child, label: `${STRINGS.worktreeMark}${child.number}:` })),
+  ]).map((row): WorkspaceLine => ({ id: row.id, label: row.label, status: row.status, name: row.name, selected: row.id === activeWorkspace }));
+  const agentRows = world.agents.length > 0 ? Math.min(world.agents.length + 1, Math.max(2, Math.floor(left / 2))) : 2;
+  const workspaceRows = Math.max(1, left - agentRows);
+  const wsStart = windowStart(workspaces.length, workspaceRows, Math.max(0, workspaces.findIndex((line) => line.selected)));
+  const shownWorkspaces = workspaces.slice(wsStart, wsStart + workspaceRows);
+  const agentsLeft = Math.max(0, left - Math.max(1, shownWorkspaces.length) - 1);
+  const agents = world.agents.map((agent): AgentLine => {
+    const where = agent.folder ? ` ${agent.folder === "/" ? "/" : `/${agent.folder}`}` : "";
+    const what = agent.agent && agent.agent !== agent.name ? ` ${agent.agent}` : "";
+    return { id: agent.paneId, helper: agent.helper, status: knownStatus(agent.status), text: `${agent.name}${where}${what}`, selected: agent.paneId === focusedPane };
   });
-
-  return {
-    key: "sidebar",
-    rect,
-    version,
-    draw(canvas) {
-      if (rect.width <= 0 || rect.height <= 0) return;
-      const baseStyle = canvas.style({ fg: colors.text, bg: colors.bgPanel });
-      const dimStyle = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
-      const headStyle = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD });
-      const ruleStyle = canvas.style({ fg: colors.border, bg: colors.bgPanel });
-      canvas.fill(baseStyle);
-
-      const contentW = Math.max(1, rect.width - 1);
-      // Right border column separating sidebar from panes
-      for (let r = rect.y; r < rect.y + rect.height; r++) {
-        canvas.put(rect.x + rect.width - 1, r, "|", 1, ruleStyle);
-      }
-
-      let row = rect.y;
-      // Row 0: Session header + collapse toggle
-      fillSpan(canvas, rect.x, row, contentW, headStyle);
-      const toggleText = STRINGS.sidebarToggleCollapse;
-      const headerRoom = Math.max(0, contentW - toggleText.length - 1);
-      printClipped(canvas, rect.x, row, STRINGS.sessionHeader(session), headerRoom, headStyle, true);
-      if (contentW >= toggleText.length) {
-        const toggleX = rect.x + contentW - toggleText.length;
-        printClipped(canvas, toggleX, row, toggleText, toggleText.length, canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD }));
-        canvas.hit({ x: toggleX, y: row, width: toggleText.length, height: 1 }, "toggle_sidebar");
-      }
-      row++;
-
-      // Optional app-owned line in sidebar when herdr-app arranges the core
-      if (!world.ownsLayout && row < rect.y + rect.height) {
-        const noteStyle = canvas.style({ fg: colors.notice, bg: colors.bgPanel });
-        printClipped(canvas, rect.x, row, STRINGS.appOwnedCore, contentW, noteStyle, true);
-        row++;
-      }
-
-      if (row >= rect.y + rect.height) return;
-
-      // Spaces section header
-      const sectionStyle = canvas.style({ fg: colors.textDim, bg: colors.bgPanel, flags: STYLE_BOLD });
-      printClipped(canvas, rect.x, row, STRINGS.spacesSection, contentW, sectionStyle);
-      row++;
-
-      // Flatten workspace rows (top-level + indented linked worktrees)
-      interface WsItem {
-        id: string;
-        name: string;
-        number: number;
-        status: KnownStatus;
-        indented: boolean;
-      }
-      const wsItems: WsItem[] = [];
-      for (const group of world.workspaceGroups) {
-        wsItems.push({ id: group.id, name: group.name, number: group.number, status: group.status, indented: false });
-        for (const child of group.children) {
-          wsItems.push({ id: child.id, name: child.name, number: child.number, status: child.status, indented: true });
-        }
-      }
-
-      // Reserve space for Agents section (at least header + up to half remaining rows when agents exist)
-      const totalRemaining = rect.y + rect.height - row;
-      const agentCount = world.agents.length;
-      const agentSectionNeed = agentCount > 0 ? Math.min(agentCount + 1, Math.max(2, Math.floor(totalRemaining / 2))) : 2;
-      const wsBudget = Math.max(1, totalRemaining - agentSectionNeed);
-
-      if (wsItems.length === 0 && row < rect.y + rect.height) {
-        printClipped(canvas, rect.x, row, ` ${STRINGS.noSpaces}`, contentW, dimStyle, true);
-        row++;
-      } else {
-        const focusedIdx = Math.max(0, wsItems.findIndex((item) => item.id === activeWsId));
-        const startIdx = wsItems.length <= wsBudget ? 0 : Math.min(Math.max(0, focusedIdx - Math.floor(wsBudget / 2)), wsItems.length - wsBudget);
-        const visibleWs = wsItems.slice(startIdx, startIdx + wsBudget);
-        for (const item of visibleWs) {
-          if (row >= rect.y + rect.height) break;
-          const selected = item.id === activeWsId;
-          const rowBg = selected ? colors.bgHover : colors.bgPanel;
-          const rowFg = selected ? colors.textStrong : colors.text;
-          const rowStyle = canvas.style({ fg: rowFg, bg: rowBg, flags: selected ? STYLE_BOLD : 0 });
-          fillSpan(canvas, rect.x, row, contentW, rowStyle);
-
-          const vis = stateVisual(item.status, colors);
-          const dotStyle = canvas.style({ fg: vis.color, bg: rowBg, flags: STYLE_BOLD });
-          const wordStyle = canvas.style({ fg: vis.color, bg: rowBg });
-
-          let col = rect.x;
-          const mark = selected ? ">" : " ";
-          col = printClipped(canvas, col, row, mark, 1, canvas.style({ fg: colors.accent, bg: rowBg, flags: STYLE_BOLD }));
-          col = printClipped(canvas, col, row, vis.glyph, 1, dotStyle);
-          const prefix = item.indented ? `${STRINGS.worktreeMark}${item.number}:` : `${item.number}:`;
-          col = printClipped(canvas, col, row, prefix, Math.max(0, rect.x + contentW - col), rowStyle);
-
-          const wordSuffix = vis.word ? ` ${vis.word}` : "";
-          const wordWidth = measure(wordSuffix).width;
-          const nameBudget = Math.max(1, rect.x + contentW - col - (rect.x + contentW - col > wordWidth + 3 ? wordWidth : 0));
-          col = printClipped(canvas, col, row, item.name, nameBudget, rowStyle, true);
-          if (vis.word && rect.x + contentW - col >= wordWidth) {
-            printClipped(canvas, rect.x + contentW - wordWidth, row, wordSuffix, wordWidth, wordStyle);
-          }
-          canvas.hit({ x: rect.x, y: row, width: contentW, height: 1 }, `workspace:${item.id}`);
-          row++;
-        }
-      }
-
-      if (row >= rect.y + rect.height) return;
-      // Agents section header
-      printClipped(canvas, rect.x, row, STRINGS.agentsSection, contentW, sectionStyle);
-      row++;
-
-      if (world.agents.length === 0) {
-        if (row < rect.y + rect.height) {
-          printClipped(canvas, rect.x, row, ` ${STRINGS.noAgents}`, contentW, dimStyle, true);
-        }
-        return;
-      }
-
-      const focusedPaneId = shown.pane?.id ?? null;
-      const agentRowsLeft = rect.y + rect.height - row;
-      const focusedAgentIdx = Math.max(0, world.agents.findIndex((a) => a.paneId === focusedPaneId));
-      const agentStart = world.agents.length <= agentRowsLeft ? 0 : Math.min(Math.max(0, focusedAgentIdx - Math.floor(agentRowsLeft / 2)), world.agents.length - agentRowsLeft);
-      for (const agent of world.agents.slice(agentStart, agentStart + agentRowsLeft)) {
-        if (row >= rect.y + rect.height) break;
-        const selected = agent.paneId === focusedPaneId;
-        const rowBg = selected ? colors.bgHover : colors.bgPanel;
-        const rowStyle = canvas.style({ fg: selected ? colors.textStrong : colors.text, bg: rowBg, flags: selected ? STYLE_BOLD : 0 });
-        const subStyle = canvas.style({ fg: colors.textDim, bg: rowBg });
-        fillSpan(canvas, rect.x, row, contentW, rowStyle);
-
-        const vis = stateVisual(agent.status, colors);
-        const dotStyle = canvas.style({ fg: vis.color, bg: rowBg, flags: STYLE_BOLD });
-        let col = rect.x;
-        col = printClipped(canvas, col, row, agent.helper ? " +" : " ", 2, subStyle);
-        col = printClipped(canvas, col, row, `${vis.glyph} `, 2, dotStyle);
-        // Show name, agent, folder and state word where it fits
-        const statePart = vis.word ? ` ${vis.word}` : "";
-        const stateW = measure(statePart).width;
-        const room = Math.max(0, rect.x + contentW - col);
-        const mainRoom = room > stateW + 4 ? room - stateW : room;
-        const folderPart = agent.folder ? ` ${agent.folder === "/" ? "/" : `/${agent.folder}`}` : "";
-        const agentPart = agent.agent && agent.agent !== agent.name ? ` ${agent.agent}` : "";
-        const mainText = `${agent.name}${folderPart}${agentPart}`;
-        col = printClipped(canvas, col, row, mainText, mainRoom, rowStyle, true);
-        if (vis.word && rect.x + contentW - col >= stateW) {
-          printClipped(canvas, rect.x + contentW - stateW, row, statePart, stateW, dotStyle);
-        }
-        canvas.hit({ x: rect.x, y: row, width: contentW, height: 1 }, `agent:${agent.paneId}`);
-        row++;
-      }
-    },
+  const agentStart = windowStart(agents.length, agentsLeft, Math.max(0, agents.findIndex((line) => line.selected)));
+  const data = {
+    header: STRINGS.sessionHeader(session),
+    appOwned: !world.ownsLayout,
+    workspaces: shownWorkspaces,
+    agents: agents.slice(agentStart, agentStart + agentsLeft),
   };
+  return part("sidebar", rect, look, data, (canvas, { header, appOwned, workspaces: lines, agents: agentLines }) => {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const base = canvas.style({ fg: colors.text, bg: colors.bgPanel });
+    const dim = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
+    const section = canvas.style({ fg: colors.textDim, bg: colors.bgPanel, flags: STYLE_BOLD });
+    const rule = canvas.style({ fg: colors.border, bg: colors.bgPanel });
+    canvas.fill(base);
+    const width = Math.max(1, rect.width - 1);
+    const bottom = rect.y + rect.height;
+    for (let r = rect.y; r < bottom; r++) canvas.put(rect.x + rect.width - 1, r, "|", 1, rule);
+
+    let row = rect.y;
+    const head = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD });
+    fillSpan(canvas, rect.x, row, width, head);
+    const toggle = STRINGS.sidebarToggleCollapse;
+    printFit(canvas, rect.x, row, header, Math.max(0, width - toggle.length - 1), head, true);
+    if (width >= toggle.length) {
+      const at = rect.x + width - toggle.length;
+      printFit(canvas, at, row, toggle, toggle.length, canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD }));
+      canvas.hit({ x: at, y: row, width: toggle.length, height: 1 }, "toggle_sidebar");
+    }
+    row++;
+    if (appOwned && row < bottom) printFit(canvas, rect.x, row++, STRINGS.appOwnedCore, width, canvas.style({ fg: colors.notice, bg: colors.bgPanel }), true);
+    if (row >= bottom) return;
+    printFit(canvas, rect.x, row++, STRINGS.workspacesSection, width, section);
+    if (lines.length === 0 && row < bottom) printFit(canvas, rect.x, row++, ` ${STRINGS.noSpaces}`, width, dim, true);
+    for (const line of lines) {
+      if (row >= bottom) return;
+      const bg = line.selected ? colors.bgHover : colors.bgPanel;
+      const style = canvas.style({ fg: line.selected ? colors.textStrong : colors.text, bg, flags: line.selected ? STYLE_BOLD : 0 });
+      fillSpan(canvas, rect.x, row, width, style);
+      const state = STATE_LOOK[line.status];
+      const end = rect.x + width;
+      let col = printFit(canvas, rect.x, row, line.selected ? ">" : " ", 1, canvas.style({ fg: colors.accent, bg, flags: STYLE_BOLD }));
+      col = printFit(canvas, col, row, state.glyph, 1, canvas.style({ fg: colors[state.role], bg, flags: STYLE_BOLD }));
+      col = printFit(canvas, col, row, line.label, end - col, style);
+      const word = state.word ? ` ${state.word}` : "";
+      const wordWidth = measure(word).width;
+      col = printFit(canvas, col, row, line.name, Math.max(1, end - col - (end - col > wordWidth + 3 ? wordWidth : 0)), style, true);
+      if (word && end - col >= wordWidth) printFit(canvas, end - wordWidth, row, word, wordWidth, canvas.style({ fg: colors[state.role], bg }));
+      canvas.hit({ x: rect.x, y: row, width, height: 1 }, `workspace:${line.id}`);
+      row++;
+    }
+    if (row >= bottom) return;
+    printFit(canvas, rect.x, row++, STRINGS.agentsSection, width, section);
+    if (agentLines.length === 0 && row < bottom) printFit(canvas, rect.x, row, ` ${STRINGS.noAgents}`, width, dim, true);
+    for (const line of agentLines) {
+      if (row >= bottom) return;
+      const bg = line.selected ? colors.bgHover : colors.bgPanel;
+      const style = canvas.style({ fg: line.selected ? colors.textStrong : colors.text, bg, flags: line.selected ? STYLE_BOLD : 0 });
+      fillSpan(canvas, rect.x, row, width, style);
+      const state = STATE_LOOK[line.status];
+      const mark = canvas.style({ fg: colors[state.role], bg, flags: STYLE_BOLD });
+      const end = rect.x + width;
+      let col = printFit(canvas, rect.x, row, line.helper ? ` ${STRINGS.helperMark}` : " ", 2, canvas.style({ fg: colors.textDim, bg }));
+      col = printFit(canvas, col, row, `${state.glyph} `, 2, mark);
+      const word = state.word ? ` ${state.word}` : "";
+      const wordWidth = measure(word).width;
+      const room = Math.max(0, end - col);
+      col = printFit(canvas, col, row, line.text, room > wordWidth + 4 ? room - wordWidth : room, style, true);
+      if (word && end - col >= wordWidth) printFit(canvas, end - wordWidth, row, word, wordWidth, mark);
+      canvas.hit({ x: rect.x, y: row, width, height: 1 }, `agent:${line.id}`);
+      row++;
+    }
+  });
 }
 
-/** Builds the tab bar part (shows focused workspace's tabs, overflow revealing focused tab & full last label, zoom mark, session header when narrow/collapsed). */
-function buildTabBarPart(input: ChromeInput, colors: ThemeColors): Part {
+interface TabEntry { readonly id: string; readonly label: string; readonly active: boolean; readonly named: boolean }
+
+/** The range of tabs that fits in `room` columns around the active one, leaving two columns for each arrow that marks tabs left out. */
+function tabWindow(entries: readonly { width: number; active: boolean }[], room: number): { start: number; end: number } {
+  const total = entries.reduce((sum, entry) => sum + entry.width, 0);
+  if (total <= room) return { start: 0, end: entries.length };
+  const active = Math.max(0, entries.findIndex((entry) => entry.active));
+  let start = active;
+  let end = active + 1;
+  let used = entries[active]!.width;
+  for (;;) {
+    let grew = false;
+    if (end < entries.length && used + entries[end]!.width <= room - (start > 0 ? 2 : 0)) {
+      used += entries[end++]!.width;
+      grew = true;
+    }
+    if (start > 0 && used + entries[start - 1]!.width <= room - (end < entries.length ? 2 : 0)) {
+      used += entries[--start]!.width;
+      grew = true;
+    }
+    if (!grew) return { start, end };
+  }
+}
+
+function tabBarPart(input: ChromeInput, colors: Colors, look: string): Part {
   const { regions, state, world, session } = input;
   const rect = regions.tabBar;
   const shown = focused(state.world, state.focus);
-  const ws = shown.workspace;
-  const activeTabId = shown.tab?.id ?? null;
-  const tabShape = activeTabId ? world.tabs.get(activeTabId) ?? null : null;
-  const isZoomed = tabShape?.zoomed !== null && tabShape?.zoomed !== undefined;
-  const showSessionInBar = regions.sidebar.width === 0;
-  const tabs = ws?.tabs ?? [];
-  const version = JSON.stringify({
-    rect,
-    session: showSessionInBar ? session : "",
-    ownsLayout: world.ownsLayout,
-    wsId: ws?.id ?? null,
-    activeTabId,
-    isZoomed,
-    tabs: tabs.map((t) => ({ id: t.id, name: t.name, status: world.tabStatuses.get(t.id) ?? "unknown", zoomed: (world.tabs.get(t.id)?.zoomed ?? null) !== null })),
+  const activeTab = shown.tab?.id ?? null;
+  const zoomed = activeTab !== null && (world.tabs.get(activeTab)?.zoomed ?? null) !== null;
+  const header = regions.sidebar.width === 0 ? `${STRINGS.sessionHeader(session)} ` : null;
+  const entries = (shown.workspace?.tabs ?? []).map((tab, at): TabEntry => {
+    const number = String(at + 1);
+    const status = knownStatus(world.tabStatuses.get(tab.id));
+    const mark = status !== "unknown" && status !== "idle" ? ` ${STATE_LOOK[status].glyph}` : "";
+    const zoom = (world.tabs.get(tab.id)?.zoomed ?? null) !== null ? STRINGS.tabZoomSuffix : "";
+    return { id: tab.id, label: ` ${number}:${tab.name || number}${zoom}${mark} `, active: tab.id === activeTab, named: tab.name !== "" && tab.name !== number };
   });
-
-  return {
-    key: "tabs",
-    rect,
-    version,
-    draw(canvas) {
-      if (rect.width <= 0 || rect.height <= 0) return;
-      const barStyle = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
-      canvas.fill(barStyle);
-
-      const row = rect.y;
-      let left = rect.x;
-      let rightEdge = rect.x + rect.width;
-
-      // When sidebar is collapsed or screen is narrow, show session header and expand toggle at the left of the tab bar
-      if (showSessionInBar) {
-        const headText = `${STRINGS.sessionHeader(session)} `;
-        const headStyle = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD });
-        left = printClipped(canvas, left, row, headText, Math.min(measure(headText).width, Math.max(0, rightEdge - left)), headStyle);
-        canvas.hit({ x: rect.x, y: row, width: left - rect.x, height: 1 }, "toggle_sidebar");
-      }
-
-      // Right-hand badges: app-owned note and ZOOM badge
-      if (isZoomed) {
-        const badge = ` ${STRINGS.zoomMark} `;
-        const bw = measure(badge).width;
-        if (rightEdge - left >= bw) {
-          rightEdge -= bw;
-          printClipped(canvas, rightEdge, row, badge, bw, canvas.style({ fg: colors.primaryText, bg: colors.accent, flags: STYLE_BOLD }));
-        }
-      }
-      if (!world.ownsLayout) {
-        const badge = ` ${STRINGS.appOwnedCore} `;
-        const bw = measure(badge).width;
-        if (rightEdge - left >= bw + 12) {
-          rightEdge -= bw;
-          printClipped(canvas, rightEdge, row, badge, bw, canvas.style({ fg: colors.notice, bg: colors.bgPanel }));
-        }
-      }
-
-      const avail = Math.max(0, rightEdge - left);
-      if (avail <= 0) return;
-      if (tabs.length === 0) {
-        printClipped(canvas, left, row, ` ${STRINGS.noTabs}`, avail, barStyle, true);
-        return;
-      }
-
-      // Build formatted tab items
-      const entries = tabs.map((tab, idx) => {
-        const num = idx + 1;
-        const customNamed = tab.name !== "" && tab.name !== String(num);
-        const tabZoomed = (world.tabs.get(tab.id)?.zoomed ?? null) !== null;
-        const status = world.tabStatuses.get(tab.id) ?? "unknown";
-        const vis = stateVisual(status, colors);
-        const statusMark = status !== "unknown" && status !== "idle" ? `${vis.glyph}` : "";
-        const label = ` ${num}:${tab.name || String(num)}${tabZoomed ? STRINGS.tabZoomSuffix : ""}${statusMark ? ` ${statusMark}` : ""} `;
-        return {
-          id: tab.id,
-          label,
-          width: measure(label).width,
-          active: tab.id === activeTabId,
-          customNamed,
-          status,
-        };
-      });
-
-      // Overflow windowing: reveal the focused tab and ensure the last tab shows its full label when included
-      const activeIdx = Math.max(0, entries.findIndex((e) => e.active));
-      let start = 0;
-      let end = entries.length;
-      const totalWidth = entries.reduce((sum, e) => sum + e.width, 0);
-      if (totalWidth > avail) {
-        start = activeIdx;
-        end = activeIdx + 1;
-        let used = entries[activeIdx]!.width;
-        while (end < entries.length || start > 0) {
-          let added = false;
-          if (end < entries.length && used + entries[end]!.width <= avail - (start > 0 ? 2 : 0)) {
-            used += entries[end]!.width;
-            end++;
-            added = true;
-          }
-          if (start > 0 && used + entries[start - 1]!.width <= avail - (end < entries.length ? 2 : 0)) {
-            start--;
-            used += entries[start]!.width;
-            added = true;
-          }
-          if (!added) break;
-        }
-      }
-
-      let col = left;
-      if (start > 0 && col < rightEdge) {
-        col = printClipped(canvas, col, row, "< ", Math.min(2, rightEdge - col), canvas.style({ fg: colors.accent, bg: colors.bgPanel, flags: STYLE_BOLD }));
-      }
-      for (let i = start; i < end; i++) {
-        const entry = entries[i]!;
-        const room = rightEdge - col - (end < entries.length ? 2 : 0);
-        if (room <= 0) break;
-        const bg = entry.active ? colors.bgElevated : colors.bgPanel;
-        const fg = entry.active ? colors.accent : colors.text;
-        const flags = (entry.active || entry.customNamed) ? STYLE_BOLD : 0;
-        const style = canvas.style({ fg, bg, flags });
-        const startCol = col;
-        col = printClipped(canvas, col, row, entry.label, room, style);
-        canvas.hit({ x: startCol, y: row, width: col - startCol, height: 1 }, `tab:${entry.id}`);
-      }
-      if (end < entries.length && col < rightEdge) {
-        printClipped(canvas, Math.max(col, rightEdge - 2), row, " >", Math.min(2, rightEdge - col), canvas.style({ fg: colors.accent, bg: colors.bgPanel, flags: STYLE_BOLD }));
-      }
-    },
-  };
+  let left = rect.x + (header === null ? 0 : Math.min(measure(header).width, rect.width));
+  let right = rect.x + rect.width;
+  const zoomBadge = ` ${STRINGS.zoomMark} `;
+  const showZoom = zoomed && right - left >= measure(zoomBadge).width;
+  if (showZoom) right -= measure(zoomBadge).width;
+  const ownedBadge = ` ${STRINGS.appOwnedCore} `;
+  const showOwned = !world.ownsLayout && right - left >= measure(ownedBadge).width + 12;
+  if (showOwned) right -= measure(ownedBadge).width;
+  const widths = entries.map((entry) => ({ width: measure(entry.label).width, active: entry.active }));
+  const { start, end } = tabWindow(widths, Math.max(0, right - left));
+  const data = { header, showZoom, showOwned, empty: entries.length === 0, tabs: entries.slice(start, end), before: start > 0, after: end < entries.length };
+  return part("tabs", rect, look, data, (canvas, { header: head, showZoom: zoom, showOwned: owned, empty, tabs, before, after }) => {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const bar = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
+    const arrow = canvas.style({ fg: colors.accent, bg: colors.bgPanel, flags: STYLE_BOLD });
+    canvas.fill(bar);
+    const row = rect.y;
+    let col = rect.x;
+    let edge = rect.x + rect.width;
+    if (head !== null) {
+      col = printFit(canvas, col, row, head, rect.width, canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD }));
+      canvas.hit({ x: rect.x, y: row, width: col - rect.x, height: 1 }, "toggle_sidebar");
+    }
+    if (zoom) {
+      edge -= measure(zoomBadge).width;
+      printFit(canvas, edge, row, zoomBadge, measure(zoomBadge).width, canvas.style({ fg: colors.primaryText, bg: colors.accent, flags: STYLE_BOLD }));
+    }
+    if (owned) {
+      edge -= measure(ownedBadge).width;
+      printFit(canvas, edge, row, ownedBadge, measure(ownedBadge).width, canvas.style({ fg: colors.notice, bg: colors.bgPanel }));
+    }
+    if (empty) {
+      printFit(canvas, col, row, ` ${STRINGS.noTabs}`, edge - col, bar, true);
+      return;
+    }
+    if (before) col = printFit(canvas, col, row, "< ", Math.min(2, edge - col), arrow);
+    for (const tab of tabs) {
+      const room = edge - col - (after ? 2 : 0);
+      if (room <= 0) break;
+      const style = canvas.style({ fg: tab.active ? colors.accent : colors.text, bg: tab.active ? colors.bgElevated : colors.bgPanel, flags: tab.active || tab.named ? STYLE_BOLD : 0 });
+      const from = col;
+      col = printFit(canvas, col, row, tab.label, room, style, true);
+      canvas.hit({ x: from, y: row, width: col - from, height: 1 }, `tab:${tab.id}`);
+    }
+    if (after && col < edge) printFit(canvas, Math.max(col, edge - 2), row, " >", Math.min(2, edge - col), arrow);
+  });
 }
 
-function paneStatusBanner(view: PaneView | undefined, linkKind: LinkState["kind"], _linkCode: string | null): { text: string; tone: "error" | "warn" | "info" } | null {
-  if (linkKind !== "Online") {
-    return { text: STRINGS.offlinePaneBanner(), tone: "warn" };
-  }
+type Tone = "error" | "warn" | "info";
+
+/** What a pane's bottom border says of it: why its picture is not live, or who sizes it; null for a plain live pane. */
+function paneBanner(view: PaneView | undefined, link: ShownLink): { text: string; tone: Tone } | null {
+  if (!link.online) return { text: STRINGS.offlinePaneBanner(), tone: "warn" };
   if (!view) return null;
   const { state, sizedBy } = view;
   switch (state.kind) {
     case "Ended":
       return { text: STRINGS.endedCode(state.code), tone: "info" };
     case "Waiting":
-      if (state.why === "lost") return { text: STRINGS.waitingNewShell, tone: "warn" };
-      if (state.why === "offline") return { text: `${STRINGS.waitingOffline} [${STRINGS.retryHint}]`, tone: "warn" };
-      return { text: `${STRINGS.waitingClosed} [${STRINGS.retryHint}]`, tone: "warn" };
+      return { text: state.why === "lost" ? STRINGS.waitingNewShell : state.why === "offline" ? STRINGS.waitingOffline : STRINGS.waitingClosed, tone: "warn" };
     case "Failed":
-      return { text: `[${STRINGS.retryHint}] ${STRINGS.failedPane(state.reason)}`, tone: "error" };
+      return { text: STRINGS.failedPane(state.reason), tone: "error" };
     case "Opening":
       return { text: STRINGS.openingPane, tone: "info" };
     case "Painting":
@@ -462,237 +355,88 @@ function paneStatusBanner(view: PaneView | undefined, linkKind: LinkState["kind"
     case "Closing":
       return { text: STRINGS.closingPane, tone: "info" };
     case "Idle":
-      return { text: STRINGS.retryHint, tone: "info" };
+      return { text: STRINGS.idlePane, tone: "info" };
     case "Live":
-      if (sizedBy !== null) return { text: STRINGS.sizedByViewer(sizedBy.cols, sizedBy.rows), tone: "warn" };
-      return null;
+      return sizedBy === null ? null : { text: STRINGS.sizedByViewer(sizedBy.cols, sizedBy.rows), tone: "warn" };
   }
 }
 
-/** Builds the panes chrome part (pane borders, titles, zoom/sizedBy/status banners, offline/empty-core states, divider hit targets). */
-function buildBordersPart(input: ChromeInput, colors: ThemeColors): Part {
+/** The text a key-table action is typed with, as the help shows it; null when nothing is bound to it. */
+function keyText(state: ModelState, action: string): string | null {
+  return helpRows(state.keymap).find((row) => row.action === action)?.keys[0] ?? null;
+}
+
+function bordersPart(input: ChromeInput, colors: Colors, look: string): Part {
   const { regions, spots, splits, state, world, panes, link, cwd } = input;
   const rect = regions.panes;
   const shown = focused(state.world, state.focus);
-  const focusedPaneId = shown.pane?.id ?? null;
-  const activeTabId = shown.tab?.id ?? null;
-  const tabShape = activeTabId ? world.tabs.get(activeTabId) ?? null : null;
-  const zoomedPaneId = tabShape?.zoomed ?? null;
-  const visibleSpots = spots.filter((s) => !s.covered);
-
-  const version = JSON.stringify({
-    rect,
-    focusedPaneId,
-    zoomedPaneId,
-    ownsLayout: world.ownsLayout,
-    link,
-    cwd,
-    spots: visibleSpots.map((s) => {
-      const pv = panes.get(s.pane);
-      const summary = world.panes.get(s.pane);
-      return {
-        pane: s.pane,
-        outer: s.cells.outer,
-        inner: s.cells.inner,
-        state: pv?.state ?? null,
-        sizedBy: pv?.sizedBy ?? null,
-        summary: summary ?? null,
-      };
-    }),
-    splits,
+  const zoomed = shown.tab ? world.tabs.get(shown.tab.id)?.zoomed ?? null : null;
+  const visible = spots.filter((spot) => !spot.covered);
+  const empty = visible.length === 0
+    ? link.online
+      ? { offline: null, offer: STRINGS.emptyCoreOffer(folderName(cwd), keyText(state, "new_workspace")), appOwned: !world.ownsLayout }
+      : { offline: STRINGS.offlineDetail(link.code), offer: null, appOwned: false }
+    : null;
+  const boxes = visible.map((spot) => {
+    const summary = world.panes.get(spot.pane);
+    const name = summary?.label || summary?.title || spot.pane;
+    const folder = summary?.folder && summary.folder !== name ? ` ${summary.folder}` : "";
+    const agent = summary?.agent ? ` [${summary.agent}]` : "";
+    const zoom = zoomed === spot.pane ? ` [${STRINGS.zoomMark}]` : "";
+    const status = stateLook(summary?.status);
+    const word = status.word ? ` ${status.glyph} ${status.word}` : "";
+    const { outer, inner } = spot.cells;
+    return {
+      outer,
+      bordered: outer.width !== inner.width && outer.height !== inner.height,
+      focused: spot.pane === shown.pane?.id && link.online,
+      title: ` ${name}${folder}${agent}${zoom}${word} `,
+      banner: paneBanner(panes.get(spot.pane), link),
+    };
   });
-
-  return {
-    key: "borders",
-    rect,
-    version,
-    draw(canvas) {
-      if (rect.width <= 0 || rect.height <= 0) return;
-
-      // Empty core / no panes in tab
-      if (visibleSpots.length === 0) {
-        const bgStyle = canvas.style({ fg: colors.text, bg: colors.bg });
-        canvas.fill(bgStyle);
-        const midY = rect.y + Math.floor(rect.height / 2);
-        if (link.kind !== "Online") {
-          const warnStyle = canvas.style({ fg: colors.notice, bg: colors.bgElevated, flags: STYLE_BOLD });
-          printClipped(canvas, rect.x + 2, Math.max(rect.y, midY - 1), STRINGS.offlineDetail(link.code), Math.max(0, rect.width - 4), warnStyle, true);
-          return;
-        }
-        const titleStyle = canvas.style({ fg: colors.textStrong, bg: colors.bg, flags: STYLE_BOLD });
-        const offerStyle = canvas.style({ fg: colors.accent, bg: colors.bg });
-        const newWsKey = keyForAction(state, "new_workspace", "prefix+Shift+N");
-        const folder = folderBase(cwd);
-        if (midY - 1 >= rect.y) {
-          printClipped(canvas, rect.x + 2, midY - 1, STRINGS.emptyCoreTitle, Math.max(0, rect.width - 4), titleStyle, true);
-        }
-        printClipped(canvas, rect.x + 2, midY, STRINGS.emptyCoreOffer(folder, newWsKey), Math.max(0, rect.width - 4), offerStyle, true);
-        if (!world.ownsLayout && midY + 1 < rect.y + rect.height) {
-          printClipped(canvas, rect.x + 2, midY + 1, STRINGS.appOwnedCore, Math.max(0, rect.width - 4), canvas.style({ fg: colors.notice, bg: colors.bg }), true);
-        }
-        canvas.hit(rect, "new_workspace");
+  const dividers = splits.filter((split) => split.divider.width > 0).map(({ id, divider }) => ({ id, divider }));
+  const data = { empty, offline: !link.online, boxes, dividers };
+  return part("borders", rect, look, data, (canvas, { empty: none, offline, boxes: drawn, dividers: seams }) => {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    if (none) {
+      canvas.fill(canvas.style({ fg: colors.text, bg: colors.bg }));
+      const middle = rect.y + Math.floor(rect.height / 2);
+      const room = Math.max(0, rect.width - 4);
+      if (none.offline !== null) {
+        printFit(canvas, rect.x + 2, Math.max(rect.y, middle - 1), none.offline, room, canvas.style({ fg: colors.notice, bg: colors.bgElevated, flags: STYLE_BOLD }), true);
         return;
       }
-
-      // Draw each visible pane's border, title, and status notice
-      for (const spot of visibleSpots) {
-        const { outer, inner } = spot.cells;
-        const isFocused = spot.pane === focusedPaneId && link.kind === "Online";
-        const summary = world.panes.get(spot.pane);
-        const pv = panes.get(spot.pane);
-        const banner = paneStatusBanner(pv, link.kind, link.code);
-
-        if (outer.width !== inner.width && outer.height !== inner.height) {
-          const borderColor = link.kind !== "Online"
-            ? colors.notice
-            : isFocused
-              ? colors.accent
-              : colors.borderStrong;
-          const borderStyle = canvas.style({ fg: borderColor, bg: colors.bg, flags: isFocused ? STYLE_BOLD : 0 });
-          const right = outer.x + outer.width - 1;
-          const bottom = outer.y + outer.height - 1;
-
-          for (let col = outer.x; col <= right; col++) {
-            canvas.put(col, outer.y, col === outer.x || col === right ? "+" : "-", 1, borderStyle);
-            canvas.put(col, bottom, col === outer.x || col === right ? "+" : "-", 1, borderStyle);
-          }
-          for (let row = outer.y + 1; row < bottom; row++) {
-            canvas.put(outer.x, row, "|", 1, borderStyle);
-            canvas.put(right, row, "|", 1, borderStyle);
-          }
-
-          // Top border title: name, folder, agent, zoom mark, and state glyph/word
-          const titleRoom = Math.max(0, outer.width - 4);
-          if (titleRoom > 0) {
-            const namePart = summary?.label || summary?.title || spot.pane;
-            const folderPart = summary?.folder && summary.folder !== namePart ? ` ${summary.folder}` : "";
-            const agentPart = summary?.agent ? ` [${summary.agent}]` : "";
-            const zoomPart = zoomedPaneId === spot.pane ? ` [${STRINGS.zoomMark}]` : "";
-            const statusVis = summary?.status ? stateVisual(summary.status, colors) : null;
-            const statePart = statusVis && statusVis.word ? ` ${statusVis.glyph} ${statusVis.word}` : "";
-            const fullTitle = ` ${namePart}${folderPart}${agentPart}${zoomPart}${statePart} `;
-            const titleStyle = canvas.style({
-              fg: isFocused ? colors.textStrong : colors.text,
-              bg: colors.bg,
-              flags: isFocused ? STYLE_BOLD : 0,
-            });
-            printClipped(canvas, outer.x + 2, outer.y, fullTitle, titleRoom, titleStyle, true);
-          }
-
-          // Bottom border status banner (sized by another viewer, ended, waiting, offline, failed)
-          if (banner && titleRoom > 0) {
-            const bannerFg = banner.tone === "error" ? colors.dangerText : banner.tone === "warn" ? colors.notice : colors.textDim;
-            const bannerStyle = canvas.style({ fg: bannerFg, bg: colors.bgElevated, flags: STYLE_BOLD });
-            printClipped(canvas, outer.x + 2, bottom, ` ${banner.text} `, titleRoom, bannerStyle, true);
-            if (pv?.state.kind === "Waiting" || pv?.state.kind === "Failed") {
-              canvas.hit({ x: outer.x + 1, y: bottom, width: outer.width - 2, height: 1 }, `retry:${spot.pane}`);
-            }
-          }
-        }
+      if (middle - 1 >= rect.y) printFit(canvas, rect.x + 2, middle - 1, STRINGS.emptyCoreTitle, room, canvas.style({ fg: colors.textStrong, bg: colors.bg, flags: STYLE_BOLD }), true);
+      printFit(canvas, rect.x + 2, middle, none.offer ?? "", room, canvas.style({ fg: colors.accent, bg: colors.bg }), true);
+      if (none.appOwned && middle + 1 < rect.y + rect.height) printFit(canvas, rect.x + 2, middle + 1, STRINGS.appOwnedCore, room, canvas.style({ fg: colors.notice, bg: colors.bg }), true);
+      canvas.hit(rect, "new_workspace");
+      return;
+    }
+    for (const pane of drawn) {
+      if (!pane.bordered) continue;
+      const { outer } = pane;
+      box(canvas, outer, canvas.style({ fg: offline ? colors.notice : pane.focused ? colors.accent : colors.borderStrong, bg: colors.bg, flags: pane.focused ? STYLE_BOLD : 0 }));
+      const room = Math.max(0, outer.width - 4);
+      printFit(canvas, outer.x + 2, outer.y, pane.title, room, canvas.style({ fg: pane.focused ? colors.textStrong : colors.text, bg: colors.bg, flags: pane.focused ? STYLE_BOLD : 0 }), true);
+      if (pane.banner && room > 0) {
+        const fg = pane.banner.tone === "error" ? colors.dangerText : pane.banner.tone === "warn" ? colors.notice : colors.textDim;
+        printFit(canvas, outer.x + 2, outer.y + outer.height - 1, ` ${pane.banner.text} `, room, canvas.style({ fg, bg: colors.bgElevated, flags: STYLE_BOLD }), true);
       }
-
-      // Register divider hit targets for each split in the tab's tree (for mouse divider drag)
-      for (const split of splits) {
-        if (split.rect.width <= 0 || split.rect.height <= 0) continue;
-        // Find panes on the first side vs second side of this split rectangle to locate the divider line
-        const inside = visibleSpots.filter((s) =>
-          s.cells.outer.x >= split.rect.x &&
-          s.cells.outer.y >= split.rect.y &&
-          s.cells.outer.x + s.cells.outer.width <= split.rect.x + split.rect.width &&
-          s.cells.outer.y + s.cells.outer.height <= split.rect.y + split.rect.height,
-        );
-        if (split.direction === "right") {
-          const seamX = inside.reduce((best, s) => {
-            const right = s.cells.outer.x + s.cells.outer.width;
-            return right < split.rect.x + split.rect.width ? Math.max(best, right - 1) : best;
-          }, split.rect.x + Math.floor(split.rect.width / 2));
-          canvas.hit({ x: seamX, y: split.rect.y, width: Math.min(2, split.rect.x + split.rect.width - seamX), height: split.rect.height }, split.id);
-        } else {
-          const seamY = inside.reduce((best, s) => {
-            const bottom = s.cells.outer.y + s.cells.outer.height;
-            return bottom < split.rect.y + split.rect.height ? Math.max(best, bottom - 1) : best;
-          }, split.rect.y + Math.floor(split.rect.height / 2));
-          canvas.hit({ x: split.rect.x, y: seamY, width: split.rect.width, height: Math.min(2, split.rect.y + split.rect.height - seamY) }, split.id);
-        }
-      }
-    },
-  };
+    }
+    for (const { id, divider } of seams) canvas.hit(divider, id);
+  });
 }
 
-const ACTION_LABELS: Readonly<Record<string, string>> = {
-  prefix: "prefix",
-  help: "help",
-  new_workspace: "new space",
-  rename_workspace: "rename space",
-  close_workspace: "close space",
-  workspace_picker: "navigate",
-  goto: "go to",
-  detach: "detach",
-  reload_config: "reload",
-  open_notification_target: "jump alert",
-  previous_workspace: "prev space",
-  next_workspace: "next space",
-  previous_agent: "prev agent",
-  next_agent: "next agent",
-  focus_agent: "agent",
-  new_tab: "new tab",
-  rename_tab: "rename tab",
-  previous_tab: "prev tab",
-  next_tab: "next tab",
-  move_tab_previous: "move tab <",
-  move_tab_next: "move tab >",
-  switch_tab: "tab",
-  switch_workspace: "space",
-  close_tab: "close tab",
-  rename_pane: "rename pane",
-  copy_mode: "copy",
-  focus_pane_left: "left",
-  focus_pane_down: "down",
-  focus_pane_up: "up",
-  focus_pane_right: "right",
-  swap_pane_left: "swap <",
-  swap_pane_down: "swap v",
-  swap_pane_up: "swap ^",
-  swap_pane_right: "swap >",
-  last_pane: "last pane",
-  cycle_pane_next: "next pane",
-  cycle_pane_previous: "prev pane",
-  split_vertical: "split |",
-  split_horizontal: "split -",
-  close_pane: "close pane",
-  zoom: "zoom",
-  resize_mode: "resize",
-  resize_pane_left: "grow <",
-  resize_pane_down: "grow v",
-  resize_pane_up: "grow ^",
-  resize_pane_right: "grow >",
-  toggle_sidebar: "sidebar",
-  lock: "lock",
-  navigate_workspace_up: "space ^",
-  navigate_workspace_down: "space v",
-  navigate_pane_left: "pane <",
-  navigate_pane_down: "pane v",
-  navigate_pane_up: "pane ^",
-  navigate_pane_right: "pane >",
-  navigate_focus: "select",
-  navigate_cancel: "cancel",
-  navigate_index: "space 1..9",
-  navigate_cycle_next: "next pane",
-  navigate_cycle_previous: "prev pane",
-  resize_leave: "done",
-  copy_leave: "done",
-};
-
-function formatKeymapNote(note: KeymapNote): string {
+function noteText(note: KeymapNote): string {
   switch (note.code) {
     case "prefix_fallback":
       return STRINGS.notePrefixFallback(note.binding, note.fallback);
     case "prefix_unreachable":
-      return STRINGS.notePrefixUnreachable(note.binding, note.skipped.map((s) => `${s.key}->${s.holder}`).join(", "));
+      return STRINGS.notePrefixUnreachable(note.binding, note.skipped);
     case "detach_fallback":
       return STRINGS.noteDetachFallback(note.fallback);
     case "detach_unreachable":
-      return STRINGS.noteDetachUnreachable(note.skipped.map((s) => `${s.key}->${s.holder}`).join(", "));
+      return STRINGS.noteDetachUnreachable(note.skipped);
     case "lock_taken":
       return STRINGS.noteLockTaken(note.holder);
     case "taken":
@@ -711,433 +455,217 @@ function formatKeymapNote(note: KeymapNote): string {
   }
 }
 
-/** Builds the bottom mode bar and hint line from `modeBar(state)`, plus offline / unreachable / error indicators. */
-function buildModeBarPart(input: ChromeInput, colors: ThemeColors): Part {
+const MODE_LABELS = {
+  prefix: STRINGS.modePrefix,
+  locked: STRINGS.modeLocked,
+  navigate: STRINGS.modeNavigate,
+  resize: STRINGS.modeResize,
+  copy: STRINGS.modeCopy,
+  terminal: STRINGS.modeTerminal,
+} as const;
+
+function modeBarPart(input: ChromeInput, colors: Colors, look: string): Part {
   const { regions, state, link } = input;
   const rect = regions.modeBar;
   const bar = modeBar(state);
-  const unreachable = state.keymap.notes.filter((n) => n.code === "prefix_unreachable" || n.code === "detach_unreachable");
-  const latestNotice: Notice | undefined = state.notices.at(-1);
-
-  const version = JSON.stringify({
-    rect,
-    bar,
-    link,
-    unreachable,
-    latestNotice: latestNotice ? { id: latestNotice.id, code: latestNotice.code, data: latestNotice.data } : null,
-  });
-
-  return {
-    key: "mode",
-    rect,
-    version,
-    draw(canvas) {
-      if (rect.width <= 0 || rect.height <= 0) return;
-      const bgStyle = canvas.style({ fg: colors.text, bg: colors.bgPanel });
-      canvas.fill(bgStyle);
-
-      const row = rect.y;
-      let col = rect.x;
-      const right = rect.x + rect.width;
-
-      // Mode badge
-      const modeLabel =
-        bar.mode === "prefix" ? STRINGS.modePrefix
-          : bar.mode === "locked" ? STRINGS.modeLocked
-            : bar.mode === "navigate" ? STRINGS.modeNavigate
-              : bar.mode === "resize" ? STRINGS.modeResize
-                : bar.mode === "copy" ? STRINGS.modeCopy
-                  : STRINGS.modeTerminal;
-      const badgeBg =
-        bar.mode === "prefix" ? colors.accent
-          : bar.mode === "locked" ? colors.statusBlocked
-            : bar.mode !== "terminal" ? colors.statusWorking
-              : colors.bgElevated;
-      const badgeFg = bar.mode === "terminal" ? colors.textStrong : colors.primaryText;
-      const badgeStyle = canvas.style({ fg: badgeFg, bg: badgeBg, flags: STYLE_BOLD });
-      col = printClipped(canvas, col, row, ` ${modeLabel} `, Math.max(0, right - col), badgeStyle);
-
-      // Offline state on mode bar if link is not Online
-      if (link.kind !== "Online" && col < right) {
-        const offStyle = canvas.style({ fg: colors.notice, bg: colors.bgPanel, flags: STYLE_BOLD });
-        col = printClipped(canvas, col, row, ` ${STRINGS.offlineDetail(link.code)} `, Math.max(0, right - col), offStyle, true);
-      }
-
-      // Unreachable prefix or detach warning on mode bar
-      for (const note of unreachable) {
-        if (col >= right) break;
-        const warnStyle = canvas.style({ fg: colors.dangerText, bg: colors.bgPanel, flags: STYLE_BOLD });
-        col = printClipped(canvas, col, row, ` [${note.code}] `, Math.max(0, right - col), warnStyle, true);
-      }
-
-      // Hints from modeBar(state)
-      const keyStyle = canvas.style({ fg: colors.accent, bg: colors.bgPanel, flags: STYLE_BOLD });
-      const labelStyle = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
-      for (const hint of bar.hints) {
-        if (col >= right) break;
-        const keyText = hint.keys.join("/");
-        const actionName = ACTION_LABELS[hint.action] ?? hint.action.replaceAll("_", " ");
-        const pieceWidth = measure(` ${keyText} ${actionName}`).width;
-        if (col + pieceWidth > right && col > rect.x + measure(` ${modeLabel} `).width) {
-          // If it doesn't fit completely, print clipped and stop
-          col = printClipped(canvas, col, row, ` ${keyText}`, Math.max(0, right - col), keyStyle);
-          col = printClipped(canvas, col, row, ` ${actionName}`, Math.max(0, right - col), labelStyle, true);
-          break;
-        }
-        col = printClipped(canvas, col, row, ` ${keyText}`, Math.max(0, right - col), keyStyle);
-        col = printClipped(canvas, col, row, ` ${actionName}`, Math.max(0, right - col), labelStyle);
-      }
-
-      // Active notice / error badge on the right side of the mode bar when Online (when Offline, the toast shows notices while the mode bar keeps the offline command visible)
-      if (latestNotice && link.kind === "Online") {
-        const msg = ` ${STRINGS.errorBadge}: ${STRINGS.noticeText(latestNotice.code, latestNotice.data)} `;
-        const msgW = Math.min(measure(msg).width, Math.max(0, Math.floor(rect.width * 0.65)));
-        if (msgW > 0) {
-          const startX = Math.max(rect.x, right - msgW);
-          const errStyle = canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD });
-          fillSpan(canvas, startX, row, right - startX, errStyle);
-          printClipped(canvas, startX, row, msg, right - startX, errStyle, true);
-        }
-      }
-    },
+  const latest = state.notices.at(-1);
+  const data = {
+    mode: bar.mode,
+    offline: link.online ? null : STRINGS.offlineDetail(link.code),
+    unreachable: state.keymap.notes.filter((note) => note.code === "prefix_unreachable" || note.code === "detach_unreachable").map((note) => note.code),
+    hints: bar.hints.map((hint) => ({ keys: hint.keys.join("/"), label: actionLabel(hint.action) })),
+    notice: latest && link.online ? ` ${STRINGS.errorBadge}: ${STRINGS.noticeText(latest.code, latest.data)} ` : null,
   };
-}
-
-function drawOverlayFrame(canvas: Canvas, rect: Rect, title: string, closeKeys: readonly string[], colors: ThemeColors): { inner: Rect } {
-  const bgStyle = canvas.style({ fg: colors.text, bg: colors.bgElevated });
-  const borderStyle = canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD });
-  const titleStyle = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD });
-  const closeStyle = canvas.style({ fg: colors.accent, bg: colors.bgElevated });
-
-  fillBox(canvas, rect, bgStyle);
-  if (rect.width < 2 || rect.height < 2) return { inner: rect };
-
-  const right = rect.x + rect.width - 1;
-  const bottom = rect.y + rect.height - 1;
-  for (let col = rect.x; col <= right; col++) {
-    canvas.put(col, rect.y, col === rect.x || col === right ? "+" : "-", 1, borderStyle);
-    canvas.put(col, bottom, col === rect.x || col === right ? "+" : "-", 1, borderStyle);
-  }
-  for (let row = rect.y + 1; row < bottom; row++) {
-    canvas.put(rect.x, row, "|", 1, borderStyle);
-    canvas.put(right, row, "|", 1, borderStyle);
-  }
-
-  const closeLabel = ` [${STRINGS.helpCloseLabel(closeKeys)}] `;
-  const closeW = measure(closeLabel).width;
-  const headerRoom = Math.max(0, rect.width - 2);
-  if (headerRoom > 0) {
-    const titleRoom = Math.max(0, headerRoom - closeW);
-    if (titleRoom > 0) {
-      printClipped(canvas, rect.x + 1, rect.y, ` ${title} `, titleRoom, titleStyle, true);
+  return part("mode", rect, look, data, (canvas, { mode, offline, unreachable, hints, notice }) => {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    canvas.fill(canvas.style({ fg: colors.text, bg: colors.bgPanel }));
+    const row = rect.y;
+    const right = rect.x + rect.width;
+    const badge = ` ${MODE_LABELS[mode]} `;
+    const terminal = mode === "terminal";
+    const badgeBg = mode === "prefix" ? colors.accent : mode === "locked" ? colors.statusBlocked : terminal ? colors.bgElevated : colors.statusWorking;
+    let col = printFit(canvas, rect.x, row, badge, rect.width, canvas.style({ fg: terminal ? colors.textStrong : colors.primaryText, bg: badgeBg, flags: STYLE_BOLD }));
+    if (offline !== null) col = printFit(canvas, col, row, ` ${offline} `, right - col, canvas.style({ fg: colors.notice, bg: colors.bgPanel, flags: STYLE_BOLD }), true);
+    for (const code of unreachable) col = printFit(canvas, col, row, ` [${code}] `, right - col, canvas.style({ fg: colors.dangerText, bg: colors.bgPanel, flags: STYLE_BOLD }), true);
+    const keyStyle = canvas.style({ fg: colors.accent, bg: colors.bgPanel, flags: STYLE_BOLD });
+    const labelStyle = canvas.style({ fg: colors.textDim, bg: colors.bgPanel });
+    const badgeEnd = rect.x + measure(badge).width;
+    for (const hint of hints) {
+      if (col >= right) break;
+      const last = col + measure(` ${hint.keys} ${hint.label}`).width > right && col > badgeEnd;
+      col = printFit(canvas, col, row, ` ${hint.keys}`, right - col, keyStyle);
+      col = printFit(canvas, col, row, ` ${hint.label}`, right - col, labelStyle, last);
+      if (last) break;
     }
-    const closeX = Math.max(rect.x + 1, right - closeW);
-    printClipped(canvas, closeX, rect.y, closeLabel, Math.min(closeW, right - closeX), closeStyle);
-    canvas.hit({ x: closeX, y: rect.y, width: Math.min(closeW, right - closeX), height: 1 }, "close");
-  }
+    if (notice !== null) {
+      const width = Math.min(measure(notice).width, Math.floor(rect.width * 0.65));
+      if (width > 0) {
+        const style = canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD });
+        fillSpan(canvas, right - width, row, width, style);
+        printFit(canvas, right - width, row, notice, width, style, true);
+      }
+    }
+  });
+}
 
+/** A dialog of `width` x `height` in the middle of the screen, never larger than it. */
+function centred(screenWidth: number, screenHeight: number, width: number, height: number): Rect {
+  const w = Math.max(1, Math.min(screenWidth, width));
+  const h = Math.max(1, Math.min(screenHeight, height));
+  return { x: Math.floor((screenWidth - w) / 2), y: Math.floor((screenHeight - h) / 2), width: w, height: h };
+}
+
+/** An overlay's frame: its box, its title, and its close keys at the top right; answers the cells inside. */
+function overlayFrame(canvas: Canvas, rect: Rect, title: string, closeKeys: readonly string[], colors: Colors): Rect {
+  canvas.fill(canvas.style({ fg: colors.text, bg: colors.bgElevated }));
+  if (rect.width < 2 || rect.height < 2) return rect;
+  box(canvas, rect, canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD }));
+  const close = ` [${STRINGS.helpCloseLabel(closeKeys)}] `;
+  const closeWidth = measure(close).width;
+  const right = rect.x + rect.width - 1;
+  printFit(canvas, rect.x + 1, rect.y, ` ${title} `, Math.max(0, rect.width - 2 - closeWidth), canvas.style({ fg: colors.textStrong, bg: colors.bgElevated, flags: STYLE_BOLD }), true);
+  const at = Math.max(rect.x + 1, right - closeWidth);
+  printFit(canvas, at, rect.y, close, right - at, canvas.style({ fg: colors.accent, bg: colors.bgElevated }));
+  canvas.hit({ x: at, y: rect.y, width: right - at, height: 1 }, "close");
+  return { x: rect.x + 1, y: rect.y + 1, width: Math.max(0, rect.width - 2), height: Math.max(0, rect.height - 2) };
+}
+
+/** The part of a text field shown in `width` columns, scrolled so the cursor stays in view, and the cursor's column in it. */
+function fieldView(field: Field, width: number): { text: string; cursor: number } {
+  const before = measure(field.graphemes.slice(0, field.cursor).join("")).width;
+  let skip = 0;
+  let skipped = 0;
+  while (skip < field.graphemes.length && before - skipped > width - 1) skipped += measure(field.graphemes[skip++]!).width;
+  return { text: field.graphemes.slice(skip).join(""), cursor: before - skipped };
+}
+
+/** A dialog with one text field on its first row inside and a hint under it; the field's cell takes typing. */
+function fieldOverlay(key: string, rect: Rect, title: string, hint: string, field: Field, closeKeys: readonly string[], colors: Colors): { overlay: Part; input: Scene["input"] } {
+  const width = Math.max(1, rect.width - 4);
+  const view = fieldView(field, width);
+  const overlay: Part = {
+    key, rect, version: 0,
+    draw(canvas) {
+      const inner = overlayFrame(canvas, rect, title, closeKeys, colors);
+      if (inner.width <= 0 || inner.height <= 0) return;
+      const style = canvas.style({ fg: colors.textStrong, bg: colors.bgInput, flags: field.fresh ? STYLE_INVERSE : 0 });
+      fillSpan(canvas, inner.x + 1, inner.y, width, style);
+      printFit(canvas, inner.x + 1, inner.y, view.text, width, style);
+      if (inner.height >= 2) printFit(canvas, inner.x + 1, inner.y + 1, hint, Math.max(0, inner.width - 2), canvas.style({ fg: colors.textDim, bg: colors.bgElevated }), true);
+    },
+  };
+  return { overlay, input: { col: rect.x + 2 + view.cursor, row: rect.y + 1 } };
+}
+
+function toastPart(width: number, height: number, state: ModelState, colors: Colors): Part | null {
+  if (state.notices.length === 0 || width < 16 || height < 3) return null;
+  const lines = state.notices.slice(-3).map((notice) => `${STRINGS.glyphBlocked} ${STRINGS.noticeText(notice.code, notice.data)}`);
+  const toastWidth = Math.min(width, Math.max(20, Math.max(...lines.map((line) => measure(line).width)) + 4));
+  const toastHeight = Math.min(height, lines.length + 2);
+  const rect: Rect = { x: width - toastWidth, y: Math.min(1, height - toastHeight), width: toastWidth, height: toastHeight };
   return {
-    inner: {
-      x: rect.x + 1,
-      y: rect.y + 1,
-      width: Math.max(0, rect.width - 2),
-      height: Math.max(0, rect.height - 2),
+    key: "toast", rect, version: 0,
+    draw(canvas) {
+      const text = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated });
+      canvas.fill(text);
+      box(canvas, rect, canvas.style({ fg: colors.notice, bg: colors.bgElevated, flags: STYLE_BOLD }));
+      lines.forEach((line, at) => {
+        if (rect.y + 1 + at < rect.y + rect.height - 1) printFit(canvas, rect.x + 2, rect.y + 1 + at, line, Math.max(0, rect.width - 4), text, true);
+      });
     },
   };
 }
 
-function drawFieldLine(
-  canvas: Canvas,
-  col: number,
-  row: number,
-  width: number,
-  field: Field,
-  colors: ThemeColors,
-): { col: number; row: number } {
-  const fieldStyle = canvas.style({ fg: colors.textStrong, bg: colors.bgInput, flags: field.fresh ? STYLE_INVERSE : 0 });
-  fillSpan(canvas, col, row, width, fieldStyle);
-  const before = field.graphemes.slice(0, field.cursor).join("");
-  const after = field.graphemes.slice(field.cursor).join("");
-  const text = before + after;
-  const beforeW = measure(before).width;
-  const maxCursorOffset = Math.max(0, width - 1);
-  const scrollCols = beforeW > maxCursorOffset ? beforeW - maxCursorOffset : 0;
-  // Slice graphemes from start until width fits
-  let skipped = 0;
-  let startIdx = 0;
-  while (startIdx < field.graphemes.length && skipped < scrollCols) {
-    skipped += measure(field.graphemes[startIdx]!).width;
-    startIdx++;
-  }
-  const visibleText = startIdx === 0 ? text : field.graphemes.slice(startIdx).join("");
-  printClipped(canvas, col, row, visibleText, width, fieldStyle);
-  const cursorCol = col + Math.max(0, Math.min(maxCursorOffset, beforeW - skipped));
-  return { col: cursorCol, row };
+function helpPart(width: number, height: number, state: ModelState, world: CoreView, colors: Colors): Part {
+  const rect = centred(width, height, Math.max(44, width - 8), Math.max(12, height - 4));
+  const refusals = shownRefusals(state.keymap);
+  const notes = state.keymap.notes.map((note) => ({ text: noteText(note), unreachable: note.code === "prefix_unreachable" || note.code === "detach_unreachable" }));
+  const rows = helpRows(state.keymap).map((row) => ({
+    keys: row.keys.length > 0 ? row.keys.join(", ") : null,
+    text: `${actionLabel(row.action)}${row.status === "parity" ? ` (${STRINGS.helpParityPrefix})` : row.mode !== "terminal" ? ` [${row.mode}]` : ""}`,
+    parity: row.status === "parity",
+  }));
+  return {
+    key: "overlay:help", rect, version: 0,
+    draw(canvas) {
+      const inner = overlayFrame(canvas, rect, STRINGS.helpTitle, OVERLAYS.help.closeKeys, colors);
+      if (inner.width <= 0 || inner.height <= 0) return;
+      const bottom = inner.y + inner.height;
+      const room = Math.max(0, inner.width - 2);
+      const warn = canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD });
+      const note = canvas.style({ fg: colors.notice, bg: colors.bgElevated });
+      const dim = canvas.style({ fg: colors.textDim, bg: colors.bgElevated });
+      let r = inner.y;
+      if (!world.ownsLayout && r < bottom) printFit(canvas, inner.x + 1, r++, STRINGS.appOwnedCore, room, note, true);
+      for (const line of notes) if (r < bottom) printFit(canvas, inner.x + 1, r++, line.text, room, line.unreachable ? warn : note, true);
+      if (refusals.shown.length > 0 && r < bottom) {
+        printFit(canvas, inner.x + 1, r++, STRINGS.helpRefusalsTitle, room, warn, true);
+        for (const refusal of refusals.shown) if (r < bottom) printFit(canvas, inner.x + 1, r++, STRINGS.refusalLine(refusal.code, refusal.action, refusal.binding, refusal.holder), room, note, true);
+        if (refusals.more > 0 && r < bottom) printFit(canvas, inner.x + 1, r++, STRINGS.helpMoreRefusals(refusals.more), room, dim, true);
+      }
+      const space = bottom - r;
+      if (space <= 0) return;
+      const two = inner.width >= 76 && rows.length > space;
+      const columnWidth = two ? Math.floor((inner.width - 3) / 2) : Math.max(1, inner.width - 2);
+      const keyWidth = Math.min(18, Math.max(8, Math.floor(columnWidth * 0.42)));
+      const keyStyle = canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD });
+      const textStyle = canvas.style({ fg: colors.text, bg: colors.bgElevated });
+      rows.forEach((row, at) => {
+        const column = two ? Math.floor(at / space) : 0;
+        const y = r + (two ? at % space : at);
+        if (column > 1 || y >= bottom) return;
+        const x = inner.x + 1 + column * (columnWidth + 1);
+        printFit(canvas, x, y, row.keys ?? STRINGS.helpUnset, keyWidth, row.keys === null ? dim : keyStyle, true);
+        printFit(canvas, x + keyWidth + 1, y, row.text, Math.max(0, x + columnWidth - (x + keyWidth + 1)), row.parity ? dim : textStyle, true);
+      });
+    },
+  };
 }
 
-/** Builds the overlays (modal overlay on top of the stack + corner notice toast when notices exist). */
-export function buildOverlays(
-  width: number,
-  height: number,
-  state: ModelState,
-  world: CoreView,
-  theme: TuiThemeMode = "dark",
-  depth: ColorDepth = "truecolor",
-): { overlays: Part[]; input: Scene["input"] } {
-  const colors = themeColors(theme, depth);
-  const overlays: Part[] = [];
-  let input: Scene["input"] = null;
-
-  // Toast overlay in top-right corner for active notices
-  if (state.notices.length > 0 && width >= 16 && height >= 3) {
-    const shownNotices = state.notices.slice(-3);
-    const lines = shownNotices.map((n) => `${STRINGS.glyphBlocked} ${STRINGS.noticeText(n.code, n.data)}`);
-    const maxLineW = Math.max(...lines.map((l) => measure(l).width));
-    const toastW = Math.min(width, Math.max(20, maxLineW + 4));
-    const toastH = Math.min(height, lines.length + 2);
-    const toastRect: Rect = { x: Math.max(0, width - toastW), y: Math.min(1, height - toastH), width: toastW, height: toastH };
-    overlays.push({
-      key: "toast",
-      rect: toastRect,
-      version: JSON.stringify(shownNotices),
-      draw(canvas) {
-        const bgStyle = canvas.style({ fg: colors.textStrong, bg: colors.bgElevated });
-        const borderStyle = canvas.style({ fg: colors.notice, bg: colors.bgElevated, flags: STYLE_BOLD });
-        fillBox(canvas, toastRect, bgStyle);
-        const right = toastRect.x + toastRect.width - 1;
-        const bottom = toastRect.y + toastRect.height - 1;
-        for (let c = toastRect.x; c <= right; c++) {
-          canvas.put(c, toastRect.y, c === toastRect.x || c === right ? "+" : "-", 1, borderStyle);
-          canvas.put(c, bottom, c === toastRect.x || c === right ? "+" : "-", 1, borderStyle);
-        }
-        for (let r = toastRect.y + 1; r < bottom; r++) {
-          canvas.put(toastRect.x, r, "|", 1, borderStyle);
-          canvas.put(right, r, "|", 1, borderStyle);
-        }
-        lines.forEach((line, idx) => {
-          const r = toastRect.y + 1 + idx;
-          if (r < bottom) {
-            printClipped(canvas, toastRect.x + 2, r, line, Math.max(0, toastRect.width - 4), bgStyle, true);
-          }
-        });
-      },
-    });
-  }
-
+/** The overlays of one frame: the notice toast in the top right corner, and the overlay on top of the stack. */
+function buildOverlays(width: number, height: number, state: ModelState, world: CoreView, colors: Colors): { overlays: Part[]; input: Scene["input"] } {
+  const toast = toastPart(width, height, state, colors);
+  const overlays: Part[] = toast ? [toast] : [];
   const top: Overlay | undefined = state.overlays.at(-1);
-  if (!top) return { overlays, input };
-
+  if (!top) return { overlays, input: null };
   const closeKeys = OVERLAYS[top.kind].closeKeys;
-  if (top.kind === "help") {
-    input = "overlay";
-    const boxW = Math.max(1, Math.min(width, Math.max(44, width - 8)));
-    const boxH = Math.max(1, Math.min(height, Math.max(12, height - 4)));
-    const rect: Rect = {
-      x: Math.floor((width - boxW) / 2),
-      y: Math.floor((height - boxH) / 2),
-      width: boxW,
-      height: boxH,
-    };
-    const rows = helpRows(state.keymap);
-    const refusals = shownRefusals(state.keymap);
-    const notes = state.keymap.notes;
-
-    overlays.push({
-      key: "overlay:help",
-      rect,
-      version: JSON.stringify({ rect, rows, refusals, notes, ownsLayout: world.ownsLayout }),
-      draw(canvas) {
-        const { inner } = drawOverlayFrame(canvas, rect, STRINGS.helpTitle, closeKeys, colors);
-        if (inner.width <= 0 || inner.height <= 0) return;
-
-        let r = inner.y;
-        const bottom = inner.y + inner.height;
-        const keyStyle = canvas.style({ fg: colors.accent, bg: colors.bgElevated, flags: STYLE_BOLD });
-        const textStyle = canvas.style({ fg: colors.text, bg: colors.bgElevated });
-        const dimStyle = canvas.style({ fg: colors.textDim, bg: colors.bgElevated });
-        const warnStyle = canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD });
-        const noteStyle = canvas.style({ fg: colors.notice, bg: colors.bgElevated });
-
-        if (!world.ownsLayout && r < bottom) {
-          printClipped(canvas, inner.x + 1, r++, STRINGS.appOwnedCore, Math.max(0, inner.width - 2), noteStyle, true);
-        }
-
-        // Draw keymap notes first (unreachable notes and fallbacks clearly visible at the top)
-        for (const note of notes) {
-          if (r >= bottom) break;
-          const isUnreachable = note.code === "prefix_unreachable" || note.code === "detach_unreachable";
-          printClipped(
-            canvas,
-            inner.x + 1,
-            r++,
-            formatKeymapNote(note),
-            Math.max(0, inner.width - 2),
-            isUnreachable ? warnStyle : noteStyle,
-            true,
-          );
-        }
-
-        // Draw config refusals if any
-        if (refusals.shown.length > 0 && r < bottom) {
-          printClipped(canvas, inner.x + 1, r++, STRINGS.helpRefusalsTitle, Math.max(0, inner.width - 2), warnStyle, true);
-          for (const ref of refusals.shown) {
-            if (r >= bottom) break;
-            const holderPart = ref.holder ? ` (held by ${ref.holder})` : "";
-            printClipped(
-              canvas,
-              inner.x + 1,
-              r++,
-              `${ref.code}: ${ref.action} = ${ref.binding}${holderPart}`,
-              Math.max(0, inner.width - 2),
-              noteStyle,
-              true,
-            );
-          }
-          if (refusals.more > 0 && r < bottom) {
-            printClipped(canvas, inner.x + 1, r++, STRINGS.helpMoreRefusals(refusals.more), Math.max(0, inner.width - 2), dimStyle, true);
-          }
-        }
-
-        // Draw keymap help rows (in two columns when wide enough, else one column)
-        const availRows = Math.max(0, bottom - r);
-        if (availRows <= 0) return;
-        const twoCols = inner.width >= 76 && rows.length > availRows;
-        const colW = twoCols ? Math.floor((inner.width - 3) / 2) : Math.max(1, inner.width - 2);
-        const keyColW = Math.min(18, Math.max(8, Math.floor(colW * 0.42)));
-
-        rows.forEach((helpRow, idx) => {
-          const colIdx = twoCols ? Math.floor(idx / availRows) : 0;
-          const rowIdx = twoCols ? idx % availRows : idx;
-          if (colIdx > (twoCols ? 1 : 0) || r + rowIdx >= bottom) return;
-          const x = inner.x + 1 + colIdx * (colW + 1);
-          const y = r + rowIdx;
-          const keysText = helpRow.keys.length > 0 ? helpRow.keys.join(", ") : STRINGS.helpUnset;
-          const kStyle = helpRow.keys.length > 0 ? keyStyle : dimStyle;
-          printClipped(canvas, x, y, keysText, keyColW, kStyle, true);
-          const descX = x + keyColW + 1;
-          const descRoom = Math.max(0, x + colW - descX);
-          const label = ACTION_LABELS[helpRow.action] ?? helpRow.action.replaceAll("_", " ");
-          const parityNote = helpRow.status === "parity" ? ` (${STRINGS.helpParityPrefix})` : helpRow.mode !== "terminal" ? ` [${helpRow.mode}]` : "";
-          printClipped(canvas, descX, y, `${label}${parityNote}`, descRoom, helpRow.status === "parity" ? dimStyle : textStyle, true);
-        });
-      },
-    });
-    return { overlays, input };
-  }
-
-  if (top.kind === "text") {
-    const boxW = Math.max(1, Math.min(width, 52));
-    const boxH = Math.max(1, Math.min(height, 5));
-    const rect: Rect = {
-      x: Math.floor((width - boxW) / 2),
-      y: Math.floor((height - boxH) / 2),
-      width: boxW,
-      height: boxH,
-    };
-    const title =
-      top.purpose === "rename_workspace" ? STRINGS.textRenameWorkspace
+  switch (top.kind) {
+    case "help":
+      return { overlays: [...overlays, helpPart(width, height, state, world, colors)], input: "overlay" };
+    case "text": {
+      const title = top.purpose === "rename_workspace" ? STRINGS.textRenameWorkspace
         : top.purpose === "rename_tab" ? STRINGS.textRenameTab
           : top.purpose === "rename_pane" ? STRINGS.textRenamePane
             : STRINGS.textNewTab;
-    const fieldY = rect.y + Math.min(1, Math.max(0, rect.height - 1));
-    const fieldX = rect.x + Math.min(2, Math.max(0, rect.width - 1));
-    const fieldW = Math.max(1, rect.width - 4);
-    const beforeW = measure(top.field.graphemes.slice(0, top.field.cursor).join("")).width;
-    input = { col: fieldX + Math.min(Math.max(0, fieldW - 1), beforeW), row: fieldY };
-
-    overlays.push({
-      key: "overlay:text",
-      rect,
-      version: JSON.stringify({ rect, top }),
-      draw(canvas) {
-        const { inner } = drawOverlayFrame(canvas, rect, title, closeKeys, colors);
-        if (inner.width <= 0 || inner.height <= 0) return;
-        drawFieldLine(canvas, inner.x + 1, inner.y, Math.max(1, inner.width - 2), top.field, colors);
-        if (inner.height >= 2) {
-          const hintStyle = canvas.style({ fg: colors.textDim, bg: colors.bgElevated });
-          printClipped(canvas, inner.x + 1, inner.y + 1, STRINGS.textPromptHint, Math.max(0, inner.width - 2), hintStyle, true);
-        }
-      },
-    });
-    return { overlays, input };
+      const field = fieldOverlay("overlay:text", centred(width, height, 52, 5), title, STRINGS.textPromptHint, top.field, closeKeys, colors);
+      return { overlays: [...overlays, field.overlay], input: field.input };
+    }
+    case "confirm": {
+      const rect = centred(width, height, 54, 5);
+      const name = state.world.workspaces.find((workspace) => workspace.id === top.target.id)?.name || top.target.id;
+      const confirm: Part = {
+        key: "overlay:confirm", rect, version: 0,
+        draw(canvas) {
+          const inner = overlayFrame(canvas, rect, STRINGS.confirmCloseTitle, closeKeys, colors);
+          if (inner.width > 0 && inner.height > 0) printFit(canvas, inner.x + 1, inner.y, STRINGS.confirmCloseWorkspace(name), Math.max(0, inner.width - 2), canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD }), true);
+        },
+      };
+      return { overlays: [...overlays, confirm], input: "overlay" };
+    }
+    case "goto": {
+      const field = fieldOverlay("overlay:goto", centred(width, height, 64, 14), STRINGS.gotoTitle, STRINGS.gotoPromptHint, top.field, closeKeys, colors);
+      return { overlays: [...overlays, field.overlay], input: field.input };
+    }
   }
-
-  if (top.kind === "confirm") {
-    input = "overlay";
-    const boxW = Math.max(1, Math.min(width, 54));
-    const boxH = Math.max(1, Math.min(height, 5));
-    const rect: Rect = {
-      x: Math.floor((width - boxW) / 2),
-      y: Math.floor((height - boxH) / 2),
-      width: boxW,
-      height: boxH,
-    };
-    const ws = state.world.workspaces.find((w) => w.id === top.target.id);
-    const label = ws?.name || top.target.id;
-    overlays.push({
-      key: "overlay:confirm",
-      rect,
-      version: JSON.stringify({ rect, top, label }),
-      draw(canvas) {
-        const { inner } = drawOverlayFrame(canvas, rect, STRINGS.confirmCloseWorkspace(label), closeKeys, colors);
-        if (inner.width <= 0 || inner.height <= 0) return;
-        const warnStyle = canvas.style({ fg: colors.dangerText, bg: colors.bgElevated, flags: STYLE_BOLD });
-        printClipped(canvas, inner.x + 1, inner.y, STRINGS.confirmCloseWorkspace(label), Math.max(0, inner.width - 2), warnStyle, true);
-      },
-    });
-    return { overlays, input };
-  }
-
-  // goto overlay
-  const boxW = Math.max(1, Math.min(width, 64));
-  const boxH = Math.max(1, Math.min(height, 14));
-  const rect: Rect = {
-    x: Math.floor((width - boxW) / 2),
-    y: Math.floor((height - boxH) / 2),
-    width: boxW,
-    height: boxH,
-  };
-  const fieldY = rect.y + Math.min(1, Math.max(0, rect.height - 1));
-  const fieldX = rect.x + Math.min(2, Math.max(0, rect.width - 1));
-  const fieldW = Math.max(1, rect.width - 4);
-  const beforeW = measure(top.field.graphemes.slice(0, top.field.cursor).join("")).width;
-  input = { col: fieldX + Math.min(Math.max(0, fieldW - 1), beforeW), row: fieldY };
-
-  overlays.push({
-    key: "overlay:goto",
-    rect,
-    version: JSON.stringify({ rect, top, workspaces: state.world.workspaces }),
-    draw(canvas) {
-      const { inner } = drawOverlayFrame(canvas, rect, STRINGS.gotoTitle, closeKeys, colors);
-      if (inner.width <= 0 || inner.height <= 0) return;
-      drawFieldLine(canvas, inner.x + 1, inner.y, Math.max(1, inner.width - 2), top.field, colors);
-      if (inner.height >= 2) {
-        const hintStyle = canvas.style({ fg: colors.textDim, bg: colors.bgElevated });
-        printClipped(canvas, inner.x + 1, inner.y + 1, STRINGS.gotoPromptHint, Math.max(0, inner.width - 2), hintStyle, true);
-      }
-    },
-  });
-  return { overlays, input };
 }
 
-/** Builds all chrome parts and overlays for one frame pass. */
+/** Every chrome part and overlay of one frame pass. */
 export function buildChrome(input: ChromeInput): BuiltChrome {
   const theme = input.theme ?? "dark";
   const depth = input.colors ?? "truecolor";
   const colors = themeColors(theme, depth);
-  const parts: Part[] = [
-    buildSidebarPart(input, colors),
-    buildTabBarPart(input, colors),
-    buildBordersPart(input, colors),
-    buildModeBarPart(input, colors),
-  ];
-  const { overlays, input: sceneInput } = buildOverlays(
-    input.regions.screen.width,
-    input.regions.screen.height,
-    input.state,
-    input.world,
-    theme,
-    depth,
-  );
+  const look = `${theme}/${depth}`;
+  const parts = [sidebarPart(input, colors, look), tabBarPart(input, colors, look), bordersPart(input, colors, look), modeBarPart(input, colors, look)];
+  const { overlays, input: sceneInput } = buildOverlays(input.regions.screen.width, input.regions.screen.height, input.state, input.world, colors);
   return { parts, overlays, input: sceneInput };
 }

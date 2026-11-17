@@ -254,7 +254,6 @@ export function renderManifest(css: string, json: string, theme = resolveTheme(p
   return text;
 }
 
-
 /** The tokens the terminal screen's chrome reads from the default dark and light themes (tui/theme.generated.ts). */
 const TUI_ROLES: readonly (readonly [name: string, token: string])[] = [
   ["bg", "--bg"],
@@ -268,23 +267,14 @@ const TUI_ROLES: readonly (readonly [name: string, token: string])[] = [
   ["textDim", "--text-dim"],
   ["textStrong", "--text-strong"],
   ["accent", "--accent"],
-  ["primary", "--primary"],
   ["primaryText", "--primary-text"],
   ["statusIdle", "--status-idle"],
   ["statusWorking", "--status-working"],
   ["statusBlocked", "--status-blocked"],
   ["statusDone", "--status-done"],
-  ["indicatorWorking", "--indicator-working"],
-  ["indicatorBlocked", "--indicator-blocked"],
-  ["indicatorDone", "--indicator-done"],
-  ["indicatorIdle", "--indicator-idle"],
   ["indicatorUnknown", "--indicator-unknown"],
   ["dangerText", "--danger-text"],
   ["notice", "--notice"],
-  ["termBg", "--term-bg"],
-  ["termFg", "--term-fg"],
-  ["termCursor", "--term-cursor"],
-  ["termSelection", "--term-selection"],
 ];
 
 function hexRgb(theme: ReturnType<typeof resolveTheme>, token: string, mode: "dark" | "light"): readonly [number, number, number] {

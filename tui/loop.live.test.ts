@@ -209,7 +209,7 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
     });
     const run = screen(isolated, root);
     await run.until(/CHROME-LIVE-MARK[\s\S]*\x1b\[\?25h/, "the live pane and its chrome");
-    expect(run.output()).toContain("Spaces");
+    expect(run.output()).toContain("Workspaces");
     expect(run.output()).toContain("Agents");
     expect(run.output()).toContain("live-ws");
     expect(run.output()).toContain("1:live-tab");

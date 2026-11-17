@@ -2,7 +2,7 @@
 
 export type TuiRgb = readonly [number, number, number];
 export type TuiThemeMode = "dark" | "light";
-export type TuiColorRole = "bg" | "bgPanel" | "bgElevated" | "bgHover" | "bgInput" | "border" | "borderStrong" | "text" | "textDim" | "textStrong" | "accent" | "primary" | "primaryText" | "statusIdle" | "statusWorking" | "statusBlocked" | "statusDone" | "indicatorWorking" | "indicatorBlocked" | "indicatorDone" | "indicatorIdle" | "indicatorUnknown" | "dangerText" | "notice" | "termBg" | "termFg" | "termCursor" | "termSelection";
+export type TuiColorRole = "bg" | "bgPanel" | "bgElevated" | "bgHover" | "bgInput" | "border" | "borderStrong" | "text" | "textDim" | "textStrong" | "accent" | "primaryText" | "statusIdle" | "statusWorking" | "statusBlocked" | "statusDone" | "indicatorUnknown" | "dangerText" | "notice";
 export type TuiThemePalette = Readonly<Record<TuiColorRole, TuiRgb>>;
 
 export const TUI_THEMES: Readonly<Record<TuiThemeMode, TuiThemePalette>> = {
@@ -18,23 +18,14 @@ export const TUI_THEMES: Readonly<Record<TuiThemeMode, TuiThemePalette>> = {
     textDim: [163, 163, 163],
     textStrong: [255, 255, 255],
     accent: [58, 131, 247],
-    primary: [255, 255, 255],
     primaryText: [24, 24, 24],
     statusIdle: [163, 163, 163],
     statusWorking: [129, 176, 250],
     statusBlocked: [252, 141, 139],
     statusDone: [64, 201, 119],
-    indicatorWorking: [249, 226, 175],
-    indicatorBlocked: [243, 139, 168],
-    indicatorDone: [148, 226, 213],
-    indicatorIdle: [166, 227, 161],
     indicatorUnknown: [108, 112, 134],
     dangerText: [255, 208, 206],
     notice: [217, 178, 106],
-    termBg: [24, 24, 24],
-    termFg: [236, 236, 236],
-    termCursor: [255, 255, 255],
-    termSelection: [38, 79, 120],
   },
   light: {
     bg: [255, 255, 255],
@@ -48,22 +39,13 @@ export const TUI_THEMES: Readonly<Record<TuiThemeMode, TuiThemePalette>> = {
     textDim: [93, 96, 103],
     textStrong: [13, 13, 13],
     accent: [58, 131, 247],
-    primary: [26, 28, 31],
     primaryText: [255, 255, 255],
     statusIdle: [93, 96, 103],
     statusWorking: [8, 85, 207],
     statusBlocked: [177, 36, 33],
     statusDone: [0, 108, 43],
-    indicatorWorking: [223, 142, 29],
-    indicatorBlocked: [210, 15, 57],
-    indicatorDone: [23, 146, 153],
-    indicatorIdle: [64, 160, 43],
     indicatorUnknown: [156, 160, 176],
     dangerText: [177, 36, 33],
     notice: [138, 83, 0],
-    termBg: [255, 255, 255],
-    termFg: [26, 28, 31],
-    termCursor: [26, 28, 31],
-    termSelection: [207, 224, 253],
   },
 } as const;

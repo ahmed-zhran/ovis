@@ -3,15 +3,22 @@
  * follow later and the wording conventions scan (src/conventions.test.ts) checks them in one place.
  */
 
+/** A fallback key the config's own bindings hold, and what holds it. */
+interface HeldKey { readonly key: string; readonly holder: string }
+
+const heldKeys = (skipped: readonly HeldKey[]): string => skipped.map(({ key, holder }) => `${key}->${holder}`).join(", ");
+
 export const STRINGS = {
   // Sidebar & header
   sessionHeader: (session: string): string => `hc:${session}`,
-  spacesSection: "Spaces",
+  workspacesSection: "Workspaces",
   agentsSection: "Agents",
   noSpaces: "No workspaces",
   noAgents: "No agents",
   sidebarToggleCollapse: "<<",
   worktreeMark: "|-",
+  /** before an agent row that another agent row started */
+  helperMark: "+",
 
   // Tab bar
   zoomMark: "ZOOM",
@@ -47,7 +54,7 @@ export const STRINGS = {
   offlinePaneBanner: (): string => `${STRINGS.offlineTitle} · ${STRINGS.offlineCommand}`,
   appOwnedCore: "the Herdr app arranges this core",
   emptyCoreTitle: "No workspaces yet",
-  emptyCoreOffer: (folder: string, key: string): string => `New workspace in ${folder} (${key})`,
+  emptyCoreOffer: (folder: string, key: string | null): string => `New workspace in ${folder}${key === null ? "" : ` (${key})`}`,
 
   // Pane states & border notices
   endedCode: (code: number | null): string => `ended (${code ?? "none"})`,
@@ -59,7 +66,7 @@ export const STRINGS = {
   paintingPane: "loading screen",
   closingPane: "closing stream",
   failedPane: (reason: string): string => `failed: ${reason}`,
-  retryHint: "retry",
+  idlePane: "not attached",
 
   // Overlays
   helpTitle: "Keyboard Shortcuts",
@@ -73,19 +80,20 @@ export const STRINGS = {
   textRenamePane: "Rename pane",
   textNewTab: "New tab name",
   textPromptHint: "Enter to save · Ctrl+U to clear",
-  confirmCloseWorkspace: (id: string): string => `Close workspace ${id}? [y/N]`,
+  confirmCloseTitle: "Close workspace",
+  confirmCloseWorkspace: (name: string): string => `Close workspace ${name}? [y/N]`,
   gotoTitle: "Go to",
   gotoPromptHint: "Type to filter · Enter to jump",
 
   // Keymap notes in help & mode bar
   notePrefixFallback: (binding: string, fallback: string): string =>
     `prefix_fallback: ${binding} cannot be typed; using ${fallback}`,
-  notePrefixUnreachable: (binding: string, skipped: string): string =>
-    `prefix_unreachable: ${binding} cannot be typed and all fallbacks are held (${skipped}); use menu or close terminal`,
+  notePrefixUnreachable: (binding: string, skipped: readonly HeldKey[]): string =>
+    `prefix_unreachable: ${binding} cannot be typed and all fallbacks are held (${heldKeys(skipped)}); use menu or close terminal`,
   noteDetachFallback: (fallback: string): string =>
     `detach_fallback: detach uses ${fallback}`,
-  noteDetachUnreachable: (skipped: string): string =>
-    `detach_unreachable: no key can detach (${skipped}); use action detach or close terminal`,
+  noteDetachUnreachable: (skipped: readonly HeldKey[]): string =>
+    `detach_unreachable: no key can detach (${heldKeys(skipped)}); use action detach or close terminal`,
   noteLockTaken: (holder: string): string => `lock_taken: lock key held by ${holder}`,
   noteTaken: (action: string, binding: string, holder: string): string =>
     `taken: ${action} (${binding}) held by ${holder}`,
@@ -93,6 +101,79 @@ export const STRINGS = {
     `${code}: ${action} (${binding}) cannot fire`,
   noteIndexedLegacy: (entry: string): string => `indexed_legacy: [keys.indexed].${entry} is ignored`,
   noteBlankBinding: (action: string): string => `blank_binding: ${action} unbound by blank entry`,
+  refusalLine: (code: string, action: string, binding: string, holder: string | null): string =>
+    `${code}: ${action} = ${binding}${holder === null ? "" : ` (held by ${holder})`}`,
+
+  /** the help's and the mode bar's name for each action of the key table */
+  actions: {
+    prefix: "prefix",
+    help: "help",
+    settings: "settings",
+    new_workspace: "new workspace",
+    new_worktree: "new worktree",
+    open_worktree: "open worktree",
+    remove_worktree: "remove worktree",
+    rename_workspace: "rename workspace",
+    close_workspace: "close workspace",
+    workspace_picker: "navigate",
+    goto: "go to",
+    detach: "detach",
+    reload_config: "reload",
+    open_notification_target: "jump alert",
+    previous_workspace: "prev workspace",
+    next_workspace: "next workspace",
+    previous_agent: "prev agent",
+    next_agent: "next agent",
+    focus_agent: "agent",
+    new_tab: "new tab",
+    rename_tab: "rename tab",
+    previous_tab: "prev tab",
+    next_tab: "next tab",
+    move_tab_previous: "move tab <",
+    move_tab_next: "move tab >",
+    switch_tab: "tab",
+    switch_workspace: "workspace",
+    close_tab: "close tab",
+    rename_pane: "rename pane",
+    edit_scrollback: "edit scrollback",
+    clear_pane: "clear pane",
+    copy_mode: "copy",
+    focus_pane_left: "left",
+    focus_pane_down: "down",
+    focus_pane_up: "up",
+    focus_pane_right: "right",
+    swap_pane_left: "swap <",
+    swap_pane_down: "swap v",
+    swap_pane_up: "swap ^",
+    swap_pane_right: "swap >",
+    last_pane: "last pane",
+    cycle_pane_next: "next pane",
+    cycle_pane_previous: "prev pane",
+    split_vertical: "split |",
+    split_horizontal: "split -",
+    close_pane: "close pane",
+    zoom: "zoom",
+    resize_mode: "resize",
+    resize_pane_left: "grow <",
+    resize_pane_down: "grow v",
+    resize_pane_up: "grow ^",
+    resize_pane_right: "grow >",
+    toggle_sidebar: "sidebar",
+    lock: "lock",
+    navigate_workspace_up: "workspace ^",
+    navigate_workspace_down: "workspace v",
+    navigate_pane_left: "pane <",
+    navigate_pane_down: "pane v",
+    navigate_pane_up: "pane ^",
+    navigate_pane_right: "pane >",
+    navigate_focus: "select",
+    navigate_cancel: "cancel",
+    navigate_index: "workspace 1..9",
+    navigate_cycle_next: "next pane",
+    navigate_cycle_previous: "prev pane",
+    resize_leave: "done",
+    copy_leave: "done",
+  } as Readonly<Record<string, string>>,
 
   // Notice messages by code
   noticeText: (code: string, data: Readonly<Record<string, string | number>>): string => {
