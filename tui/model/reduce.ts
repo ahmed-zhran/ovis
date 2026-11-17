@@ -7,13 +7,13 @@
  * Copy), 4 direct bindings, 5 prefix, 6 the focused pane. Text and keys reach a pane only at level 6.
  * At levels 3 to 5 a text run is taken one code point at a time and the rest runs the ladder again.
  */
-import { type HerdrAction, parseHerdrBinding } from "../../shared/herdr-keys.ts";
+import type { HerdrAction } from "../../shared/herdr-keys.ts";
 import type { InputEvent } from "../input/decode.ts";
 import { CATALOGUE_BY_ID } from "./catalogue.ts";
-import { clearDeadline, type Deadlines, NO_DEADLINES, NOTICE_SHOW_MS, NOTICES_KEPT, PREFIX_WAIT_MS, setDeadline } from "./deadlines.ts";
+import { clearDeadline, type Deadlines, NO_DEADLINES, NOTICE_SHOW_MS, NOTICES_KEPT, setDeadline } from "./deadlines.ts";
 import type { Effect, KeyInput, MouseInput, PaneInput, PasteInput, TextInput } from "./effects.ts";
 import { EMPTY_WORLD, exists, type Focus, focused, focusOn, NO_FOCUS, nextFocus, type Target, type World } from "./focus.ts";
-import { boundIn, buildKeymap, charChords, chordId, isPrefix, type Bound, type KeyAction, type Keymap, keyChords, unlockChords } from "./keymap.ts";
+import { boundIn, buildKeymap, charChords, isPrefix, type Bound, type KeyAction, type Keymap, keyChords, unlockChords } from "./keymap.ts";
 import { field, type Overlay, overlayInput, type OverlayInput, overlayTarget } from "./overlays.ts";
 
 export type ModeState =
@@ -29,7 +29,7 @@ export interface Notice { readonly id: number; readonly code: string; readonly d
 export interface ModelState {
   readonly mode: ModeState;
   readonly locked: boolean;
-  /** the prefix machine: Armed (true) or Idle; Armed always names the deadline `prefix` */
+  /** the prefix machine: Armed (true) or Idle; it waits without a deadline until a row of its table ends it */
   readonly armed: boolean;
   readonly overlays: readonly Overlay[];
   readonly world: World;
@@ -37,7 +37,7 @@ export interface ModelState {
   readonly keymap: Keymap;
   readonly notices: readonly Notice[];
   readonly nextNotice: number;
-  /** `prefix` while Armed, `notice` while a notice shows */
+  /** `notice` while a notice shows */
   readonly deadlines: Deadlines;
   readonly host: { readonly cols: number; readonly rows: number; readonly focused: boolean | null };
   readonly sidebarCollapsed: boolean;
@@ -140,8 +140,6 @@ export function reduce(state: ModelState, event: ModelEvent): Step {
 
 type Unit = { readonly kind: "key"; readonly event: KeyInput } | { readonly kind: "paste"; readonly event: PasteInput };
 
-/** Escape and ctrl+[ leave an armed prefix. */
-const CANCEL_IDS = new Set(["esc", "ctrl+["].map((text) => chordId(parseHerdrBinding(text)!.chord)));
 
 /** A key or a paste down the ladder. */
 function ladder(acc: Acc, unit: Unit): void {
@@ -183,7 +181,7 @@ function ladder(acc: Acc, unit: Unit): void {
     }
     if (isPrefix(s.keymap, chords)) {
       acc.levels.push(5);
-      arm(acc, at);
+      arm(acc);
       return;
     }
     toPane(acc, unit.event);
@@ -195,7 +193,7 @@ function ladder(acc: Acc, unit: Unit): void {
     return;
   }
   acc.levels.push(5);
-  if (chords.some((chord) => CANCEL_IDS.has(chordId(chord)))) return;
+  // Escape and ctrl+[ hold no binding after the prefix (the key table drops one): they only return to Idle
   const bound = boundIn(s.keymap.afterPrefix, chords);
   if (bound !== undefined) runBound(acc, bound, at);
   else if (unit.event.text !== undefined && HANGUL.test(unit.event.text)) notice(acc, "ime_prefix", {}, at);
@@ -262,7 +260,7 @@ function ladderText(acc: Acc, event: TextInput): void {
     }
     if (at > 0) toPane(acc, { type: "text", text: rest.slice(0, at), at: event.at });
     acc.levels.push(5);
-    arm(acc, event.at);
+    arm(acc);
     rest = rest.slice(at + 1);
   }
 }
@@ -289,12 +287,12 @@ function mouse(acc: Acc, event: MouseInput): void {
   acc.effects.push({ type: "mouse", over, event });
 }
 
-function arm(acc: Acc, at: number): void {
-  acc.s = { ...acc.s, armed: true, deadlines: setDeadline(acc.s.deadlines, "prefix", at + PREFIX_WAIT_MS) };
+function arm(acc: Acc): void {
+  acc.s = { ...acc.s, armed: true };
 }
 
 function disarm(acc: Acc): void {
-  if (acc.s.armed) acc.s = { ...acc.s, armed: false, deadlines: clearDeadline(acc.s.deadlines, "prefix") };
+  if (acc.s.armed) acc.s = { ...acc.s, armed: false };
 }
 
 function sameData(a: Readonly<Record<string, string | number>>, b: Readonly<Record<string, string | number>>): boolean {
@@ -317,7 +315,6 @@ function fire(acc: Acc, name: string, at: number): void {
   const s = acc.s;
   const due = s.deadlines.get(name);
   if (due === undefined || due > at) return;
-  if (name === "prefix") disarm(acc);
   if (name === "notice") {
     const notices = s.notices.filter((n) => n.until > at);
     acc.s = { ...s, notices, deadlines: noticeDeadline(s.deadlines, notices) };

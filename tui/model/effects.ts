@@ -1,5 +1,5 @@
 /**
- * What the reducer asks the loop (row 25) to do, as data. The reducer performs none of it.
+ * What the reducer asks its caller (the screen's loop) to do, as data. The reducer performs none of it.
  */
 import type { HerdrAction } from "../../shared/herdr-keys.ts";
 import type { InputEvent } from "../input/decode.ts";
@@ -12,7 +12,11 @@ export type MouseInput = Extract<InputEvent, { type: "mouse" }>;
 /** What reaches a pane: the key, the text run (or what is left of it) or the paste, as read. */
 export type PaneInput = KeyInput | TextInput | PasteInput;
 
-/** An action the reducer cannot finish itself: a layout write (row 28), the agent list (row 34), the picker (row 35), a directional focus (row 25). */
+/**
+ * An action the reducer cannot finish itself, for the caller to perform: a layout write, a jump through the
+ * agent list, the goto query, or a directional focus (the caller finds the neighbour on the drawn layout and
+ * answers with a `select` event).
+ */
 export interface RunEffect {
   readonly type: "run";
   readonly action: HerdrAction;
@@ -30,7 +34,7 @@ export type Effect =
   | { readonly type: "quit" }
   /** read herdr's config again and answer with a `keys` event */
   | { readonly type: "reload_keys" }
-  /** a mouse event for the hit map (row 27): inside the top overlay, or over the screen's chrome and panes */
+  /** a mouse event for the caller's hit map: inside the top overlay, or over the screen's chrome and panes */
   | { readonly type: "mouse"; readonly over: "overlay" | "screen"; readonly event: MouseInput }
   /** a reply to the start probe (the host's colours, flags, cell size) */
   | { readonly type: "host_reply"; readonly kind: Extract<InputEvent, { type: "reply" }>["kind"]; readonly data: string };

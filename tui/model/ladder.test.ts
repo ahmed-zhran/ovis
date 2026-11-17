@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { type InputEvent, type Mods, typedKey } from "../input/decode.ts";
 import { Framer } from "../input/framer.ts";
-import { PREFIX_WAIT_MS } from "./deadlines.ts";
 import type { Effect } from "./effects.ts";
 import type { World } from "./focus.ts";
 import { modeBar } from "./hints.ts";
+import { OVERLAYS } from "./overlays.ts";
 import { initialState, type Level, type ModelEvent, type ModelState, reduce, type Step } from "./reduce.ts";
 
 const AT = 1_000;
@@ -39,6 +39,7 @@ const locked = after(idle, unlock());
 const withHelp = after(idle, prefix(), text("?"));
 const navigating = after(idle, prefix(), text("w"));
 const copying = after(idle, prefix(), text("["));
+const resizing = after(idle, prefix(), text("r"));
 const directAlt = start({ new_tab: ["prefix+c", "alt+t"] });
 
 describe("the ladder", () => {
@@ -72,6 +73,10 @@ describe("the ladder", () => {
       check: (step) => expect(step.effects).toEqual([]) },
     { level: 3, takes: true, name: "a navigate key", state: navigating, event: key("j"), levels: [3], pane: false,
       check: (step) => expect(step.effects).toEqual([{ type: "run", action: "focus_pane_down", target: { kind: "pane", id: "p1" }, index: null, name: null }]) },
+    { level: 3, takes: true, name: "Escape leaves Resize mode", state: resizing, event: named("ESCAPE"), levels: [3], pane: false,
+      check: (step) => expect(step.state.mode).toEqual({ name: "terminal" }) },
+    { level: 3, takes: true, name: "a non-ASCII navigate key never fires", state: after(start({ navigate_pane_down: "\u{3153}" }), prefix(), text("w")), event: text("\u{3153}"), levels: [3], pane: false,
+      check: (step) => { expect(step.effects).toEqual([]); expect(step.state.mode.name).toBe("navigate"); } },
     { level: 3, takes: true, name: "a text run in Copy, one code point at a time", state: copying, event: text("abc"), levels: [3, 3, 3], pane: false },
     { level: 3, takes: true, name: "a paste in Copy", state: copying, event: paste("abc"), levels: [3], pane: false },
     { level: 3, takes: false, name: "a navigate key in Terminal", state: idle, event: key("j"), levels: [6], pane: true },
@@ -114,8 +119,9 @@ describe("the prefix machine", () => {
   const rows: Row[] = [
     { row: 1, name: "Idle, a prefix chord: Armed, the mode bar shows the keys after the prefix", from: idle, events: [prefix()], armed: true, pane: [],
       check: (state) => { expect(modeBar(state).mode).toBe("prefix"); expect(modeBar(state).hints.map((hint) => hint.action)).toContain("new_tab"); } },
-    { row: 1, name: "Idle, a prefix chord names its deadline", from: idle, events: [prefix()], armed: true, pane: [],
-      check: (state) => expect(state.deadlines.get("prefix")).toBe(AT + PREFIX_WAIT_MS) },
+    { row: 1, name: "Idle, a prefix chord: Armed with no deadline, and still Armed however late a deadline event comes", from: idle,
+      events: [prefix(), { type: "deadline", name: "prefix", at: AT + 86_400_000 }], armed: true, pane: [],
+      check: (state) => expect([...state.deadlines.keys()]).toEqual([]) },
     { row: 2, name: "Armed, the prefix chord again: one literal prefix to the pane", from: idle, events: [prefix(), prefix()], armed: false, pane: [1] },
     { row: 3, name: "Armed, a text bound after the prefix: its action runs", from: armed, events: [text("c")], armed: false, pane: [],
       check: (state) => expect(state.overlays).toEqual([expect.objectContaining({ kind: "text", purpose: "new_tab", target: { kind: "workspace", id: "w1" } })]) },
@@ -131,6 +137,9 @@ describe("the prefix machine", () => {
       check: (state) => expect(state.overlays).toEqual([]) },
     { row: 4, name: "Armed, ctrl+[: Idle, nothing sent", from: armed, events: [key("[", { ctrl: true })], armed: false, pane: [],
       check: (state) => expect(state.mode).toEqual({ name: "terminal" }) },
+    { row: 5, name: "Armed, a non-ASCII key bound after the prefix never fires: dropped, the Hangul rule applies", from: after(start({ new_tab: "prefix+\u{d55c}" }), prefix()),
+      events: [text("\u{d55c}")], armed: false, pane: [],
+      check: (state) => { expect(state.overlays).toEqual([]); expect(state.notices.map((notice) => notice.code)).toEqual(["ime_prefix"]); } },
     { row: 5, name: "Armed, an unbound text: dropped, Idle", from: armed, events: [text("y")], armed: false, pane: [] },
     { row: 5, name: "Armed, an unbound key: zero bytes to the pane, Idle", from: armed, events: [unboundKey], armed: false, pane: [],
       check: (state, steps) => expect(steps.flatMap((step) => step.effects)).toEqual([]) },
@@ -140,9 +149,7 @@ describe("the prefix machine", () => {
       check: (_, steps) => expect(steps[0]!.effects.map((effect) => effect.type)).toEqual(["mouse"]) },
     { row: 6, name: "Armed, a wheel turn: Idle first", from: armed, events: [mouse("wheelUp")], armed: false, pane: [] },
     { row: 7, name: "Armed, host focus lost: Idle", from: armed, events: [{ type: "focus", focused: false, at: AT }], armed: false, pane: [] },
-    { row: 7, name: "Armed, the keymap loaded again: Idle", from: armed, events: [{ type: "keys", keys: {}, at: AT }], armed: false, pane: [],
-      check: (state) => expect(state.deadlines.has("prefix")).toBe(false) },
-    { row: 7, name: "Armed, its deadline passes: Idle", from: armed, events: [{ type: "deadline", name: "prefix", at: AT + PREFIX_WAIT_MS }], armed: false, pane: [] },
+    { row: 7, name: "Armed, the keymap loaded again: Idle", from: armed, events: [{ type: "keys", keys: {}, at: AT }], armed: false, pane: [] },
   ];
 
   it("prefix table", () => {
@@ -214,6 +221,27 @@ describe("hangul once", () => {
     expect(paneInputs(step.effects)).toEqual([]);
     const top = step.state.overlays.at(-1)!;
     expect(top.kind === "text" && top.field.graphemes).toEqual(["\u{d55c}", "\u{ae00}"]);
+  });
+});
+
+describe("overlay close keys", () => {
+  it("every key an overlay declares closes it, and is the one way a key closes it", () => {
+    const open: Record<keyof typeof OVERLAYS, ModelState> = {
+      help: after(idle, prefix(), text("?")),
+      text: after(idle, prefix(), key("P")),
+      confirm: after(idle, prefix(), key("D")),
+      goto: after(idle, prefix(), text("g")),
+    };
+    for (const [kind, entry] of Object.entries(OVERLAYS)) {
+      const state = open[kind as keyof typeof OVERLAYS];
+      expect(state.overlays.map((overlay): string => overlay.kind)).toEqual([kind]);
+      for (const closeKey of entry.closeKeys) {
+        const event = closeKey === "esc" ? named("ESCAPE") : key(closeKey);
+        expect({ kind, closeKey, open: reduce(state, event).state.overlays.length }).toEqual({ kind, closeKey, open: 0 });
+      }
+    }
+    // a key that is not declared does not close help
+    expect(reduce(open.help, key("x")).state.overlays.length).toBe(1);
   });
 });
 

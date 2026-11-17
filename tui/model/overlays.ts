@@ -105,10 +105,9 @@ function closes(ids: ReadonlySet<string>, input: OverlayInput): boolean {
 
 const isEnter = (input: OverlayInput) => input.kind === "key" && (input.event.key === "ENTER" || input.event.key === "NUMPAD_ENTER") && Object.keys(input.event.mods).length === 0;
 
-/** A field's answer to one input: accept with Enter, close with Escape, else edit. */
-function fieldInput<O extends Extract<Overlay, { field: Field }>>(overlay: O, input: OverlayInput, accept: (text: string) => OverlayAnswer, ids: ReadonlySet<string>): OverlayAnswer {
+/** A field's answer to one input: accept with Enter, else edit. */
+function fieldInput<O extends Extract<Overlay, { field: Field }>>(overlay: O, input: OverlayInput, accept: (text: string) => OverlayAnswer): OverlayAnswer {
   if (isEnter(input)) return accept(overlay.field.graphemes.join(""));
-  if (input.kind === "key" && closes(ids, input)) return { overlay: null, effects: [] };
   const withField = (next: Field): O => ({ ...overlay, field: next });
   if (input.kind === "key") {
     const next = edit(overlay.field, input.event);
@@ -121,48 +120,44 @@ function fieldInput<O extends Extract<Overlay, { field: Field }>>(overlay: O, in
 
 const run = (action: RunEffect["action"], target: Target | null, name: string | null): RunEffect => ({ type: "run", action, target, index: null, name });
 
-const HELP_CLOSE = ["esc", "q", "?"] as const;
-const FIELD_CLOSE = ["esc"] as const;
-const CONFIRM_CLOSE = ["esc", "n"] as const;
-const helpIds = closeIds(HELP_CLOSE);
-const fieldIds = closeIds(FIELD_CLOSE);
-const confirmIds = closeIds(CONFIRM_CLOSE);
-
 export const OVERLAYS: { readonly [K in Overlay["kind"]]: OverlayEntry<Extract<Overlay, { kind: K }>> } = {
   help: {
-    closeKeys: HELP_CLOSE,
+    closeKeys: ["esc", "q", "?"],
     target: () => null,
-    input: (overlay, input) => ({ overlay: closes(helpIds, input) ? null : overlay, effects: [] }),
+    input: (overlay) => ({ overlay, effects: [] }),
   },
   text: {
-    closeKeys: FIELD_CLOSE,
+    closeKeys: ["esc"],
     target: (overlay) => overlay.target,
     input: (overlay, input) => fieldInput(overlay, input, (name) => {
       if (overlay.purpose === "new_tab") return { overlay: null, effects: [run("new_tab", overlay.target, name)] };
       // herdr sends a rename only when the name changed
       return { overlay: null, effects: name === overlay.field.original ? [] : [run(overlay.purpose, overlay.target, name)] };
-    }, fieldIds),
+    }),
   },
   confirm: {
-    closeKeys: CONFIRM_CLOSE,
+    closeKeys: ["esc", "n"],
     target: (overlay) => overlay.target,
     input: (overlay, input) => {
       const yes = isEnter(input) || inputChords(input).some((chord) => chord.key === "y" && !chord.ctrl && !chord.alt && !chord.meta);
-      if (yes) return { overlay: null, effects: [run(overlay.purpose, overlay.target, null)] };
-      return { overlay: closes(confirmIds, input) ? null : overlay, effects: [] };
+      return yes ? { overlay: null, effects: [run(overlay.purpose, overlay.target, null)] } : { overlay, effects: [] };
     },
   },
   goto: {
-    closeKeys: FIELD_CLOSE,
+    closeKeys: ["esc"],
     target: () => null,
-    input: (overlay, input) => fieldInput(overlay, input, (query) => ({ overlay: null, effects: [run("goto", null, query)] }), fieldIds),
+    input: (overlay, input) => fieldInput(overlay, input, (query) => ({ overlay: null, effects: [run("goto", null, query)] })),
   },
 };
+
+/** Each kind's declared close keys: the one way a key or a typed character closes an overlay. */
+const CLOSE_IDS: ReadonlyMap<string, ReadonlySet<string>> = new Map(Object.entries(OVERLAYS).map(([kind, entry]) => [kind, closeIds(entry.closeKeys)]));
 
 export function overlayTarget(overlay: Overlay): Target | null {
   return (OVERLAYS[overlay.kind] as OverlayEntry<Overlay>).target(overlay);
 }
 
 export function overlayInput(overlay: Overlay, input: OverlayInput): OverlayAnswer {
+  if (closes(CLOSE_IDS.get(overlay.kind)!, input)) return { overlay: null, effects: [] };
   return (OVERLAYS[overlay.kind] as OverlayEntry<Overlay>).input(overlay, input);
 }

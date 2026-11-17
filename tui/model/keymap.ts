@@ -30,7 +30,10 @@ export interface Bound { readonly action: KeyAction; readonly index: number | nu
 export type KeymapNote =
   | { readonly code: "indexed_legacy"; readonly entry: string }
   | { readonly code: "blank_binding"; readonly action: string }
-  | { readonly code: "lock_unbound" };
+  /** the lock's chord is held by `holder` (an action, or "prefix"), so the lock has no key */
+  | { readonly code: "lock_taken"; readonly holder: string }
+  /** a binding after the prefix on Escape or ctrl+[, which always cancel the prefix: it could never fire */
+  | { readonly code: "cancel_key"; readonly action: string; readonly binding: string };
 
 type Lookup = Readonly<Record<string, Bound>>;
 
@@ -48,8 +51,11 @@ export interface Keymap {
   readonly modeKeys: Readonly<Record<Exclude<Mode, "terminal">, Lookup>>;
 }
 
-/** The screen's own key for the lock, which herdr does not have: one chord that locks and unlocks. */
+// The screen's own lock chord (herdr has no lock), pending the owner's decision on how the lock is switched.
 const LOCK_KEY = "ctrl+alt+g";
+
+/** The keys that always leave an armed prefix (and navigate mode). */
+const CANCEL_KEYS = ["esc", "ctrl+["] as const;
 
 /** Keys herdr fixes for its modes, in herdr's key syntax, registered before the config's so they always work. */
 const FIXED: readonly { readonly action: KeyAction; readonly mode: Exclude<Mode, "terminal">; readonly keys: readonly string[] }[] = [
@@ -57,7 +63,7 @@ const FIXED: readonly { readonly action: KeyAction; readonly mode: Exclude<Mode,
   { action: "navigate_pane_left", mode: "navigate", keys: ["left"] },
   { action: "navigate_pane_right", mode: "navigate", keys: ["right"] },
   { action: "navigate_focus", mode: "navigate", keys: ["enter"] },
-  { action: "navigate_cancel", mode: "navigate", keys: ["esc", "ctrl+["] },
+  { action: "navigate_cancel", mode: "navigate", keys: CANCEL_KEYS },
   { action: "navigate_index", mode: "navigate", keys: ["1..9"] },
   { action: "navigate_cycle_next", mode: "navigate", keys: ["tab"] },
   { action: "navigate_cycle_previous", mode: "navigate", keys: ["shift+tab"] },
@@ -71,6 +77,13 @@ const FIXED: readonly { readonly action: KeyAction; readonly mode: Exclude<Mode,
 
 export function chordId(chord: HerdrChord): string {
   return `${+chord.ctrl}${+chord.alt}${+chord.shift}${+chord.meta}${+chord.hyper}:${chord.key}`;
+}
+
+const CANCEL_IDS: ReadonlySet<string> = new Set(CANCEL_KEYS.map((text) => chordId(parseHerdrBinding(text)!.chord)));
+
+/** Whether one of `chords` is Escape or ctrl+[. */
+export function isCancel(chords: readonly HerdrChord[]): boolean {
+  return chords.some((chord) => CANCEL_IDS.has(chordId(chord)));
 }
 
 /** A fixed key as a binding: a range is its nine digits, each with its index. */
@@ -115,14 +128,28 @@ export function buildKeymap(keys: unknown): Keymap {
     lookup[id] = { action, index };
     return true;
   };
-  for (const { action, default: defaults, bindings } of resolved.actions) {
-    // the resolver already gave every chord to one action: these claims never collide
-    for (const binding of bindings) kept(binding, claim(binding.prefixed ? afterPrefix : direct, action));
-    rows.push({ action, default: defaults, mode: "terminal", source: "herdr", bindings });
-  }
   const notes = configNotes(keys, new Set([...resolved.actions.map(({ action }) => action), ...resolved.navigate.map(({ name }) => name)]));
-  const lock = kept(fixedBinding(LOCK_KEY), claim(direct, "lock"));
-  if (lock === null) notes.push({ code: "lock_unbound" });
+  for (const { action, default: defaults, bindings } of resolved.actions) {
+    const live: HerdrKeptBinding[] = [];
+    for (const binding of bindings) {
+      // Escape and ctrl+[ cancel an armed prefix before any binding is looked at: one after the prefix never fires
+      const firing = binding.prefixed ? kept(binding, (chord) => !isCancel([chord])) : binding;
+      if (firing === null) {
+        notes.push({ code: "cancel_key", action, binding: binding.text });
+        continue;
+      }
+      // the resolver already gave every chord to one action: these claims never collide
+      kept(firing, claim(firing.prefixed ? afterPrefix : direct, action));
+      live.push(firing);
+    }
+    rows.push({ action, default: defaults, mode: "terminal", source: "herdr", bindings: live });
+  }
+  const lockBinding = fixedBinding(LOCK_KEY);
+  const lock = kept(lockBinding, claim(direct, "lock"));
+  if (lock === null) {
+    const id = chordId(lockBinding.chords[0]!.chord);
+    notes.push({ code: "lock_taken", holder: Object.hasOwn(direct, id) ? direct[id]!.action : "prefix" });
+  }
   rows.push({ action: "lock", default: LOCK_KEY, mode: "terminal", source: "fixed", bindings: lock === null ? [] : [lock] });
 
   const modeKeys = { navigate: {}, resize: {}, copy: {} } as Record<Exclude<Mode, "terminal">, Record<string, Bound>>;

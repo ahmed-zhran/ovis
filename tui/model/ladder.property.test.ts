@@ -7,9 +7,10 @@ import { charChords, chordId, keyChords, type Keymap } from "./keymap.ts";
 import { OVERLAYS, overlayTarget } from "./overlays.ts";
 import { initialState, type ModelEvent, type ModelState, reduce, type Step } from "./reduce.ts";
 
-// The ladder over random event sequences. MODEL_SEED picks the run (the evidence runs three seeds).
+// The ladder over random event sequences. MODEL_SEED picks the run; OVIS_TUI_MODEL_SEQUENCES raises the count
+// from its default of 500, which keeps the file well inside the unit lane's 60 s per file (evidence runs use 3000).
 const SEED = Number(process.env["MODEL_SEED"] ?? "1");
-const SEQUENCES = 3000;
+const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? "500");
 const EVENTS_PER_SEQUENCE = 40;
 
 function random(seed: number): () => number {
@@ -141,7 +142,6 @@ function checkValid(state: ModelState): void {
   for (const [workspace, tab] of Object.entries(focus.tabs)) check(world.workspaces.find((w) => w.id === workspace)?.tabs.some((t) => t.id === tab) === true, "remembered tab exists");
   for (const [tab, pane] of Object.entries(focus.panes)) check(world.workspaces.flatMap((w) => w.tabs).find((t) => t.id === tab)?.panes.some((p) => p.id === pane) === true, "remembered pane exists");
   check(focus.previous === null || exists(world, { kind: "pane", id: focus.previous }), "previous pane exists");
-  check(state.armed === state.deadlines.has("prefix"), "an armed prefix names its deadline, an idle one none");
   if (state.armed) check(state.mode.name === "terminal" && state.overlays.length === 0 && !state.locked, "only Terminal mode with no overlay and no lock arms");
   if (state.locked) check(lockChord(state.keymap) !== null, "locked only with an unlock chord");
   check(state.notices.length <= NOTICES_KEPT, "notices capped");

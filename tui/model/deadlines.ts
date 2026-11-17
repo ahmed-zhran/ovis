@@ -73,14 +73,8 @@ export function earliest(deadlines: Deadlines): { name: string; at: number } | u
   return first;
 }
 
-// The state core's waits and limits (row 24). Its deadline names are `prefix` and `notice`.
+// The state core's waits and limits. Its one deadline name is `notice`; an armed prefix waits without end, as herdr's does.
 
-/**
- * An armed prefix that got no key for this long returns to Idle, so a prefix left armed by mistake does not
- * swallow the next key typed much later. herdr's prefix waits without end; a person never pauses this long
- * inside one chord.
- */
-export const PREFIX_WAIT_MS = 60_000;
 /** How long a notice stays on screen (herdr keeps a failure on screen for 5 s). */
 export const NOTICE_SHOW_MS = 5_000;
 /** The most notices kept at once; a new one pushes out the oldest. */

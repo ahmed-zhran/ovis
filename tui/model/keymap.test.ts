@@ -44,7 +44,8 @@ describe("the keymap table", () => {
     expect(buildKeymap(undefined).rows.find((row) => row.action === "lock")!.bindings.map((binding) => binding.text)).toEqual(["ctrl+alt+g"]);
     const taken = buildKeymap({ new_tab: "ctrl+alt+g" });
     expect(taken.rows.find((row) => row.action === "lock")!.bindings).toEqual([]);
-    expect(taken.notes).toContainEqual({ code: "lock_unbound" });
+    expect(taken.notes).toContainEqual({ code: "lock_taken", holder: "new_tab" });
+    expect(buildKeymap({ prefix: "ctrl+alt+g" }).notes).toContainEqual({ code: "lock_taken", holder: "prefix" });
   });
 
   it("names what holds no key and no refusal", () => {
@@ -57,9 +58,8 @@ describe("the keymap table", () => {
     const reloaded = reduce(armed, { type: "keys", keys: { prefix: "ctrl+a", new_tab: "prefix+t" }, at: AT });
     expect(reloaded.effects).toEqual([]);
     const state = reloaded.state;
-    // an armed prefix returns to Idle and its deadline goes
+    // an armed prefix returns to Idle
     expect(state.armed).toBe(false);
-    expect(state.deadlines.has("prefix")).toBe(false);
     // the old prefix is typed into the pane, the new one arms
     expect(sentToPane(state, key("b", { ctrl: true }))).toBe(1);
     const rearmed = reduce(state, key("a", { ctrl: true })).state;
@@ -83,6 +83,18 @@ describe("the keymap table", () => {
     expect(step.state.locked).toBe(false);
     // the lost chord is also one of the config's notes
     expect(step.state.notices.map((notice) => notice.code)).toEqual(["unlocked", "keys_refused"]);
+  });
+
+  it("drops a binding after the prefix that Escape's cancel always wins over, so matching, mode bar and help agree", () => {
+    const keymap = buildKeymap({ help: ["prefix+?", "prefix+esc"], zoom: "prefix+ctrl+[" });
+    expect(keymap.notes).toEqual([{ code: "cancel_key", action: "help", binding: "prefix+esc" }, { code: "cancel_key", action: "zoom", binding: "prefix+ctrl+[" }]);
+    expect(helpRows(keymap).find((row) => row.action === "help")!.keys).toEqual(["prefix+?"]);
+    expect(helpRows(keymap).find((row) => row.action === "zoom")!.keys).toEqual([]);
+    expect(Object.values(keymap.afterPrefix).some((bound) => bound.action === "zoom")).toBe(false);
+    const armed = reduce(reduce(initialState({ help: ["prefix+?", "prefix+esc"] }), { type: "world", world: WORLD, at: 0 }).state, key("b", { ctrl: true })).state;
+    expect(modeBar(armed).hints.find((hint) => hint.action === "help")!.keys).toEqual(["?"]);
+    const escaped = reduce(armed, { type: "key", key: "ESCAPE", mods: {}, action: "press", at: AT }).state;
+    expect({ armed: escaped.armed, overlays: escaped.overlays }).toEqual({ armed: false, overlays: [] });
   });
 
   it("cleans, clamps and caps the config text it shows", () => {
