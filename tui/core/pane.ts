@@ -23,7 +23,8 @@
  * - Close before attach: a new attach leaves only after the core answered the CLOSE of the one before.
  * - The size is never taken by the screen itself: every attach is a resumed plain viewer, and a RESIZE
  *   (and, on a core without automatic input, FOCUS 1) leaves only directly ahead of the user's own
- *   input in the focused pane, which is the one place called the take.
+ *   input in the focused pane, which is the one place called the take. A repaint leaves the terminal
+ *   at the size it had: it never advertises the size its own CLOSE left behind (size.ts).
  * - Nothing here throws into its caller or into the connection's reader, and no emulator is called
  *   from inside its own callback: what an emulator says during a write is acted on after it returned.
  *
@@ -98,7 +99,7 @@ export interface PaneView {
   /** counts the attaches of this pane */
   gen: number;
   wanted: Size;
-  /** the terminal's real size, which the emulator has */
+  /** the terminal's size as the attach in use was told it, which the emulator has; with no attach in use, the grid of the picture still shown */
   actual: Size | null;
   /** what the attach in use last told the core */
   advertised: Size | null;
@@ -690,21 +691,30 @@ class Pane {
     this.settle();
   }
 
-  /** T14: the core said the terminal's size. The emulator follows at once; a new attach may follow later (size.ts). */
-  sizeEvent(size: Size): void {
+  /** The attach in use: its reply is in, and its stream is the picture the pane draws. Only it is told the terminal's size, and only it is attached again. */
+  private inUse(): Attempt | null {
     const attempt = this.attempt;
-    const now = this.set.now();
-    if (attempt && !attempt.channel) {
-      // the reply is still on its way and will name the size; only an event that came after this stream's first bytes is newer than it
-      this.size = sizeTold(this.size, size, now, false);
-      if (attempt.early.length > 0) attempt.early.push({ size });
+    return attempt?.channel && (this.state.kind === "Painting" || this.state.kind === "Live") ? attempt : null;
+  }
+
+  /**
+   * T14: the core said the terminal's size. On the attach in use the emulator follows at once, and a new attach may follow later
+   * (size.ts). With no attach in use the size is not taken: the reply of the next attach names it. Between the pane's own CLOSE
+   * and its next attach that is what keeps a repaint from changing the terminal: when this screen is the only viewer, the event
+   * names the size the core gives a terminal nobody views, which nobody chose.
+   */
+  sizeEvent(size: Size): void {
+    const attempt = this.inUse();
+    if (!attempt) {
+      // behind the first bytes of an attach whose reply is still on its way, the event is newer than that reply: it waits for it
+      if (this.attempt && !this.attempt.channel && this.attempt.early.length > 0) this.attempt.early.push({ size });
+      // a terminal that could not be drawn at its size has another one now
+      else if (this.state.kind === "Failed" && this.state.code === "size") this.retry();
       return;
     }
-    const attached = attempt !== null && (this.state.kind === "Painting" || this.state.kind === "Live");
     const before = this.size;
-    this.size = sizeTold(this.size, size, now, attached);
-    if (attempt) this.pump(attempt);
-    else if (this.state.kind === "Failed" && this.state.code === "size") this.retry();
+    this.size = sizeTold(before, size, this.set.now());
+    this.pump(attempt);
     if (!sameSize(before.actual, size)) this.set.tell({ type: "state", terminal: this.terminal });
   }
 
@@ -720,8 +730,7 @@ class Pane {
 
   /** A pane attaches again only where a picture is shown and frames may leave: attached, and not under a zoom. */
   private reattach(): number | null {
-    if (this.covered || !this.attempt?.channel || (this.state.kind !== "Painting" && this.state.kind !== "Live")) return null;
-    return reattachDue(this.size);
+    return this.covered || !this.inUse() ? null : reattachDue(this.size);
   }
 
   fire(now: number): void {
@@ -732,7 +741,7 @@ class Pane {
     const reattach = this.reattach();
     if (reattach !== null && now >= reattach) {
       // close, wait for the core's CLOSE, then attach. The size keeps what waits until that attach leaves, which reads from it
-      // whether it carries the rectangle or (after another viewer's resize) only repaints
+      // whether it carries the rectangle or (after another viewer's resize) only repaints, at the size the terminal has now
       this.abandon();
       this.toIdle();
     }

@@ -6,7 +6,7 @@ import { FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA } from "../../server/herdr-core/c
 import { CREDIT_WINDOW, type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17 } from "../../server/herdr-core/core.fake.ts";
 import { createEmulator } from "../emulator/ghostty.ts";
 import { PAINT_QUIET_MS, PANE_REOPEN_LIMIT, REATTACH_SETTLE_MS } from "../model/deadlines.ts";
-import { picture, type Screen, Stage } from "../testing/pane-harness.ts";
+import { PASS_BUDGET, picture, type Screen, Stage } from "../testing/pane-harness.ts";
 import type { InputResult } from "./pane.ts";
 
 // The pane attach machine on the fake core, with the real link and real emulators. The first block
@@ -282,7 +282,14 @@ describe("the pane attach machine", () => {
     // nothing is credited after our CLOSE
     core.program(t).output("z".repeat(50_000));
     await stage.settle();
+    expect(screen.view(t).owed).toBe(50_000);
+    // while the core's answer to it is still out, a frame pass asks the closed channel for nothing (the connection would drop it before the wire)
+    screen.faults.holdCloses = true;
     screen.show();
+    expect(screen.panes.credit(t, PASS_BUDGET)).toBe(0);
+    await stage.pass();
+    expect(screen.calls.slice(screen.calls.findIndex((call) => call.op === "close")).map((call) => call.text)).toEqual(["CLOSE"]);
+    screen.release();
     await stage.settle();
     const frames = core.log.flatMap((entry) => entry.what === "frame" && entry.from === "viewer" ? [entry] : []);
     const closed = frames.findIndex((entry) => entry.kind === FRAME_CLOSE && entry.terminal === t);

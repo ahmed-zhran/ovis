@@ -3,6 +3,7 @@ import { FRAME_CLOSE, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE } from 
 import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../../server/herdr-core/core.fake.ts";
 import { REATTACH_SETTLE_MS } from "../model/deadlines.ts";
 import { type Screen, Stage } from "../testing/pane-harness.ts";
+import type { PaneView } from "./pane.ts";
 import { attachSent, attachSize, clipTop, detached, newPaneSize, type PaneSize, reattachDue, rectangleChanged, replied, sizedBy, sizeTold, took } from "./size.ts";
 
 // The size rules of the pane machine on the fake core, which carries herdr-core's own size rule as
@@ -33,6 +34,16 @@ const traffic = (core: FakeHcCore) => ({
   resizes: core.log.filter((entry) => entry.what === "frame" && entry.from === "viewer" && entry.kind === FRAME_RESIZE).length,
   sizes: core.log.filter((entry) => entry.what === "event" && entry.type === "size").length,
 });
+/** the sizes a screen's attaches of `terminal` advertised, in order */
+const asked = (screen: Screen, terminal: string) => screen.asked(terminal).map((params) => `${String(params["cols"])}x${String(params["rows"])}`);
+/** ten deadline steps with a frame pass each: what a screen does when it is left alone */
+const rest = async (stage: Stage, seen?: () => void) => {
+  for (let step = 0; step < 10; step++) {
+    await stage.advance(REATTACH_SETTLE_MS);
+    await stage.pass();
+    seen?.();
+  }
+};
 
 describe("the size rules of a pane", () => {
   it("attach never stamps", async () => {
@@ -448,16 +459,6 @@ describe("the size rules of a pane", () => {
 });
 
 describe("a pane forgets what no longer waits", () => {
-  const asked = (screen: Screen, terminal: string) => screen.asked(terminal).map((params) => `${String(params["cols"])}x${String(params["rows"])}`);
-  /** ten deadline steps with a frame pass each: what a screen does when it is left alone */
-  const rest = async (stage: Stage, seen?: () => void) => {
-    for (let step = 0; step < 10; step++) {
-      await stage.advance(REATTACH_SETTLE_MS);
-      await stage.pass();
-      seen?.();
-    }
-  };
-
   it("a rectangle that came back inside the wait leaves nothing behind", async () => {
     for (const options of [{}, OLD]) {
       const { core, stage, screen, t } = await scene(options);
@@ -627,6 +628,182 @@ describe("a pane forgets what no longer waits", () => {
   });
 });
 
+// A repaint never changes the terminal's size, and one that has nothing to repaint is not made. The size of a terminal nobody
+// views (HEADLESS, 200x120) is what the pane's own CLOSE leaves behind when this screen is the only viewer: nobody chose it, so a
+// pane never advertises it, keeps it or shows it.
+describe("a repaint changes no terminal's size", () => {
+  const headless = `${HEADLESS.cols}x${HEADLESS.rows}`;
+  const big = { cols: 120, rows: 40 };
+  /** what a screen left alone does over ten deadline steps: the attaches the core saw, the terminal's size and its viewers, per step */
+  const alone = async (stage: Stage, core: FakeHcCore, terminal: string) => {
+    const seen: string[] = [];
+    await rest(stage, () => seen.push(`${traffic(core).attaches}/${core.size(terminal)}/${core.viewers(terminal).length}`));
+    return seen;
+  };
+  const sizes = (view: PaneView) => [view.actual, view.advertised, view.sizedBy];
+  /** the user's next input is where a pane left alone gets its rectangle back: RESIZE first, no attach */
+  const takesBack = async (stage: Stage, core: FakeHcCore, screen: Screen, terminal: string, focusFirst: boolean) => {
+    const attaches = screen.attaches.length;
+    expect(screen.type("k")).toEqual([{ sent: true }]);
+    await stage.settle();
+    await rest(stage);
+    expect(screen.sent(terminal, SIZE_FRAMES)).toEqual(["RESIZE 80x24", ...(focusFirst ? ["FOCUS 1"] : []), "DATA 6b"]);
+    expect([core.size(terminal), screen.view(terminal).sizedBy, screen.attaches.length - attaches]).toEqual(["80x24", null, 0]);
+  };
+
+  it("the other viewer took the pane's own size and left: nothing is repainted, and the terminal keeps what this attach advertises", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      await stage.live(screen, [t, 80, 24]);
+      // another client drives the terminal at 120x40: the pane repaints once and advertises that size
+      const rival = stage.rival();
+      await rival.attach(t, 120, 40);
+      await stage.settle();
+      await rest(stage);
+      expect(asked(screen, t)).toEqual(["80x24", "120x40"]);
+      // it takes the pane's own size: nothing to repaint
+      rival.resize(80, 24);
+      await stage.settle();
+      await rest(stage);
+      // it leaves: the core hands the terminal to the one viewer left, at the 120x40 its attach advertises
+      await rival.detach();
+      await stage.settle();
+      expect(await alone(stage, core, t)).toEqual(Array(10).fill("3/120x40/1"));
+      expect([asked(screen, t), core.events(t, "size")]).toEqual([["80x24", "120x40"], ["size 80x24", "size 120x40", "size 80x24", "size 120x40"]]);
+      expect([core.events(t, "size").includes(`size ${headless}`), screen.sent(t, SIZE_FRAMES)]).toEqual([false, []]);
+      // drawn clipped at the size the other viewer chose, until the user types here
+      expect([screen.state(t), ...sizes(screen.view(t))]).toEqual(["Live", big, big, big]);
+      await takesBack(stage, core, screen, t, "version" in options);
+    }
+  });
+
+  it("two idle screens, one takes the other's size and leaves: the one left repaints nothing", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen: a, t } = await scene(options);
+      const b = await stage.screen();
+      b.panes.focus(t);
+      await stage.live(a, [t, 80, 24]);
+      await stage.live(b, [t, 120, 40]);
+      await rest(stage);
+      // the second screen's window becomes 80x24, then it leaves the tab
+      b.show([t, 80, 24]);
+      await rest(stage);
+      expect([asked(a, t), asked(b, t), core.size(t)]).toEqual([["80x24", "120x40"], ["120x40", "80x24"], "80x24"]);
+      b.show();
+      await stage.settle();
+      expect(await alone(stage, core, t)).toEqual(Array(10).fill("4/120x40/1"));
+      expect([asked(a, t), core.events(t, "size")]).toEqual([["80x24", "120x40"], ["size 80x24", "size 120x40", "size 80x24", "size 120x40"]]);
+      expect([a.state(t), ...sizes(a.view(t))]).toEqual(["Live", big, big, big]);
+      await takesBack(stage, core, a, t, "version" in options);
+    }
+  });
+
+  it("the other viewer resized and left while the pane was under a zoom: nothing waits when the zoom ends", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      await stage.live(screen, [t, 80, 24]);
+      const rival = stage.rival();
+      await rival.attach(t, 120, 40);
+      await stage.settle();
+      await rest(stage);
+      expect(asked(screen, t)).toEqual(["80x24", "120x40"]);
+      screen.show([t, 80, 24, true]);
+      rival.resize(100, 30);
+      await stage.settle();
+      await stage.advance(2 * REATTACH_SETTLE_MS);
+      await rival.detach();
+      await stage.settle();
+      await stage.advance(2 * REATTACH_SETTLE_MS);
+      screen.show([t, 80, 24]);
+      expect(await alone(stage, core, t)).toEqual(Array(10).fill("3/120x40/1"));
+      expect([asked(screen, t), core.events(t, "size")]).toEqual([["80x24", "120x40"], ["size 80x24", "size 120x40", "size 100x30", "size 120x40"]]);
+      expect([screen.state(t), ...sizes(screen.view(t))]).toEqual(["Live", big, big, big]);
+      await takesBack(stage, core, screen, t, "version" in options);
+    }
+  });
+
+  it("a repaint by the only viewer left puts the terminal back where it was when the repaint was decided", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      await stage.live(screen, [t, 80, 24]);
+      const rival = stage.rival();
+      await rival.attach(t, 120, 40);
+      await stage.settle();
+      // the repaint is decided at 120x40; the other viewer leaves before the core's answer to the pane's CLOSE is in
+      screen.faults.holdCloses = true;
+      await stage.advance(REATTACH_SETTLE_MS);
+      expect([screen.state(t), core.size(t)]).toEqual(["Closing", "120x40"]);
+      await rival.detach();
+      await stage.settle();
+      // nobody views the terminal: that size is neither kept nor shown
+      expect([core.size(t), core.viewers(t).length, ...sizes(screen.view(t))]).toEqual([headless, 0, big, { cols: 80, rows: 24 }, big]);
+      screen.release();
+      await stage.settle();
+      await stage.pass();
+      expect(await alone(stage, core, t)).toEqual(Array(10).fill("3/120x40/1"));
+      expect([asked(screen, t), core.events(t, "size")]).toEqual([["80x24", "120x40"], ["size 80x24", "size 120x40", `size ${headless}`, "size 120x40"]]);
+      expect([screen.state(t), ...sizes(screen.view(t)), screen.sent(t, SIZE_FRAMES)]).toEqual(["Live", big, big, big, []]);
+      await takesBack(stage, core, screen, t, "version" in options);
+    }
+  });
+
+  it("a window resize by the only viewer passes the terminal through the size nobody chose, and the pane never shows it", async () => {
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    screen.faults.holdCloses = true;
+    screen.show([t, 90, 30]);
+    await stage.advance(REATTACH_SETTLE_MS);
+    // between the pane's CLOSE and its attach nobody views the terminal; the pane keeps the size of the picture it still shows
+    expect([screen.state(t), core.size(t), screen.view(t).actual, screen.view(t).sizedBy]).toEqual(["Closing", headless, { cols: 80, rows: 24 }, { cols: 80, rows: 24 }]);
+    screen.release();
+    await stage.settle();
+    await stage.pass();
+    expect([screen.state(t), asked(screen, t), core.size(t), screen.view(t).sizedBy]).toEqual(["Live", ["80x24", "90x30"], "90x30", null]);
+    // what it costs: the program is resized twice for the one window resize
+    expect(core.program(t).sizes.slice(-3)).toEqual(["80x24", headless, "90x30"]);
+    await rest(stage);
+    expect(asked(screen, t)).toEqual(["80x24", "90x30"]);
+  });
+
+  it("a size event behind the first bytes of an attach is newer than its reply, and the pane takes it", async () => {
+    const { core, stage, screen, t } = await scene();
+    const rival = stage.rival();
+    await rival.attach(t, 120, 40);
+    screen.faults.holdReplies = true;
+    screen.show([t, 80, 24]);
+    await stage.settle();
+    // the reply, which says 120x40, is still out and the first paint is in when the other viewer resizes
+    expect([screen.state(t), screen.attaches[0]!.reply, screen.attaches[0]!.received.length > 0]).toEqual(["Opening", "120x40", true]);
+    rival.resize(100, 30);
+    await stage.settle();
+    screen.release();
+    await stage.settle();
+    await stage.pass();
+    expect([screen.state(t), screen.view(t).actual, core.size(t)]).toEqual(["Live", { cols: 100, rows: 30 }, "100x30"]);
+    // the first paint was drawn for 120x40: one repaint at the size the terminal has now
+    await rest(stage);
+    expect([asked(screen, t), screen.emulators.at(-1)!.cols, core.size(t)]).toEqual([["80x24", "100x30"], 100, "100x30"]);
+  });
+
+  it("the size a pane's own CLOSE left behind is not advertised when it is heard after the core's answer either", async () => {
+    const { core, stage, screen, t } = await scene();
+    await stage.live(screen, [t, 80, 24]);
+    const rival = stage.rival();
+    await rival.attach(t, 120, 40);
+    await stage.settle();
+    // the repaint's attach is on its way (its emulator is being made) when a `size` event names the size of a terminal nobody views
+    let told = 0;
+    screen.hooks.notice = () => {
+      if (screen.state(t) !== "Opening" || screen.attaches.length !== 1 || told++ > 0) return;
+      screen.panes.notice({ type: "event", epoch: 1, seq: null, event: { type: "size", terminal: t, data: { ...HEADLESS } }, changes: [] });
+    };
+    await stage.advance(REATTACH_SETTLE_MS);
+    await stage.pass();
+    expect(told).toBeGreaterThan(0);
+    expect([screen.state(t), asked(screen, t), core.size(t), ...sizes(screen.view(t))]).toEqual(["Live", ["80x24", "120x40"], "120x40", big, big, big]);
+  });
+});
+
 describe("the size rules as values", () => {
   const at = (size: PaneSize) => reattachDue(size);
   const attached = (wanted: { cols: number; rows: number }, actual = wanted) => replied(attachSent(newPaneSize(wanted), wanted), actual);
@@ -649,41 +826,51 @@ describe("the size rules as values", () => {
   });
 
   it("another viewer's size event waits from the last one and repaints at the terminal's own size", () => {
-    const one = sizeTold(attached(A), B, 2000, true);
-    const two = sizeTold(one, C, 2100, true);
+    const one = sizeTold(attached(A), B, 2000);
+    const two = sizeTold(one, C, 2100);
     expect([at(one), at(two), attachSize(two), attachSize(attached(A, B))]).toEqual([2150, 2250, C, A]);
-    // an event before the reply, and one that brings the size back, make nothing wait
-    expect([at(sizeTold(attached(A), B, 2000, false)), at(sizeTold(two, A, 2200, true))]).toEqual([null, null]);
+    // an event that brings the size back makes nothing wait
+    expect(at(sizeTold(two, A, 2200))).toBeNull();
     const repainted = replied(attachSent(two, C), C);
     expect([at(repainted), repainted.advertised, sizedBy(repainted)]).toEqual([null, C, C]);
   });
 
+  it("nothing is repainted when the terminal comes to the size this attach advertises", () => {
+    // the pane repainted at B for another viewer, which then took the pane's own size and left: the core fell back to B
+    const repainted = replied(attachSent(sizeTold(attached(A), B, 1000), B), B);
+    const back = sizeTold(sizeTold(repainted, A, 2000), B, 3000);
+    expect([at(back), back.foreignAt, back.actual, sizedBy(back)]).toEqual([null, null, B, B]);
+    // any other size still waits, and coming back to the advertised one inside the wait undoes it
+    const away = sizeTold(repainted, C, 4000);
+    expect([at(away), attachSize(away), at(sizeTold(away, B, 4050))]).toEqual([4150, C, null]);
+  });
+
   it("both causes at once make one attach, with the rectangle; the take ends the wait", () => {
-    const both = rectangleChanged(sizeTold(attached(A), B, 3000, true), C, 3050);
+    const both = rectangleChanged(sizeTold(attached(A), B, 3000), C, 3050);
     expect([at(both), attachSize(both)]).toEqual([3200, C]);
     // the user's input ends both waits at once; a later size event of another viewer starts a new one
     const taken = took(both);
-    expect([taken.advertised, at(taken), at(sizeTold(taken, C, 3060, true))]).toEqual([C, null, null]);
-    expect(at(sizeTold(taken, B, 3070, true))).toEqual(3220);
+    expect([taken.advertised, at(taken), at(sizeTold(taken, C, 3060))]).toEqual([C, null, null]);
+    expect(at(sizeTold(taken, B, 3070))).toEqual(3220);
   });
 
   it("what was told, cancelled or ended no longer waits", () => {
     // the rectangle changed and came back inside the wait; later another viewer resized, and the pane repainted
     const flickered = rectangleChanged(rectangleChanged(attached(A), C, 1000), A, 1050);
-    const repainted = replied(attachSent(sizeTold(flickered, B, 2000, true), B), B);
+    const repainted = replied(attachSent(sizeTold(flickered, B, 2000), B), B);
     expect([at(flickered), flickered.ownAt, at(repainted), repainted.ownAt]).toEqual([null, null, null, null]);
     // the take told the core the rectangle: the same later resize makes one repaint, and nothing after it
     const taken = took(rectangleChanged(attached(A), C, 1000));
-    const afterTake = replied(attachSent(sizeTold(taken, B, 6000, true), B), B);
-    expect([taken.ownAt, at(sizeTold(taken, B, 6000, true)), at(afterTake)]).toEqual([null, 6150, null]);
+    const afterTake = replied(attachSent(sizeTold(taken, B, 6000), B), B);
+    expect([taken.ownAt, at(sizeTold(taken, B, 6000)), at(afterTake)]).toEqual([null, 6150, null]);
     // a size event that a later one undid, then a rectangle the channel already advertises
-    const undone = sizeTold(sizeTold(repainted, C, 7000, true), A, 7050, true);
+    const undone = sizeTold(sizeTold(repainted, C, 7000), A, 7050);
     expect([undone.foreignAt, at(undone), at(rectangleChanged(undone, B, 9000))]).toEqual([null, null, null]);
     // a rectangle that becomes the terminal's own size owes no repaint any more
-    expect(at(rectangleChanged(sizeTold(attached(A), B, 1000, true), B, 1020))).toEqual(1170);
-    expect(rectangleChanged(sizeTold(attached(A), B, 1000, true), B, 1020).foreignAt).toBeNull();
+    expect(at(rectangleChanged(sizeTold(attached(A), B, 1000), B, 1020))).toEqual(1170);
+    expect(rectangleChanged(sizeTold(attached(A), B, 1000), B, 1020).foreignAt).toBeNull();
     // an attach that ended takes its waits with it: the next one starts from the rectangle
-    const ended = detached(rectangleChanged(sizeTold(attached(A), B, 1000, true), C, 1010));
+    const ended = detached(rectangleChanged(sizeTold(attached(A), B, 1000), C, 1010));
     expect([ended.ownAt, ended.foreignAt, ended.advertised, at(ended), attachSize(ended), at(rectangleChanged(ended, A, 2000))]).toEqual([null, null, null, null, C, null]);
   });
 

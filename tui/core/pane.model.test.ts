@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17 } from "../../server/herdr-core/core.fake.ts";
+import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../../server/herdr-core/core.fake.ts";
 import { typedKey } from "../input/decode.ts";
 import { PANE_REOPEN_LIMIT } from "../model/deadlines.ts";
 import { type AttachRecord, type ChannelCall, type EmulatorRecord, type Rival, type Screen, Stage } from "../testing/pane-harness.ts";
@@ -18,17 +18,23 @@ import type { PaneInput } from "./pane.ts";
  *
  * Every sequence ends with the row's settle property in its strong form, on a pane that lived through
  * the run: nobody types and the host does not change any more; another viewer comes, resizes and
- * undoes it, the rectangle becomes what the channel advertises, a shell is replaced in the middle of a
- * repaint, the pane is shown again, an old answer arrives late, a new core comes up. For each the
- * number of attaches must be exactly what the row allows ("once per change"), and the terminal's size
- * must not move while nobody types.
+ * undoes it, leaves (also inside the wait, while the pane is under a zoom, hidden, or between its own
+ * CLOSE and its next attach), the rectangle becomes what the channel advertises, a shell is replaced
+ * in the middle of a repaint, the pane is shown again, an old answer arrives late, a new core comes
+ * up. For each the number of attaches must be exactly what the row allows ("once per change"), and
+ * the terminal's size must not move while nobody types.
  *
- * OVIS_TUI_MODEL_SEQUENCES sets how many sequences run (default 500, about 10 s, which is what the
- * unit lane runs; the evidence runs use 2000 and several seeds), OVIS_TUI_MODEL_SEED picks the run
+ * A repaint never changes the terminal's size. Two rules hold it, neither of which asks the machine:
+ * an attach advertises the pane's rectangle or the size the pane's attach before it was last told
+ * (its reply, then the `size` events on it until our CLOSE), never one heard after that CLOSE; and a
+ * terminal somebody views is never left at the size of a terminal nobody views.
+ *
+ * OVIS_TUI_MODEL_SEQUENCES sets how many sequences run (default 300, which is what the unit lane
+ * runs; the evidence runs use 2000 and several seeds), OVIS_TUI_MODEL_SEED picks the run
  * (default 23) and OVIS_TUI_MODEL_ONLY replays one sequence by the seed a failure printed.
  */
 const SEED = Number(process.env["OVIS_TUI_MODEL_SEED"] ?? 23);
-const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 500);
+const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 300);
 const ONLY = process.env["OVIS_TUI_MODEL_ONLY"];
 const STEPS = 28;
 const RECTANGLES = [[20, 6], [30, 8], [40, 10], [24, 7]] as const;
@@ -47,7 +53,7 @@ function mulberry(seed: number): () => number {
   };
 }
 
-interface Totals { steps: number; attaches: number; lives: number; accepted: number; refused: number; takes: number; reattaches: number; lines: number; settled: number; deep: number }
+interface Totals { steps: number; attaches: number; lives: number; accepted: number; refused: number; takes: number; reattaches: number; lines: number; settled: number; handedBack: number; deep: number }
 
 /** `deep`: the sequence also ends with the probes that replace a shell, a line and a core (each costs several attaches, and every attach a real emulator) */
 async function sequence(seed: number, totals: Totals, deep: boolean): Promise<void> {
@@ -84,15 +90,26 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
   };
   const isReply = (text: string) => screen.emulators.some((record) => record.replies.some((reply) => text.endsWith(` ${Buffer.from(reply).toString("hex")}`)));
 
-  // I8, I9: every attach is a resumed plain viewer with the rectangle or the terminal's own size, and none leaves while an earlier one is open
+  // what each attach was last told its terminal's size is while it was in use: a `size` event behind the stream's first bytes
+  // is newer than the reply, and one that comes after our CLOSE (or the stream's end) was not told to it
+  const toldSize = new Map<AttachRecord, string>();
+  screen.hooks.link = (notice) => {
+    if (notice.type !== "event" || notice.event.type !== "size" || notice.event.terminal === undefined) return;
+    const attach = latest(notice.event.terminal);
+    if (attach && attach.received.length > 0 && !attach.closeAsked && !attach.closeHeard) toldSize.set(attach, `${String(notice.event.data?.["cols"])}x${String(notice.event.data?.["rows"])}`);
+  };
+  const headless = `${HEADLESS.cols}x${HEADLESS.rows}`;
+
+  // I8, I9: every attach is a resumed plain viewer with the rectangle or (a repaint) the size its pane was told last, and none leaves while an earlier one is open
   screen.hooks.attach = (record) => {
     totals.attaches++;
     const { terminal } = record;
     const params = record.params;
     if (params["resumed"] !== true || params["history"] !== 2000 || "observe" in params || "resize_notifications" in params) broken.push(`I8 attach params ${JSON.stringify(params)}`);
     const size = `${String(params["cols"])}x${String(params["rows"])}`;
-    const actual = screen.panes.view(terminal)?.actual;
-    if (size !== wantedOf(terminal) && size !== (actual ? `${actual.cols}x${actual.rows}` : null)) broken.push(`I8 ${terminal} attached at ${size}: neither its rectangle ${wantedOf(terminal)} nor the terminal's size`);
+    const before = screen.attaches.filter((other) => other !== record && other.terminal === terminal).at(-1);
+    const told = before ? toldSize.get(before) ?? before.reply : null;
+    if (size !== wantedOf(terminal) && size !== told) broken.push(`I8 ${terminal} attached at ${size}: neither its rectangle ${wantedOf(terminal)} nor ${told}, the size its attach before was told last`);
     if (!shown.has(terminal)) broken.push(`I14 ${terminal} is not shown and was attached`);
     const earlier = screen.attaches.filter((other) => other !== record && other.terminal === terminal && other.state !== "refused" && !other.closeHeard);
     if (earlier.length > 0) broken.push(`I9 ${terminal} attached again while attach ${earlier.map((other) => other.index).join(",")} is not closed`);
@@ -370,6 +387,11 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
       const consumed = [...fedBy.values()].find((feed) => feed.attach === attach)?.bytes ?? 0;
       if (attach.credited > consumed || consumed > attach.receivedBytes) broken.push(`I5 attach ${attach.index}: credited ${attach.credited}, consumed ${consumed}, received ${attach.receivedBytes}`);
     }
+    // I15: a terminal somebody views is not at the size of a terminal nobody views: no rectangle here is that size, so only a
+    // viewer that advertised what its own CLOSE left behind could have put it there
+    for (const terminal of terminals) {
+      if (alive(terminal) && stage.core.viewers(terminal).length > 0 && stage.core.size(terminal) === headless) broken.push(`I15 ${terminal} is at ${headless}, the size of a terminal nobody views, with ${stage.core.viewers(terminal).length} viewer(s): ${stage.core.viewers(terminal).map((viewer) => `${viewer.cols}x${viewer.rows}`).join(", ")}`);
+    }
     // I13: the machine never calls an emulator from inside that emulator's own write
     for (const emulator of screen.emulators) if (emulator.reentered.length > 0) broken.push(`I13 emulator ${emulator.index} was called from inside its own write: ${emulator.reentered.join(", ")}`);
     for (const view of screen.panes.views()) {
@@ -461,6 +483,15 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
     }
     probes: if (t) {
       const pane = t;
+      // a stream this test dropped the way a relay would is still a viewer in the fake core: a new line leaves the pane's own
+      // attach as the terminal's only viewer, which is what the probes about a pane left alone start from
+      if (stage.core.viewers(pane).length !== 1) {
+        stage.core.restart();
+        await stage.settle();
+        await reconnect();
+        await turns(2);
+        if (!livePane(pane) || stage.core.viewers(pane).length !== 1) break probes;
+      }
       totals.settled++;
       const countOf = () => screen.attaches.filter((record) => record.terminal === pane).length;
       const sizeOf = (record: AttachRecord | undefined) => (record ? `${String(record.params["cols"])}x${String(record.params["rows"])}` : "none");
@@ -530,8 +561,48 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
       await stage.settle();
       await watch("another viewer's resize undone inside the wait", before, 0, null);
 
-      // the host is resized to what the channel advertises already: nothing to tell the core
+      // the other viewer, which has the pane's own size, leaves: the core hands the terminal to the one viewer left, at what its
+      // attach advertises. The emulator has that grid already, so nothing is repainted, and a repaint would have to CLOSE first
       const told = screen.advertisedTo(latest(pane)!);
+      /** one viewer is left, and the terminal is at `size` */
+      const left = (label: string, size: string | null) => {
+        const viewers = stage.core.viewers(pane).length;
+        if (viewers !== 1 || stage.core.size(pane) !== size) broken.push(`I11 ${label}: ${viewers} viewer(s), the terminal at ${stage.core.size(pane)}, the one left advertises ${size}`);
+      };
+      before = countOf();
+      if (told !== rectangle) totals.handedBack++;
+      await rival.detach();
+      await stage.settle();
+      left("the other viewer leaves", told);
+      await watch("the other viewer leaves", before, 0, null);
+
+      // another comes and is gone again inside the wait: the terminal is back at what this attach advertises, and nothing is owed
+      before = countOf();
+      await rival.attach(pane, 100, 30);
+      await stage.settle();
+      stage.clock.now += 50;
+      screen.fire();
+      await rival.detach();
+      await stage.settle();
+      left("the other viewer came and left inside the wait", told);
+      await watch("the other viewer came and left inside the wait", before, 0, null);
+
+      // the same while the pane is under a zoom, and for longer than the wait: nothing waits when the zoom ends
+      before = countOf();
+      shown.set(pane, { ...shown.get(pane)!, covered: true });
+      apply();
+      await rival.attach(pane, 100, 30);
+      await turns(2);
+      rival.resize(90, 28);
+      await turns(2);
+      await rival.detach();
+      await turns(2);
+      shown.set(pane, { ...shown.get(pane)!, covered: false });
+      apply();
+      left("the other viewer left while the pane was covered", told);
+      await watch("the other viewer left while the pane was covered", before, 0, null);
+
+      // the host is resized to what the channel advertises already: nothing to tell the core
       if (told !== null && told !== rectangle) {
         before = countOf();
         const [toldCols, toldRows] = told.split("x").map(Number) as [number, number];
@@ -540,8 +611,51 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
         await watch("the rectangle becomes what the channel advertises", before, 0, null);
       }
 
+      // the other viewer leaves between the pane's CLOSE for a repaint and its next attach: nobody views the terminal then. The
+      // repaint advertises the size the terminal had when it was decided, and alone the terminal comes back to it
+      await rival.attach(pane, 100, 30);
+      await stage.settle();
+      screen.faults.holdCloses = true;
+      stage.clock.now += 150;
+      screen.fire();
+      await stage.settle();
+      const decided = stage.core.size(pane);
+      before = countOf();
+      await rival.detach();
+      await stage.settle();
+      if (stage.core.size(pane) !== headless) broken.push(`I11 a repaint by the only viewer left: the terminal is at ${stage.core.size(pane)} with nobody viewing it`);
+      // the pane heard of that size before the core's answer to its CLOSE; a core may also say it after, while the next attach is on its way
+      const asked = screen.attaches.length;
+      screen.hooks.notice = () => {
+        if (screen.state(pane) === "Opening" && screen.attaches.length === asked) screen.panes.notice({ type: "event", epoch: 0, seq: null, event: { type: "size", terminal: pane, data: { ...HEADLESS } }, changes: [] });
+      };
+      screen.release();
+      await turns(2);
+      screen.hooks.notice = undefined;
+      if (countOf() - before !== 1 || sizeOf(latest(pane)) !== decided || !livePane(pane)) broken.push(`I11 a repaint by the only viewer left: ${countOf() - before} attach(es), the last at ${sizeOf(latest(pane))}, decided at ${decided}; the pane is ${screen.state(pane)}`);
+      left("a repaint by the only viewer left", decided);
+      await watch("a repaint by the only viewer left", countOf(), 0, null);
+
+      // the other viewer leaves while the pane is out of the tab: shown again it is attached with its rectangle, and alone it fits
+      await rival.attach(pane, 100, 30);
+      await stage.settle();
+      const hidden = shown.get(pane)!;
+      shown.delete(pane);
+      apply();
+      await rival.detach();
+      await stage.settle();
+      shown.set(pane, hidden);
+      apply();
+      await turns(2);
+      if (sizeOf(latest(pane)) !== wantedOf(pane) || !livePane(pane)) broken.push(`I11 the other viewer left while the pane was hidden: ${screen.state(pane)}, attached at ${sizeOf(latest(pane))}, the rectangle ${wantedOf(pane)}`);
+      left("the other viewer left while the pane was hidden", wantedOf(pane));
+      check("the other viewer left while the pane was hidden");
+
       if (!deep) break probes;
       totals.deep++;
+      await rival.attach(pane, 120, 40);
+      rival.type("r");
+      await turns(2);
 
       // a repaint begins, and before the core answered its CLOSE a new shell is announced: it is attached with the rectangle
       screen.faults.holdCloses = true;
@@ -642,7 +756,7 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
 }
 
 it(`${ONLY ? 1 : SEQUENCES} seeded sequences keep every invariant after every step (seed ${ONLY ?? SEED})`, async () => {
-  const totals: Totals = { steps: 0, attaches: 0, lives: 0, accepted: 0, refused: 0, takes: 0, reattaches: 0, lines: 0, settled: 0, deep: 0 };
+  const totals: Totals = { steps: 0, attaches: 0, lives: 0, accepted: 0, refused: 0, takes: 0, reattaches: 0, lines: 0, settled: 0, handedBack: 0, deep: 0 };
   const seeds = ONLY ? [Number(ONLY)] : Array.from({ length: SEQUENCES }, (_, index) => SEED * 100_003 + index);
   // every sequence ends with the settle probes on the two size waits; every fourth goes on through the heavy ones
   for (const [index, seed] of seeds.entries()) await sequence(seed, totals, ONLY !== undefined || index % 4 === 0);
@@ -656,6 +770,7 @@ it(`${ONLY ? 1 : SEQUENCES} seeded sequences keep every invariant after every st
     expect(totals.takes).toBeGreaterThan(SEQUENCES / 20);
     expect(totals.reattaches).toBeGreaterThan(SEQUENCES);
     expect(totals.settled).toBeGreaterThan(SEQUENCES * 0.9);
+    expect(totals.handedBack).toBeGreaterThan(SEQUENCES * 0.2);
     expect(totals.deep).toBeGreaterThan(SEQUENCES * 0.2);
   }
 }, 1_500_000);

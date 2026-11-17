@@ -12,7 +12,8 @@ import { picture, type Screen, Stage } from "../testing/pane-harness.ts";
 /**
  * The pane machine against a real hc, in cores of the test's own (IsolatedCore): a pane attaches to a
  * terminal that runs a program, shows its output, hands it what is typed exactly once and in order
- * while it prints, follows the size rules beside another viewer, sends no answer of its own to a
+ * while it prints, follows the size rules beside another viewer and after that viewer left (no
+ * repaint leaves the terminal at the size of a terminal nobody views), sends no answer of its own to a
  * query the core answers, refuses everything typed once its core is stopped, and attaches again in a
  * new epoch on the next core at the same socket with none of it sent. Runs only where
  * OVIS_TEST_HC_BIN names an hc.
@@ -112,6 +113,17 @@ describe.skipIf(!bin || process.platform === "win32")("the pane machine against 
       const record = await screen.link.call("terminal.get", { terminal });
       return `${record.cols}x${record.rows}`;
     };
+    /** the terminal's size at each of six deadline steps with nobody typing */
+    const idle = async (terminal: string) => {
+      const seen: string[] = [];
+      for (let step = 0; step < 6; step++) {
+        await stage!.advance(REATTACH_SETTLE_MS);
+        screen.pass({ live: false });
+        await stage!.settle();
+        seen.push(await size(terminal));
+      }
+      return seen;
+    };
     const live = async (terminal: string) => {
       await until(`${terminal}'s first paint`, () => screen.panes.view(terminal)?.ready === true);
       screen.pass();
@@ -184,13 +196,39 @@ describe.skipIf(!bin || process.platform === "win32")("the pane machine against 
     expect(screen.asked(t).at(-1)).toEqual({ terminal: t, cols: 120, rows: 40, history: 2000, resumed: true });
     expect([await size(t), screen.view(t).sizedBy, screen.view(t).advertised]).toEqual(["120x40", { cols: 120, rows: 40 }, { cols: 120, rows: 40 }]);
     expect(frames(t).filter((frame) => frame.startsWith("RESIZE"))).toEqual([]);
+
+    // that client takes the pane's own size and leaves: the core hands the terminal to the one viewer left, at the 120x40 its
+    // attach advertises. Nothing is repainted: a repaint closes first, which would leave the terminal with nobody, at 200x120
+    theirs.resize(100, 30);
+    await until("the pane's own size from the other viewer", () => screen.view(t).actual?.cols === 100);
+    await stage.advance(REATTACH_SETTLE_MS);
+    await theirs.close();
+    await until("the terminal back at what the pane's attach advertises", () => screen.view(t).actual?.cols === 120);
+    expect(await idle(t)).toEqual(Array(6).fill("120x40"));
+    expect([screen.attaches.length, screen.state(t), screen.view(t).sizedBy, frames(t).filter((frame) => frame.startsWith("RESIZE"))]).toEqual([3, "Live", { cols: 120, rows: 40 }, []]);
+
+    // a repaint by the only viewer left: another client sizes the terminal, the repaint is decided, and that client is gone
+    // before the pane's next attach. Nobody views the terminal then; the attach asks for the size the repaint was decided at
+    const other: Channel = (await browser.open("terminal.attach", { terminal: t, cols: 90, rows: 28 }, { onData: () => {}, onClose: () => {} })).channel;
+    await until("the second client's size at the pane", () => screen.view(t).actual?.cols === 90);
+    screen.faults.holdCloses = true;
+    await stage.advance(REATTACH_SETTLE_MS);
+    expect(screen.state(t)).toBe("Closing");
+    await other.close();
+    await stage.settle();
+    expect([await size(t), screen.view(t).actual, screen.view(t).sizedBy]).toEqual(["200x120", { cols: 90, rows: 28 }, { cols: 90, rows: 28 }]);
+    screen.release();
+    await live(t);
+    expect(screen.asked(t).at(-1)).toEqual({ terminal: t, cols: 90, rows: 28, history: 2000, resumed: true });
+    expect(await idle(t)).toEqual(Array(6).fill("90x28"));
+    expect([screen.attaches.length, screen.state(t), screen.view(t).sizedBy, frames(t).filter((frame) => frame.startsWith("RESIZE"))]).toEqual([4, "Live", { cols: 90, rows: 28 }, []]);
+
     // the user's own key takes it back: the rectangle first, then the key
     const before = frames(t).length;
     expect(screen.type("k")).toEqual([{ sent: true }]);
     expect(frames(t).slice(before)).toEqual(["RESIZE 100x30", ...(automatic ? [] : ["FOCUS 1"]), "DATA 6b"]);
     await until("the terminal back at the pane's rectangle", () => screen.view(t).actual?.cols === 100 && screen.view(t).sizedBy === null);
     expect(await size(t)).toBe("100x30");
-    await theirs.close();
     await until("everything typed at the program, the last key too", () => read("one.log").replace(DA_REPLY, "").endsWith("zk"));
     expect(read("one.log").replace(DA_REPLY, "")).toBe(`@!${typed}zk`);
 
@@ -225,7 +263,7 @@ describe.skipIf(!bin || process.platform === "win32")("the pane machine against 
     }
     expect(screen.link.state).toEqual({ kind: "Online", epoch: 2 });
     await live(t);
-    expect([screen.view(t).gen, screen.attaches.length, screen.asked(t).at(-1)]).toEqual([4, attachesBefore + 1, { terminal: t, cols: 100, rows: 30, history: 2000, resumed: true }]);
+    expect([screen.view(t).gen, screen.attaches.length, screen.asked(t).at(-1)]).toEqual([5, attachesBefore + 1, { terminal: t, cols: 100, rows: 30, history: 2000, resumed: true }]);
     // nothing typed while the core was gone reached the new terminal: its program reads the next key and only that
     expect(screen.type("n")).toEqual([{ sent: true }]);
     await until("the next key at the new program", () => read("two.log").length > 0);

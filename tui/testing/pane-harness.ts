@@ -34,6 +34,8 @@ export interface AttachRecord {
   /** asked: no reply yet; open: the channel is the machine's; refused: the call failed; closed: the stream is over */
   state: "asked" | "open" | "refused" | "closed";
   automaticInput: boolean;
+  /** the terminal's size in the core's answer to this attach (`80x24`), or null while there is none */
+  reply: string | null;
   /** the stream as the machine got it, frame by frame */
   received: Uint8Array[];
   receivedBytes: number;
@@ -113,7 +115,7 @@ export class Screen {
   readonly calls: ChannelCall[] = [];
   readonly faults: Faults = { attach: null, holdReplies: false, holdCloses: false, holdCalls: false, linkState: null, stripMark: false, create: false, write: null, resize: null, encode: null };
   /** called as each thing happens, for a test that checks rules at that very moment */
-  hooks: { call?: (call: ChannelCall) => void; attach?: (record: AttachRecord) => void; write?: (record: EmulatorRecord, bytes: Uint8Array) => void; notice?: (notice: PaneNotice) => void } = {};
+  hooks: { call?: (call: ChannelCall) => void; attach?: (record: AttachRecord) => void; write?: (record: EmulatorRecord, bytes: Uint8Array) => void; notice?: (notice: PaneNotice) => void; link?: (notice: LinkNotice) => void } = {};
   /** work of this screen that has not come back yet */
   inflight = 0;
   /** the `input` call in progress */
@@ -134,6 +136,7 @@ export class Screen {
       model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
       notify: (notice) => {
         this.linkNotices.push(notice);
+        this.hooks.link?.(notice);
         // a line that ended settles every CLOSE on it, as the connection does: none can be held past it
         if (notice.type === "state" && notice.state.kind !== "Online") for (const resolve of this.heldCloses.splice(0)) resolve();
         this.panes.notice(notice);
@@ -175,7 +178,7 @@ export class Screen {
 
   private async attach(params: TerminalAttachParams, handlers: ChannelHandlers): Promise<{ result: Awaited<ReturnType<CoreLink["attach"]>>["result"]; channel: Channel }> {
     const record: AttachRecord = {
-      index: this.attaches.length, terminal: params.terminal, params: { ...params }, state: "asked", automaticInput: false,
+      index: this.attaches.length, terminal: params.terminal, params: { ...params }, state: "asked", automaticInput: false, reply: null,
       received: [], receivedBytes: 0, credited: 0, closeAsked: false, closeHeard: false, handlers,
       core: this.stage.core, line: this.lines.get(this.stage.core)?.at(-1) ?? 0, channel: null,
     };
@@ -213,6 +216,7 @@ export class Screen {
     }
     if (record.state === "asked") record.state = "open";
     record.automaticInput = opened.channel.automaticInput;
+    record.reply = `${opened.result.terminal.cols}x${opened.result.terminal.rows}`;
     record.channel = opened.channel.id;
     if (this.faults.holdReplies) await new Promise<void>((resolve) => this.held.push(resolve));
     const result = (fault && "reply" in fault ? fault.reply(opened.result) : opened.result) as typeof opened.result;
