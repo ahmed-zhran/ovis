@@ -106,7 +106,7 @@ const KEYS = [
   "space", "enter", "tab", "esc", "escape", "left", "right", "up", "down", "backspace", "minus", "comma", "plus",
   "f1", "f5", "f12", "f13", "f20", "f25", "f26", "f30", "\u314a", "\u00e9", "\u{1f600}", "\u{d55c}",
 ];
-const SPECIAL = ["ctrl+alt+g", "esc", "ctrl+[", "left", "right", "shift+tab", "prefix+esc", "prefix+ctrl+[", "", " ", "prefix+1..9", "prefix+shift+1..9", "ctrl+b", "prefix+ctrl+b", "prefix+hyper+v", "prefix+\u314a", "nonsense+x"];
+const SPECIAL = ["ctrl+alt+g", "esc", "ctrl+[", "left", "right", "shift+tab", "prefix+esc", "prefix+ctrl+[", "", " ", "prefix+1..9", "prefix+shift+1..9", "ctrl+b", "prefix+ctrl+b", "prefix+hyper+v", "prefix+\u314a", "nonsense+x", "prefix+shift+/"];
 const ACTIONS = resolveAllHerdrKeys(undefined).actions.map((action) => action.action);
 const NAVIGATE = ["navigate_workspace_up", "navigate_workspace_down", "navigate_pane_left", "navigate_pane_down", "navigate_pane_up", "navigate_pane_right"];
 
@@ -127,6 +127,18 @@ function config(rnd: () => number): Record<string, unknown> {
   if (rnd() < 0.1) keys["extra_prefixes"] = [binding(0)];
   if (rnd() < 0.1) keys["command"] = [{ key: binding(0.5), command: "x" }];
   if (rnd() < 0.05) keys["bogus_action"] = binding(0.5);
+  // the fallback lists used up: the detach keys bound after the prefix, the prefix keys bound directly with an untypable
+  // prefix, the prefixes on the detach keys
+  if (rnd() < 0.06) for (const key of ["prefix+q", "prefix+ctrl+q", "prefix+alt+q"]) if (rnd() < 0.8) keys[pick(ACTIONS)] = key;
+  if (rnd() < 0.06) {
+    keys["prefix"] = pick(["hyper+b", "f30", "ctrl+!"]);
+    for (const key of ["ctrl+b", "ctrl+a", "ctrl+]", "ctrl+\\", "prefix+ctrl+b"]) if (rnd() < 0.8) keys[pick(ACTIONS)] = key;
+    if (rnd() < 0.5) keys["command"] = [{ key: pick(["ctrl+b", "prefix+ctrl+b", "ctrl+a"]), command: "x" }];
+  }
+  if (rnd() < 0.03) {
+    keys["prefix"] = "q";
+    keys["extra_prefixes"] = ["ctrl+q", "alt+q"];
+  }
   return keys;
 }
 
@@ -157,7 +169,7 @@ function checkConfig(keys: Record<string, unknown>): void {
   const keymap = buildKeymap(keys);
   const resolved = resolveAllHerdrKeys(keys);
   const at = states(keymap, keys);
-  const notes = keymap.notes as readonly { code: string; action?: string; binding?: string }[];
+  const notes = keymap.notes as readonly { code: string; action?: string; binding?: string; holder?: string }[];
   const notesFor = (action: string, binding: string) => notes.filter((note) => note.action === action && note.binding === binding);
 
   // (a) every key text the help shows fires its action in the state it is shown in
@@ -178,26 +190,62 @@ function checkConfig(keys: Record<string, unknown>): void {
   }
   for (const { text, chord } of keymap.prefixes) check(eventsFor(chord).some((event) => reduce(at.idle!, event).state.armed), `the prefix "${text}" is shown but no input event arms it`);
 
-  // (e) some key sequence quits, found in the table (a direct detach key, else a prefix then detach's key after it) and typed as bytes
+  // (e) some key sequence quits, found in the table (a direct detach key, else a prefix then detach's key after it) and
+  // typed as bytes; or, when the config's own bindings leave no key for it, exactly one note says so and no binding of
+  // the config lost its key to a fallback
   const detachIn = (lookup: Readonly<Record<string, { action: KeyAction }>>) => Object.entries(lookup).find(([, bound]) => bound.action === "detach")?.[0];
   const direct = detachIn(keymap.direct);
   const after = detachIn(keymap.afterPrefix);
   const prefixId = Object.keys(keymap.prefixIds)[0];
   const route = direct !== undefined ? [direct] : after !== undefined && prefixId !== undefined ? [prefixId, after] : null;
-  check(route !== null, "no key sequence quits");
-  const reads = route.map((id) => BYTES.get(id));
-  check(reads.every((read) => read !== undefined), `no host bytes for ${route.join(" then ")}`);
-  const framer = new Framer();
-  let typing = at.idle!;
-  const effects: Effect[] = [];
-  reads.forEach((read, i) => {
-    for (const event of [...framer.feed(bytesOf(read!), AT + i * 1_000), ...framer.tick(AT + i * 1_000 + 999)]) {
-      const step = reduce(typing, event);
-      typing = step.state;
-      effects.push(...step.effects);
+  const unreachable = notes.filter((note) => note.code === "prefix_unreachable" || note.code === "detach_unreachable");
+  const takenByFallback = notes.filter((note) => note.code === "taken" && (note.holder === "detach" || note.holder === "prefix"));
+  check(unreachable.length <= 1, "more than one note that a fallback is used up");
+  if (route === null) {
+    check(unreachable.length === 1, "no key sequence quits, and no note says so");
+    check(takenByFallback.length === 0, `no key quits and a fallback took a binding: ${JSON.stringify(takenByFallback)}`);
+  } else {
+    const reads = route.map((id) => BYTES.get(id));
+    check(reads.every((read) => read !== undefined), `no host bytes for ${route.join(" then ")}`);
+    const framer = new Framer();
+    let typing = at.idle!;
+    const effects: Effect[] = [];
+    reads.forEach((read, i) => {
+      for (const event of [...framer.feed(bytesOf(read!), AT + i * 1_000), ...framer.tick(AT + i * 1_000 + 999)]) {
+        const step = reduce(typing, event);
+        typing = step.state;
+        effects.push(...step.effects);
+      }
+    });
+    check(effects.some((effect) => effect.type === "quit"), `the bytes ${JSON.stringify(reads)} of ${route.join(" then ")} do not quit`);
+  }
+
+  // no fallback sits on a key a binding of the config holds: the prefix on none at any level (a binding after the
+  // prefix on it would send the prefix), detach on none after the prefix and on no prefix
+  const held = new Map<string, string>();
+  const hold = (level: string, chord: HerdrChord, holder: string) => { for (const id of matchIds(chord)) held.set(`${level}|${id}`, holder); };
+  for (const { action, bindings } of resolved.actions) for (const binding of bindings) for (const { chord } of binding.chords) hold(binding.prefixed ? "after" : "direct", chord, action);
+  for (const { name, chord } of resolved.navigate) if (chord !== null) hold("navigate", chord, name);
+  if (resolved.configRead && Array.isArray(keys["command"])) {
+    for (const entry of keys["command"] as { key?: unknown }[]) {
+      for (const text of [entry.key].flat()) {
+        const binding = typeof text === "string" ? parseHerdrBinding(text) : null;
+        if (binding !== null && !binding.range) hold(binding.prefixed ? "after" : "direct", binding.chord, "command");
+      }
     }
-  });
-  check(effects.some((effect) => effect.type === "quit"), `the bytes ${JSON.stringify(reads)} of ${route.join(" then ")} do not quit`);
+  }
+  for (const note of notes.filter((n) => n.code === "prefix_fallback") as unknown as { fallback: string }[]) {
+    for (const id of matchIds(parseHerdrBinding(note.fallback)!.chord)) {
+      for (const level of ["direct", "after", "navigate"]) check(!held.has(`${level}|${id}`), `the fallback prefix ${note.fallback} sits on a ${level} key of ${held.get(`${level}|${id}`)}`);
+    }
+  }
+  for (const note of notes.filter((n) => n.code === "detach_fallback") as unknown as { fallback: string }[]) {
+    for (const id of matchIds(parseHerdrBinding(note.fallback)!.chord)) {
+      const holder = held.get(`after|${id}`);
+      check(holder === undefined || holder === "detach", `the detach fallback ${note.fallback} sits on a key of ${holder}`);
+      check(!Object.hasOwn(keymap.prefixIds, id), `the detach fallback ${note.fallback} sits on a prefix`);
+    }
+  }
 
   // (f) a binding that fires carries no note: every key shown (each fires, by (a)) and every prefix
   for (const row of helpRows(keymap)) for (const text of row.keys) check(notesFor(row.action, text).length === 0, `${row.mode} ${row.action} "${text}" fires and has a note`);
@@ -228,8 +276,12 @@ function checkConfig(keys: Record<string, unknown>): void {
   // prefix left, the one fallback its note names
   const typable = resolved.prefixes.filter(({ text }) => notesFor("prefix", text).length === 0);
   const fallbacks = notes.filter((note) => note.code === "prefix_fallback") as unknown as { action: string; binding: string; fallback: string }[];
-  check(fallbacks.length === (typable.length === 0 ? 1 : 0) && fallbacks.every((note) => note.binding === resolved.prefixes[0]!.text), "one fallback note, on the configured prefix, exactly when no prefix can be typed");
-  check(Bun.deepEquals(keymap.prefixes.map(({ text }) => text), typable.length > 0 ? typable.map(({ text }) => text) : fallbacks.map((note) => note.fallback)), "the prefixes are the resolver's minus the noted ones, else the fallback");
+  const prefixUnreachable = notes.filter((note) => note.code === "prefix_unreachable");
+  check(fallbacks.length + prefixUnreachable.length === (typable.length === 0 ? 1 : 0) && [...fallbacks, ...prefixUnreachable].every((note) => note.binding === resolved.prefixes[0]!.text), "one fallback or unreachable note, on the configured prefix, exactly when no prefix can be typed");
+  check(Bun.deepEquals(keymap.prefixes.map(({ text }) => text), typable.length > 0 ? typable.map(({ text }) => text) : fallbacks.map((note) => note.fallback)), "the prefixes are the resolver's minus the noted ones, else the fallback, else none");
+  // herdr's resolver lets a default that loses its key stand down silently: a key that arrives as another (shift+/ as ?) too
+  const written = (action: string) => resolved.configRead && (Object.hasOwn(keys, action) || (action === "zoom" && Object.hasOwn(keys, "fullscreen")));
+  for (const note of notes.filter((n) => n.code === "taken")) check(written(note.action!), `${note.action} is a default and its lost key "${note.binding}" is noted`);
   for (const { text } of resolved.prefixes) check(notesFor("prefix", text).length <= 1, `prefix "${text}" has more than one note`);
   // a chord dropped for shift in the text is one shift does not change: it arrives as its key alone (shift+space as space)
   for (const note of notes.filter((n) => n.code === "shift_in_text")) {
@@ -240,17 +292,26 @@ function checkConfig(keys: Record<string, unknown>): void {
   const detachFallback = notes.find((note) => note.code === "detach_fallback") as unknown as { fallback: string } | undefined;
   for (const { action, bindings } of resolved.actions) {
     const row = keymap.rows.find((r) => r.action === action && r.mode === "terminal")!;
-    // a binding noted whole is gone; a range keeps the digits not noted one by one
+    // a binding noted whole is gone, and with no prefix every one after the prefix (its note is the prefix's); a range
+    // keeps the digits not noted one by one; a default loses, silently, a key another action holds
+    const heldByOther = (prefixed: boolean, chord: HerdrChord) => {
+      const lookup = prefixed ? keymap.afterPrefix : keymap.direct;
+      return matchIds(chord).some((id) => Object.hasOwn(lookup, id) && lookup[id]!.action !== action);
+    };
     const expected = bindings.flatMap((binding) => {
-      if (notesFor(action, binding.text).length > 0) return [];
-      const chords = binding.chords.filter(({ chord }) => !binding.range || notesFor(action, binding.text.replace("1..9", chord.key)).length === 0);
+      if (notesFor(action, binding.text).length > 0 || (binding.prefixed && prefixUnreachable.length > 0)) return [];
+      const chords = binding.chords.filter(({ chord }) => (!binding.range || notesFor(action, binding.text.replace("1..9", chord.key)).length === 0) && (written(action) || !heldByOther(binding.prefixed, chord)));
       return chords.length === 0 ? [] : [{ ...binding, chords }];
     });
     if (action === "detach" && detachFallback !== undefined) expected.push({ text: detachFallback.fallback, prefixed: true, range: false, chords: [{ chord: parseHerdrBinding(detachFallback.fallback)!.chord, index: null }] });
     check(Bun.deepEquals(row.bindings, expected), `${action}: the table is the resolver's minus the noted bindings`);
     for (const binding of bindings) check(notesFor(action, binding.text).length <= 1, `${action} "${binding.text}" has more than one note`);
   }
-  check((detachFallback !== undefined) === resolved.actions.find((a) => a.action === "detach")!.bindings.every((binding) => notesFor("detach", binding.text).length > 0), "detach falls back exactly when none of its bindings is kept");
+  const detachUnreachable = notes.some((note) => note.code === "detach_unreachable");
+  const detachNoneKept = resolved.actions.find((a) => a.action === "detach")!.bindings.every((binding) => notesFor("detach", binding.text).length > 0);
+  check(prefixUnreachable.length > 0
+    ? detachFallback === undefined && !detachUnreachable
+    : [detachFallback !== undefined, detachUnreachable].filter(Boolean).length === (detachNoneKept ? 1 : 0), "detach falls back, or says it cannot, exactly when none of its bindings is kept and a prefix exists");
   for (const { name, text, chord } of resolved.navigate) {
     if (chord === null) continue;
     const row = keymap.rows.find((r) => r.action === name && r.mode === "navigate")!;
@@ -272,6 +333,7 @@ describe("the key table over random configs", () => {
   it(`shows only what fires, notes every drop and follows the resolver over ${CONFIGS} configs (seed ${SEED})`, () => {
     let bindings = 0;
     let notes = 0;
+    const fallbackCodes = new Map<string, number>([["prefix_fallback", 0], ["prefix_unreachable", 0], ["detach_fallback", 0], ["detach_unreachable", 0]]);
     for (let n = 0; n < CONFIGS; n++) {
       const keys = config(random(SEED * 1_000_003 + n));
       try {
@@ -283,9 +345,11 @@ describe("the key table over random configs", () => {
       const keymap = buildKeymap(keys);
       bindings += keymap.rows.reduce((sum, row) => sum + row.bindings.length, 0);
       notes += keymap.notes.length;
+      for (const note of keymap.notes) if (fallbackCodes.has(note.code)) fallbackCodes.set(note.code, fallbackCodes.get(note.code)! + 1);
     }
-    // the generator reached both sides: many bindings shown and many dropped with a note
+    // the generator reached both sides: many bindings shown and many dropped with a note, and every fallback outcome
     expect(bindings).toBeGreaterThan(CONFIGS * 10);
     expect(notes).toBeGreaterThan(CONFIGS / 10);
+    for (const [code, count] of fallbackCodes) expect({ code, reached: count > 0 }).toEqual({ code, reached: true });
   });
 });

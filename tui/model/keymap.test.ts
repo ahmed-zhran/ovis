@@ -185,10 +185,14 @@ describe("the keymap table", () => {
     expect(both.keymap.notes).toEqual([{ code: "taken", action: "split_vertical", binding: "prefix+shift+2", holder: "new_tab" }]);
     expect(typed(both, "\x02", "@").state.overlays).toEqual([expect.objectContaining({ kind: "text", purpose: "new_tab" })]);
     expect(helpRows(both.keymap).find((row) => row.action === "split_vertical")!.keys).toEqual([]);
-    // a binding the config writes beats a default on that key
-    const over = start({ zoom: "prefix+shift+/" });
-    expect(over.keymap.notes).toEqual([{ code: "taken", action: "help", binding: "prefix+?", holder: "zoom" }]);
-    expect(typed(over, "\x02", "?")).toEqual(asAction(typed(over, "\x02").state, "zoom"));
+    // a binding the config writes beats a default on that key, written shifted or as the character: the default
+    // stands down silently either way, as herdr's resolver does for the character
+    for (const zoom of ["prefix+shift+/", "prefix+?"]) {
+      const over = start({ zoom });
+      expect({ zoom, notes: over.keymap.notes, notices: reduce(start(), { type: "keys", keys: { zoom }, at: AT }).state.notices }).toEqual({ zoom, notes: [], notices: [] });
+      expect({ zoom, help: helpRows(over.keymap).find((row) => row.action === "help")!.keys }).toEqual({ zoom, help: [] });
+      expect(typed(over, "\x02", "?")).toEqual(asAction(typed(over, "\x02").state, "zoom"));
+    }
     // a range that loses one digit keeps the other eight
     const range = buildKeymap({ switch_workspace: "prefix+shift+1..9", new_tab: "prefix+#" });
     expect(range.notes).toEqual([{ code: "taken", action: "switch_workspace", binding: "prefix+shift+3", holder: "new_tab" }]);
@@ -211,14 +215,13 @@ describe("the keymap table", () => {
     expect(noteFor(held, "prefix")).toEqual([{ code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+a", skipped: [{ key: "ctrl+b", holder: "zoom" }] }]);
     expect(typed(held, "\x01", "q").effects).toEqual([{ type: "quit" }]);
     expect(typed(held, "\x02")).toEqual(asAction(held, "zoom"));
-    // every key of the list held: herdr's default takes its key back, and the direct binding is noted
-    const allHeld = start({ prefix: "hyper+b", zoom: "ctrl+b", new_tab: "ctrl+a", split_vertical: "ctrl+]", split_horizontal: "ctrl+\\" });
-    expect(noteFor(allHeld, "prefix")).toEqual([{
-      code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+b",
-      skipped: [{ key: "ctrl+b", holder: "zoom" }, { key: "ctrl+a", holder: "new_tab" }, { key: "ctrl+]", holder: "split_vertical" }, { key: "ctrl+\\", holder: "split_horizontal" }],
-    }]);
-    expect(noteFor(allHeld, "zoom")).toEqual([{ code: "taken", action: "zoom", binding: "ctrl+b", holder: "prefix" }]);
-    expect(typed(allHeld, "\x02", "q").effects).toEqual([{ type: "quit" }]);
+    // held by a custom command, or by a binding after the prefix (the prefix twice would send it): skipped as well
+    const byCommand = start({ prefix: "hyper+b", command: [{ key: "ctrl+b", command: "x" }] });
+    expect(noteFor(byCommand, "prefix")).toEqual([{ code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+a", skipped: [{ key: "ctrl+b", holder: "command" }] }]);
+    expect(typed(byCommand, "\x01", "q").effects).toEqual([{ type: "quit" }]);
+    const afterHeld = start({ prefix: "hyper+b", zoom: "prefix+ctrl+b" });
+    expect(afterHeld.keymap.notes).toEqual([{ code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+a", skipped: [{ key: "ctrl+b", holder: "zoom" }] }]);
+    expect(typed(afterHeld, "\x01", "\x02")).toEqual(asAction(typed(afterHeld, "\x01").state, "zoom"));
 
     // a reload to a typable prefix and back: the fallback and its note come and go, an armed prefix returns to Idle
     const armed = typed(start({ prefix: "hyper+b" }), "\x02").state;
@@ -241,6 +244,39 @@ describe("the keymap table", () => {
     // the prefix on herdr's detach key: herdr refuses the detach binding, the fallback quits
     const same = start({ prefix: "ctrl+q", detach: "ctrl+q" });
     expect(typed(same, "\x11", "q").effects).toEqual([{ type: "quit" }]);
+  });
+
+  it("a fallback never takes a bound key", () => {
+    // every detach fallback held by the user's bindings: each keeps its key, detach has none, one note says so
+    const keys = { close_pane: "prefix+q", zoom: "prefix+ctrl+q", new_tab: "prefix+alt+q" };
+    const state = start(keys);
+    const armed = typed(state, "\x02").state;
+    expect(typed(state, "\x02", "q")).toEqual(asAction(armed, "close_pane"));
+    expect(typed(state, "\x02", "\x11")).toEqual(asAction(armed, "zoom"));
+    expect(typed(state, "\x02", "\x1bq").state.overlays).toEqual([expect.objectContaining({ kind: "text", purpose: "new_tab" })]);
+    expect(helpRows(state.keymap).find((row) => row.action === "detach")!.keys).toEqual([]);
+    expect(state.keymap.notes).toEqual([{ code: "detach_unreachable", skipped: [{ key: "prefix+q", holder: "close_pane" }, { key: "prefix+ctrl+q", holder: "zoom" }, { key: "prefix+alt+q", holder: "new_tab" }] }]);
+    expect(reduce(state, { type: "action", action: "detach", at: AT }).effects).toEqual([{ type: "quit" }]);
+
+    // every prefix fallback held by a direct binding and the configured prefix untypable: each binding keeps its key,
+    // nothing arms, one note says so
+    const direct = { prefix: "hyper+b", zoom: "ctrl+b", new_tab: "ctrl+a", split_vertical: "ctrl+]", split_horizontal: "ctrl+\\" };
+    const noPrefix = start(direct);
+    for (const [read, action] of [["\x02", "zoom"], ["\x1c", "split_horizontal"], ["\x1d", "split_vertical"]] as const) {
+      expect({ read, step: typed(noPrefix, read) }).toEqual({ read, step: asAction(noPrefix, action) });
+    }
+    expect(typed(noPrefix, "\x01").state.overlays).toEqual([expect.objectContaining({ kind: "text", purpose: "new_tab" })]);
+    expect(noPrefix.keymap.prefixes).toEqual([]);
+    expect(noPrefix.keymap.notes).toEqual([{
+      code: "prefix_unreachable", action: "prefix", binding: "hyper+b", reason: "no_such_modifier",
+      skipped: [{ key: "ctrl+b", holder: "zoom" }, { key: "ctrl+a", holder: "new_tab" }, { key: "ctrl+]", holder: "split_vertical" }, { key: "ctrl+\\", holder: "split_horizontal" }],
+    }]);
+    expect(helpRows(noPrefix.keymap).filter((row) => row.keys.some((text) => text.startsWith("prefix+")))).toEqual([]);
+    expect(reduce(noPrefix, { type: "action", action: "detach", at: AT }).effects).toEqual([{ type: "quit" }]);
+
+    // all three detach fallbacks are prefixes themselves: no key quits, and one note says so
+    const qPrefixes = start({ prefix: "q", extra_prefixes: ["ctrl+q", "alt+q"] });
+    expect(qPrefixes.keymap.notes).toEqual([{ code: "detach_unreachable", skipped: [{ key: "prefix+q", holder: "prefix" }, { key: "prefix+ctrl+q", holder: "prefix" }, { key: "prefix+alt+q", holder: "prefix" }] }]);
   });
 
   it("working navigate key has no note", () => {

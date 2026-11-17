@@ -57,15 +57,27 @@ export type KeymapNote =
   /** a binding the resolver keeps that no input event can fire (`action` is "prefix" for a prefix key) */
   | { readonly code: DropCode; readonly action: string; readonly binding: string }
   /**
-   * two bindings the screen reads as one key (shift+2 and "@" both arrive as "@"), or one on the fallback prefix or
-   * the detach fallback: `holder` (an action, "prefix" or "detach") keeps the key. `binding` is the one digit a
-   * range lost ("prefix+shift+3") when it keeps the others.
+   * a binding the config writes that the screen reads as a key another one holds (shift+2 and "@" both arrive as "@";
+   * a key after the prefix that is a prefix itself): `holder` (an action or "prefix") keeps it. `binding` is the one
+   * digit a range lost ("prefix+shift+3") when it keeps the others. A default that loses its key so stands down
+   * silently, as herdr's resolver lets it.
    */
   | { readonly code: "taken"; readonly action: string; readonly binding: string; readonly holder: string }
   /** no prefix key can be typed: `binding`, herdr's `prefix`, cannot for `reason`, and `fallback` stands in for it */
   | { readonly code: "prefix_fallback"; readonly action: "prefix"; readonly binding: string; readonly reason: DropCode; readonly fallback: string; readonly skipped: readonly Skipped[] }
+  /**
+   * no prefix key can be typed (`binding`, for `reason`) and the config's own bindings hold every fallback key
+   * (`skipped`): no key reaches anything after the prefix. The screen is still left by an `action` event detach (the
+   * menu) or by closing the terminal.
+   */
+  | { readonly code: "prefix_unreachable"; readonly action: "prefix"; readonly binding: string; readonly reason: DropCode; readonly skipped: readonly Skipped[] }
   /** no key of detach can fire: `fallback`, after the prefix, quits */
-  | { readonly code: "detach_fallback"; readonly fallback: string; readonly skipped: readonly Skipped[] };
+  | { readonly code: "detach_fallback"; readonly fallback: string; readonly skipped: readonly Skipped[] }
+  /**
+   * no key of detach can fire and the config's bindings or prefixes hold every fallback key (`skipped`): no key quits.
+   * The screen is still left by an `action` event detach (the menu) or by closing the terminal.
+   */
+  | { readonly code: "detach_unreachable"; readonly skipped: readonly Skipped[] };
 
 type Lookup = Readonly<Record<string, Bound>>;
 
@@ -87,13 +99,15 @@ export interface Keymap {
 const LOCK_KEY = "ctrl+alt+g";
 
 /**
- * The prefix when none of the config's can be typed: herdr's default, then the next one no direct binding holds. Each
- * is one control byte every terminal sends, and none is a key a shell needs (ctrl+c, ctrl+d, ctrl+z), flow control
- * (ctrl+s, ctrl+q), Tab, Enter, Backspace or Escape. When all are held, herdr's default takes its key back.
+ * The prefix when none of the config's can be typed: herdr's default ctrl+b, then the next one no binding of the config
+ * holds. Each is a single control byte every terminal sends. The later ones mean something to programs (ctrl+a is
+ * readline's line start and the prefix of screen and tmux, ctrl+] telnet's escape, ctrl+\ SIGQUIT in a cooked
+ * terminal), so they are used only when the config's own bindings hold ctrl+b, and the note names the key given. A
+ * fallback never takes a key the config binds.
  */
 const FALLBACK_PREFIXES = ["ctrl+b", "ctrl+a", "ctrl+]", "ctrl+\\"] as const;
 
-/** detach when none of its keys can fire, so the screen can always be left by key: herdr's default, then the next free one. */
+/** detach when none of its keys can fire: herdr's default, then the next one no binding after the prefix and no prefix holds. */
 const FALLBACK_DETACH = ["prefix+q", "prefix+ctrl+q", "prefix+alt+q"] as const;
 
 /** The keys that always leave an armed prefix (and navigate mode). */
@@ -155,34 +169,34 @@ function dropReason(chord: HerdrChord, level: Level, fixed: ReadonlySet<string>)
   return null;
 }
 
-/** The first of `texts` (bindings) whose chord `holderOf` finds free, with those passed over; when none is, the first `canTake`. */
-function firstFree(texts: readonly string[], holderOf: (chord: HerdrChord) => string | null, canTake: (holder: string) => boolean): { text: string; chord: HerdrChord; skipped: Skipped[] } | null {
+/** The first of `texts` (bindings) whose chord `holderOf` finds free, or null when none is, with those passed over. */
+function firstFree(texts: readonly string[], holderOf: (chord: HerdrChord) => string | null): { found: { text: string; chord: HerdrChord } | null; skipped: Skipped[] } {
   const skipped: Skipped[] = [];
   for (const text of texts) {
     const chord = parseHerdrBinding(text)!.chord;
     const holder = holderOf(chord);
-    if (holder === null) return { text, chord, skipped };
+    if (holder === null) return { found: { text, chord }, skipped };
     skipped.push({ key: text, holder });
   }
-  const taken = skipped.find(({ holder }) => canTake(holder));
-  return taken === undefined ? null : { text: taken.key, chord: parseHerdrBinding(taken.key)!.chord, skipped };
+  return { found: null, skipped };
 }
 
 const NOTHING_FIXED: ReadonlySet<string> = new Set();
 
-/** The direct chords the config's `[[keys.command]]` entries hold (the resolver gives commands no action), when it reads the config. */
-function commandChords(keys: unknown, configRead: boolean): ReadonlySet<string> {
+/** The chords the config's `[[keys.command]]` entries hold, direct and after the prefix (the resolver gives commands no action), when it reads the config. */
+function commandChords(keys: unknown, configRead: boolean): { readonly direct: ReadonlySet<string>; readonly afterPrefix: ReadonlySet<string> } {
   const commands = configRead ? table(keys)?.["command"] : undefined;
-  if (!Array.isArray(commands)) return NOTHING_FIXED;
-  return new Set(commands.flatMap((entry) => {
+  const bindings = (Array.isArray(commands) ? commands : []).flatMap((entry) => {
     const command = table(entry);
     if (command === null || typeof command["command"] !== "string" || command["command"].trim() === "") return [];
     const written = command["key"];
     return (typeof written === "string" ? [written] : Array.isArray(written) ? written : []).flatMap((text) => {
       const binding = typeof text === "string" ? parseHerdrBinding(text) : null;
-      return binding === null || binding.prefixed || binding.range ? [] : [matchId(binding.chord)];
+      return binding === null || binding.range ? [] : [binding];
     });
-  }));
+  });
+  const ids = (prefixed: boolean) => new Set(bindings.filter((binding) => binding.prefixed === prefixed).map((binding) => matchId(binding.chord)));
+  return { direct: ids(false), afterPrefix: ids(true) };
 }
 
 /** A fixed key as a binding: a range is its nine digits, each with its index. */
@@ -221,19 +235,28 @@ export function buildKeymap(keys: unknown): Keymap {
   const commands = commandChords(keys, resolved.configRead);
   const checked = resolved.prefixes.map((prefix) => ({ ...prefix, reason: dropReason(prefix.chord, "prefix", NOTHING_FIXED) }));
   const typable = checked.flatMap(({ text, chord, reason }) => reason === null ? [{ text, chord }] : []);
-  // no prefix can be typed: one stands in, or no key would reach any action, detach included
-  const fallback = typable.length > 0 ? null : firstFree(FALLBACK_PREFIXES, (chord) => {
+  // no prefix can be typed: one stands in, or no key would reach any action, detach included. Never on a key a binding
+  // of the config holds at any level: after the prefix it would send the prefix, in navigate mode it would leave it.
+  const bound = [
+    ...resolved.actions.flatMap(({ action, bindings }) => bindings.flatMap((binding) => binding.chords.map(({ chord }) => ({ holder: action, id: matchId(chord) })))),
+    ...resolved.navigate.flatMap(({ name, chord }) => chord === null ? [] : [{ holder: name, id: matchId(chord) }]),
+  ];
+  const prefixChoice = typable.length > 0 ? null : firstFree(FALLBACK_PREFIXES, (chord) => {
     const id = matchId(chord);
-    return resolved.direct.find((bound) => matchId(bound.chord) === id)?.action ?? (commands.has(id) ? "command" : null);
-  }, () => true)!;
+    return bound.find((binding) => binding.id === id)?.holder ?? (commands.direct.has(id) || commands.afterPrefix.has(id) ? "command" : null);
+  });
+  const fallback = prefixChoice?.found ?? null;
   checked.forEach(({ text, reason }, i) => {
     if (reason === null) return;
-    notes.push(i === 0 && fallback !== null ? { code: "prefix_fallback", action: "prefix", binding: text, reason, fallback: fallback.text, skipped: fallback.skipped } : { code: reason, action: "prefix", binding: text });
+    if (i > 0 || prefixChoice === null) notes.push({ code: reason, action: "prefix", binding: text });
+    else if (fallback !== null) notes.push({ code: "prefix_fallback", action: "prefix", binding: text, reason, fallback: fallback.text, skipped: prefixChoice.skipped });
+    else notes.push({ code: "prefix_unreachable", action: "prefix", binding: text, reason, skipped: prefixChoice.skipped });
   });
-  const prefixes = fallback === null ? typable : [{ text: fallback.text, chord: fallback.chord }];
+  const prefixes = typable.length > 0 ? typable : fallback === null ? [] : [fallback];
   const prefixIds: Record<string, true> = Object.fromEntries(prefixes.map(({ chord }) => [matchId(chord), true]));
-  /** `binding` when every chord of it can fire at `level`; else null, with the binding's one note. */
+  /** `binding` when every chord of it can fire at `level`; else null, with the binding's one note (none after a prefix nobody can type: its note says it). */
   const firing = (action: string, binding: HerdrKeptBinding, level: Level, fixed: ReadonlySet<string>): HerdrKeptBinding | null => {
+    if (level === "after_prefix" && prefixes.length === 0) return null;
     const code = binding.chords.map(({ chord }) => dropReason(chord, level, fixed)).find((reason) => reason !== null) ?? null;
     if (code !== null) notes.push({ code, action, binding: binding.text });
     return code === null ? binding : null;
@@ -252,7 +275,14 @@ export function buildKeymap(keys: unknown): Keymap {
     lookup[matchId(chord)] = { action, index };
     return true;
   };
-  /** `binding` with the chords it gets in `lookup`, or null; a chord already held is noted as the binding or, for a range that keeps others, its digit. */
+  // two bindings can arrive as one key (shift+2 and "@"): herdr's rule decides, the actions the config writes
+  // first, then the defaults, each pass in herdr's order, and the first binding keeps the key
+  const user = resolved.configRead ? table(keys) ?? {} : {};
+  const written = (action: string) => Object.hasOwn(user, action) || (action === "zoom" && Object.hasOwn(user, "fullscreen"));
+  /**
+   * `binding` with the chords it gets in `lookup`, or null. A chord already held is noted, as the binding or, for a
+   * range that keeps others, its digit, when the config writes the action; a default stands down silently.
+   */
   const take = (lookup: Record<string, Bound>, action: KeyAction, binding: HerdrKeptBinding): HerdrKeptBinding | null => {
     const lost: { key: string; holder: string }[] = [];
     const got = kept(binding, (chord, index) => {
@@ -261,14 +291,11 @@ export function buildKeymap(keys: unknown): Keymap {
       lost.push({ key: chord.key, holder });
       return false;
     });
+    if (!written(action)) return got;
     if (got === null && lost.length > 0) notes.push({ code: "taken", action, binding: binding.text, holder: lost[0]!.holder });
     else for (const { key, holder } of lost) notes.push({ code: "taken", action, binding: binding.text.replace("1..9", key), holder });
     return got;
   };
-  // two bindings can arrive as one key (shift+2 and "@"): herdr's rule decides, the actions the config writes
-  // first, then the defaults, each pass in herdr's order, and the first binding keeps the key
-  const user = resolved.configRead ? table(keys) ?? {} : {};
-  const written = (action: string) => Object.hasOwn(user, action) || (action === "zoom" && Object.hasOwn(user, "fullscreen"));
   const held = new Map<KeyAction, HerdrKeptBinding[]>();
   for (const pass of [true, false]) {
     for (const { action, bindings } of resolved.actions) {
@@ -277,26 +304,22 @@ export function buildKeymap(keys: unknown): Keymap {
       held.set(action, live.flatMap((binding) => take(binding.prefixed ? afterPrefix : direct, action, binding) ?? []));
     }
   }
-  if (![...Object.values(direct), ...Object.values(afterPrefix)].some((bound) => bound.action === "detach")) {
-    // no key would leave the screen: detach takes the first free fallback, else takes back the first one a prefix does not hold
-    const choice = firstFree(FALLBACK_DETACH, (chord) => holderIn(afterPrefix, chord), (holder) => holder !== "prefix");
-    if (choice !== null) {
-      const id = matchId(choice.chord);
-      if (Object.hasOwn(afterPrefix, id)) {
-        const holder = afterPrefix[id]!.action;
-        const lost = held.get(holder)!.find((binding) => binding.chords.some(({ chord }) => matchId(chord) === id))!;
-        held.set(holder, held.get(holder)!.filter((binding) => binding !== lost));
-        notes.push({ code: "taken", action: holder, binding: lost.text, holder: "detach" });
-      }
-      afterPrefix[id] = { action: "detach", index: null };
-      held.get("detach")!.push({ text: choice.text, prefixed: true, range: false, chords: [{ chord: choice.chord, index: null }] });
-      notes.push({ code: "detach_fallback", fallback: choice.text, skipped: choice.skipped });
+  // no key would leave the screen: detach takes the first fallback key nothing after the prefix holds (with no prefix
+  // at all, the prefix's note already says that nothing after it is reached)
+  if (prefixes.length > 0 && ![...Object.values(direct), ...Object.values(afterPrefix)].some((entry) => entry.action === "detach")) {
+    const choice = firstFree(FALLBACK_DETACH, (chord) => holderIn(afterPrefix, chord) ?? (commands.afterPrefix.has(matchId(chord)) ? "command" : null));
+    if (choice.found === null) notes.push({ code: "detach_unreachable", skipped: choice.skipped });
+    else {
+      const { text, chord } = choice.found;
+      afterPrefix[matchId(chord)] = { action: "detach", index: null };
+      held.get("detach")!.push({ text, prefixed: true, range: false, chords: [{ chord, index: null }] });
+      notes.push({ code: "detach_fallback", fallback: text, skipped: choice.skipped });
     }
   }
   for (const { action, default: defaults } of resolved.actions) rows.push({ action, default: defaults, mode: "terminal", source: "herdr", bindings: held.get(action)! });
   const lockBinding = fixedBinding(LOCK_KEY);
   const lockId = chordId(lockBinding.chords[0]!.chord);
-  const lockHolder = Object.hasOwn(direct, lockId) ? direct[lockId]!.action : Object.hasOwn(prefixIds, lockId) ? "prefix" : commands.has(lockId) ? "command" : null;
+  const lockHolder = Object.hasOwn(direct, lockId) ? direct[lockId]!.action : Object.hasOwn(prefixIds, lockId) ? "prefix" : commands.direct.has(lockId) ? "command" : null;
   if (lockHolder === null) claim(direct, "lock")(lockBinding.chords[0]!.chord, null);
   else notes.push({ code: "lock_taken", holder: lockHolder });
   rows.push({ action: "lock", default: LOCK_KEY, mode: "terminal", source: "fixed", bindings: lockHolder === null ? [lockBinding] : [] });
