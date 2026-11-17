@@ -269,6 +269,53 @@ describe("fake herdr-core: size rules (probe c, both versions)", () => {
     expect(order(from)).toEqual(["reply", "bytes", "size 110x35"]);
   });
 
+  it("late: the event of a change made just before a line's attach comes behind that attach's reply and first bytes, ahead of its own event", async () => {
+    let hold = false;
+    const core = new FakeHcCore({ late: () => hold });
+    const quiet = { onData: () => {}, onClose: () => {} };
+    const open = () => {
+      let transport: FakeTransport | null = null;
+      const hc = new HcConnection(() => (transport = core.transport()));
+      cleanups.push(() => hc.close());
+      return { hc, line: () => transport!.line };
+    };
+    const [a, r, s] = [open(), open(), open()];
+    const t = (await a.hc.call("terminal.run", { argv: ["sh"] })).address;
+    await a.hc.open("events.subscribe", { terminal: t }, quiet);
+    // the other viewer's line is open before the race, so that its attach leaves in the very turn it is asked
+    await r.hc.call("terminal.list", {});
+    /** what A's line was sent from `since` on, in order: its attach replies, its streams' first bytes, the size events */
+    const heard = (since: number) => core.log.slice(since).flatMap((entry) => {
+      if (entry.what === "reply") return entry.line === a.line() && entry.method === "terminal.attach" ? ["reply"] : [];
+      if (entry.what !== "frame" || entry.from !== "core" || entry.line !== a.line() || entry.kind !== FRAME_DATA) return [];
+      if (entry.terminal !== null) return ["bytes"];
+      return [...Buffer.from(entry.payload).toString().matchAll(/"data":\{"cols":(\d+),"rows":(\d+)\}[^\n]*"type":"size"/g)].map((match) => `size ${match[1]}x${match[2]}`);
+    }).filter((entry, at, all) => entry !== "bytes" || all[at - 1] !== "bytes");
+    // an idle viewer that stays, and A attached beside it
+    await s.hc.open("terminal.attach", { terminal: t, cols: 100, rows: 30, resumed: true }, quiet);
+    let mine = (await a.hc.open("terminal.attach", { terminal: t, cols: 100, rows: 30, resumed: true }, quiet)).channel;
+    const meet = async () => {
+      await mine.close();
+      const from = core.log.length;
+      // written in one turn: another viewer's attach with 120x40, then A's with 100x30
+      const theirs = r.hc.open("terminal.attach", { terminal: t, cols: 120, rows: 40, resumed: true }, quiet);
+      const own = a.hc.open("terminal.attach", { terminal: t, cols: 100, rows: 30, resumed: true }, quiet);
+      mine = (await own).channel;
+      await (await theirs).channel.close();
+      return heard(from);
+    };
+    // by default the other attach's event is out before A's reply
+    expect(await meet()).toEqual(["size 120x40", "reply", "bytes", "size 100x30"]);
+    hold = true;
+    expect(await meet()).toEqual(["reply", "bytes", "size 120x40", "size 100x30"]);
+    // a held event with no frame of its line behind it goes out as the event loop turns
+    const from = core.log.length;
+    core.emit("size", t, { cols: 90, rows: 28 });
+    expect([core.heldEvents(), heard(from)]).toEqual([1, []]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect([core.heldEvents(), heard(from)]).toEqual([0, ["size 90x28"]]);
+  });
+
   it("any RESIZE is a stamp, also at the current size", async () => {
     const s = scene();
     const t = await s.run();

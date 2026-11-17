@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { IsolatedCore, type StopReport, stoppedCleanly } from "../../scripts/test-hc.ts";
-import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_DATA, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
+import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
 import { FakeHcCore, type FakeProgram } from "./core.fake.ts";
 import { connectCoreSocket } from "./socket-transport.ts";
 
@@ -13,7 +13,9 @@ import { connectCoreSocket } from "./socket-transport.ts";
  * version and hello features, so a 0.1.17 has no automatic input), and both must give the same
  * terminal sizes, `size` events per viewer, attach replies, CLOSE payloads and bytes the program
  * saw; k2 compares the order in which one line hears its attach's reply, its stream's first bytes
- * and the `size` events. Runs only where OVIS_TEST_HC_BIN names an hc.
+ * and the `size` events; k3 shows the order the fake sends only with its `late` option: the reply of
+ * a line's attach ahead of the event of a change another viewer made just before it. Runs only where
+ * OVIS_TEST_HC_BIN names an hc.
  */
 const bin = process.env["OVIS_TEST_HC_BIN"];
 
@@ -593,13 +595,9 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
   }
 
   it("k2 the size event of a viewer's own attach follows its reply, on either side of its stream's first bytes", async () => {
-    // on a real core the side of the first bytes is a matter of timing in about one attach of a hundred: five lines, and what most of them heard
-    const runs: string[] = [];
-    for (let run = 0; run < 5; run++) runs.push(JSON.stringify(await attachOrder(real.socket)));
-    const count = (seen: string) => runs.filter((other) => other === seen).length;
-    const onReal = JSON.parse(runs.reduce((most, seen) => count(seen) > count(most) ? seen : most)) as string[][];
-    const onFake = await attachOrder(faked.socket);
-    expect(onReal).toEqual([
+    // each of five lines must hear this order, but for the side of the first bytes beside an attach's reply: on a real core that side
+    // is a matter of timing in about one attach of a hundred and sixty. The fake sends what most lines hear
+    const expected = [
       // the line's event stream had carried nothing yet: the event is ahead of the first bytes
       ["reply 100x30", "size 100x30", "bytes"],
       ["size 120x40"],
@@ -608,17 +606,143 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       ["closed", "size 120x40"],
       ["reply 120x40", "bytes"],
       ["size 90x28"],
-    ]);
-    expect(onFake).toEqual(onReal);
+    ];
+    /** the run with the two attaches that set a size read without the side of the first bytes, which is timing alone */
+    const sided = (steps: string[][]) => steps.map((step) => step.some((entry) => entry.startsWith("reply ")) ? step.filter((entry) => entry !== "bytes") : step);
+    const runs: string[][][] = [];
+    for (let run = 0; run < 5; run++) runs.push(await attachOrder(real.socket));
+    for (const run of runs) expect(sided(run)).toEqual(sided(expected));
+    console.log(`k2: ${runs.filter((run) => JSON.stringify(run) === JSON.stringify(expected)).length} of ${runs.length} real lines heard the first bytes where the fake sends them`);
+    expect(await attachOrder(faked.socket)).toEqual(expected);
     // what no run may show: the event for the size an attach set ahead of that attach's reply
     for (const seen of runs) {
-      for (const step of JSON.parse(seen) as string[][]) {
+      for (const step of seen) {
         const reply = step.findIndex((entry) => entry.startsWith("reply "));
         const own = reply === -1 ? -1 : step.indexOf(step[reply]!.replace("reply", "size"));
         expect(own === -1 || own > reply).toBe(true);
       }
     }
   }, TEST_MS);
+
+  /**
+   * One line's view of two attaches written in one turn, beside an idle viewer that stays: per round this line (A) closes, then
+   * another viewer's attach with a new size and A's attach with the size the terminal had are written together, and A's line is read
+   * frame by frame (attachOrder's names). Counted only where the core applied the other attach first: the terminal then ends at A's
+   * size, and A's line hears the other's size and then its own.
+   */
+  async function meetings(socket: string, rounds: number): Promise<{ first: number; behind: number; wrong: string[]; sample: string[] }> {
+    const control = (await line(socket)).hc;
+    const raws = await Promise.all([connectCoreSocket(socket), connectCoreSocket(socket), connectCoreSocket(socket)]);
+    const [a, r, s] = raws.map((raw) => {
+      const state = { raw, heard: [] as string[], stream: -1, greeted: false, events: -1, fresh: false, pending: "", id: 0, calls: new Map<number, string>(), terminal: "" };
+      const read = makeFrameReader((frame) => {
+        const text = Buffer.from(frame.payload).toString();
+        if (frame.channel === 0) {
+          const message = JSON.parse(text) as { id: number; result?: { channel?: number; terminal?: { cols: number; rows: number } } };
+          const method = state.calls.get(message.id);
+          if (method === "events.subscribe") state.events = message.result!.channel!;
+          if (method === "terminal.attach") {
+            state.stream = message.result!.channel!;
+            state.fresh = true;
+            state.heard.push(`reply ${message.result!.terminal!.cols}x${message.result!.terminal!.rows}`);
+          }
+        } else if (frame.channel === state.events && frame.kind === FRAME_DATA) {
+          const credit = new Uint8Array(4);
+          new DataView(credit.buffer).setUint32(0, frame.payload.length, true);
+          raw.write(encodeFrame(state.events, FRAME_CREDIT, credit));
+          state.pending += text;
+          for (let at = state.pending.indexOf("\n"); at !== -1; at = state.pending.indexOf("\n")) {
+            const note = JSON.parse(state.pending.slice(0, at)) as { method: string; params: { type?: string; terminal?: string; data?: Record<string, unknown> } };
+            state.pending = state.pending.slice(at + 1);
+            if (note.method === "event" && note.params.type === "size" && note.params.terminal === state.terminal) state.heard.push(`size ${String(note.params.data?.["cols"])}x${String(note.params.data?.["rows"])}`);
+          }
+        } else if (frame.channel === state.stream && frame.kind === FRAME_DATA && state.fresh) {
+          state.fresh = false;
+          state.heard.push("bytes");
+        } else if (frame.channel === state.stream && frame.kind === FRAME_CLOSE) state.heard.push("closed");
+        wake();
+      }, () => {});
+      void (async () => {
+        for await (const chunk of raw.readable) {
+          let bytes = chunk;
+          if (!state.greeted) {
+            const at = bytes.indexOf(0x0a);
+            if (at === -1) continue;
+            state.greeted = true;
+            bytes = bytes.subarray(at + 1);
+            wake();
+          }
+          read(bytes);
+        }
+      })();
+      const call = (method: string, params: Record<string, unknown>) => {
+        state.calls.set(++state.id, method);
+        raw.write(encodeFrame(0, FRAME_DATA, JSON.stringify({ jsonrpc: "2.0", id: state.id, method, params })));
+      };
+      return { state, call, attach: (cols: number, rows: number) => call("terminal.attach", { terminal: state.terminal, cols, rows, resumed: true }), close: () => raw.write(encodeFrame(state.stream, FRAME_CLOSE, new Uint8Array(0))) };
+    });
+    const counts = { first: 0, behind: 0, wrong: [] as string[], sample: [] as string[] };
+    try {
+      const terminal = (await control.call("terminal.run", { argv: ["sleep", "1000"] })).address;
+      for (const viewer of [a!, r!, s!]) {
+        viewer.state.raw.write(new TextEncoder().encode(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "hello", params: { generation: 1, framed: true } })}\n`));
+        await until("the hello answer", () => viewer.state.greeted);
+        viewer.state.terminal = terminal;
+      }
+      a!.call("events.subscribe", {});
+      await until("A's event stream", () => a!.state.events !== -1);
+      const size = async () => { const record = await control.call("terminal.get", { terminal }); return `${record.cols}x${record.rows}`; };
+      a!.attach(100, 30);
+      await until("A's first bytes", () => a!.state.heard.includes("bytes"));
+      s!.attach(100, 30);
+      await until("the idle viewer's first bytes", () => s!.state.heard.includes("bytes"));
+      for (let round = 0; round < rounds; round++) {
+        const other = `${110 + (round % 40)}x35`;
+        const heard = a!.state.heard;
+        const closing = heard.length;
+        a!.close();
+        await until("the answer to A's CLOSE", () => heard.slice(closing).includes("closed"));
+        const from = heard.length;
+        const theirs = r!.state.heard.length;
+        r!.attach(110 + (round % 40), 35);
+        a!.attach(100, 30);
+        await until("both replies and first bytes", () => r!.state.heard.slice(theirs).includes("bytes") && heard.slice(from).includes("bytes"));
+        const ended = await size();
+        if (ended === "100x30") {
+          await until("the other's size and then A's own on A's line", () => { const seen = heard.slice(from); const at = seen.indexOf(`size ${other}`); return at !== -1 && seen.indexOf("size 100x30", at) !== -1; });
+          const seen = heard.slice(from);
+          counts.first++;
+          if (seen.indexOf(`size ${other}`) > seen.indexOf("reply 100x30")) {
+            counts.behind++;
+            if (counts.sample.length === 0) counts.sample = seen;
+          }
+          // never: A's own event ahead of its reply, or the other's event behind A's own
+          if (seen.indexOf("size 100x30") < seen.indexOf("reply 100x30") || seen.lastIndexOf(`size ${other}`) > seen.indexOf("size 100x30")) counts.wrong.push(seen.join(", "));
+        } else await until("the other's size on A's line", () => heard.slice(from).includes(`size ${other}`));
+        const leaving = heard.length;
+        const closed = r!.state.heard.length;
+        r!.close();
+        await until("the answer to the other's CLOSE", () => r!.state.heard.slice(closed).includes("closed"));
+        if (ended !== "100x30") await until("the terminal back at A's size", () => heard.slice(leaving).includes("size 100x30"));
+      }
+      await control.call("terminal.kill", { terminal });
+      return counts;
+    } finally {
+      for (const raw of raws) raw.kill();
+      control.close();
+    }
+  }
+
+  it("k3 a line's attach reply can overtake the event of a change another viewer made just before it, which comes before the attach's own", async () => {
+    const ROUNDS = 60;
+    const seen = await meetings(real.socket, ROUNDS);
+    console.log(`k3: ${seen.first} of ${ROUNDS} rounds the other attach was applied first; its event came behind this line's reply in ${seen.behind}; e.g. ${seen.sample.join(", ")}`);
+    // every round keeps what the fake keeps: the own event after the reply, an earlier change's event before the own
+    expect(seen.wrong).toEqual([]);
+    // and the order `late` stands for happens on this core: in the measured runs in a sixth to more than half of such races
+    expect(seen.first).toBeGreaterThan(ROUNDS / 2);
+    expect(seen.behind).toBeGreaterThan(0);
+  }, TEST_MS * 2);
 
   it("a core that is stopped closes each attach with its reason before the line ends", async () => {
     const stopped = new IsolatedCore(bin!);

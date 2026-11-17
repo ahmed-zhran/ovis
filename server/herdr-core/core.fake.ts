@@ -13,8 +13,11 @@
  *   itself set goes out after that attach's reply, never before it: behind the first bytes of its
  *   stream, or ahead of them when the attaching line's event stream has carried nothing yet (a
  *   screen's first attach on a new line), as both real cores send it (core.fake.live.test.ts, "k2").
- *   The event for an earlier change is out before that reply here; a real core lets the reply
- *   overtake it once in a few hundred races, and it then comes before the attach's own event.
+ *   The event for an earlier change is out before that reply here, unless `late` holds it back. A
+ *   real core lets the reply of a line's attach overtake the event of a change another viewer made
+ *   just before it: with the two attaches written in one turn, in a sixth to more than half of the
+ *   races (docs/tui/parity.md has the measured rates). That event then comes behind the reply and
+ *   the first bytes, and before the attach's own event (core.fake.live.test.ts, "k3").
  * - Focus: FOCUS 1 and 0 hand a program that turned mode 1004 on `ESC[I` and `ESC[O` (FOCUS 0 also
  *   from a viewer that never sent FOCUS 1); kind 6 bytes reach the program as they are when the
  *   core names `automatic_input` in hello (1004 or not), and are dropped when it does not.
@@ -64,6 +67,12 @@ export interface FakeCoreOptions {
   methods?: readonly string[];
   core?: CoreInfo;
   machines?: MachineView[];
+  /**
+   * Asked once for each `size` event and line that hears it (default: never): true holds the event back on that line until the
+   * event loop turns or the line sends a frame. An attach the line asks meanwhile gets its reply and first bytes ahead of the held
+   * event, and its own event behind it, as a real core sends them. Everything on the line after a held event waits behind it.
+   */
+  late?: () => boolean;
 }
 
 /** One recorded happening, in order: a call and its reply, a frame on a stream channel, an event. */
@@ -200,6 +209,8 @@ class Stream {
 class Line {
   ended = false;
   readonly channels = new Map<number, Stream>();
+  /** `size` events held back on their way to this line's event streams (`late`), in order */
+  readonly held: { stream: Stream; bytes: Uint8Array }[] = [];
   private plain = true;
   private pending = new Uint8Array(0);
   private nextChannel = 1;
@@ -267,6 +278,7 @@ export class FakeHcCore {
   private readonly methods: readonly string[];
   private readonly info: CoreInfo;
   private readonly machines: MachineView[];
+  private readonly late: (() => boolean) | null;
   private readonly lines = new Map<number, Line>();
   private readonly terminals = new Map<string, Held>();
   private nextLine = 1;
@@ -282,6 +294,7 @@ export class FakeHcCore {
     this.methods = options.methods ?? [...ANSWERED];
     this.info = options.core ?? { id: "fake0000", name: "fake" };
     this.machines = options.machines ?? [];
+    this.late = options.late ?? null;
   }
 
   /** A new line to the fake, as `hc connect` or the socket would give one. */
@@ -448,7 +461,12 @@ export class FakeHcCore {
     this.seq++;
     this.log.push({ what: "event", seq: this.seq, type, terminal, data });
     const params = terminal === null ? { data, seq: this.seq, type } : { data, seq: this.seq, terminal, type };
-    this.notify((filter) => this.hears(filter, terminal), { jsonrpc: "2.0", method: "event", params });
+    this.notify((filter) => this.hears(filter, terminal), { jsonrpc: "2.0", method: "event", params }, type === "size");
+  }
+
+  /** How many `size` events are held back on their way (`late`): none once the event loop has turned. */
+  heldEvents(): number {
+    return [...this.lines.values()].reduce((sum, line) => sum + line.held.length, 0);
   }
 
   heartbeat(): void {
@@ -457,6 +475,7 @@ export class FakeHcCore {
 
   /** Every subscriber fell behind: a fresh snapshot at the current seq. */
   missed(): void {
+    for (const line of this.lines.values()) this.release(line);
     for (const stream of this.subscriptions()) stream.push(lineOf({ jsonrpc: "2.0", method: "missed", params: { seq: this.seq, terminals: this.snapshot(stream.filter!) } }));
   }
 
@@ -492,6 +511,12 @@ export class FakeHcCore {
   }
 
   onFrame(line: Line, frame: Frame): void {
+    this.frameOn(line, frame);
+    // what was held back for this line goes out behind the answer to its frame
+    this.release(line);
+  }
+
+  private frameOn(line: Line, frame: Frame): void {
     if (frame.channel === 0) {
       if (frame.kind === FRAME_DATA) this.onCall(line, frame.payload);
       return;
@@ -548,6 +573,7 @@ export class FakeHcCore {
 
   onLineEnded(line: Line): void {
     this.lines.delete(line.id);
+    line.held.length = 0;
     for (const stream of line.channels.values()) if (stream.viewer) this.detach(stream.viewer);
   }
 
@@ -700,10 +726,17 @@ export class FakeHcCore {
     return {
       result,
       after: () => {
-        if (ahead) told?.();
+        // an event held back for this line (`late`) is from before this attach: it goes out ahead of the attach's own event
+        if (ahead) {
+          this.release(line);
+          told?.();
+        }
         stream.push(Buffer.from(split ? paint : paint + after, "latin1"));
         if (split) stream.push(Buffer.from(after, "latin1"));
-        if (!ahead) told?.();
+        if (!ahead) {
+          this.release(line);
+          told?.();
+        }
       },
     };
   }
@@ -792,12 +825,24 @@ export class FakeHcCore {
     return [...this.lines.values()].flatMap((line) => [...line.channels.values()].filter((stream) => stream.filter !== null));
   }
 
-  private notify(heard: (filter: EventsSubscribeParams) => boolean, message: unknown): void {
+  private notify(heard: (filter: EventsSubscribeParams) => boolean, message: unknown, size = false): void {
     for (const stream of this.subscriptions()) {
       if (!heard(stream.filter!)) continue;
       stream.carried = true;
+      const { line } = stream;
+      if (size && (line.held.length > 0 || this.late?.() === true)) {
+        if (line.held.length === 0) setImmediate(() => this.release(line));
+        line.held.push({ stream, bytes: lineOf(message) });
+        continue;
+      }
+      this.release(line);
       stream.push(lineOf(message));
     }
+  }
+
+  /** What was held back for `line` (`late`) goes out, in order. */
+  private release(line: Line): void {
+    for (const { stream, bytes } of line.held.splice(0)) if (line.channels.get(stream.id) === stream) stream.push(bytes);
   }
 
   private held(terminal: string, asCall = false): Held {
