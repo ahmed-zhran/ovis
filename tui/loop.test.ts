@@ -477,6 +477,34 @@ const RESTING: [state: string, enter: () => Promise<Resting>][] = [
     expect(run.loop.model().sidebarCollapsed).toBe(true);
     return { run };
   }],
+  ["a selection held after its copy", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("press@27:2,drag@30:2,release@30:2");
+    expect(run.host.output()).toContain(`\x1b]52;c;${Buffer.from("echo").toString("base64")}\x1b\\`);
+    return { run };
+  }],
+  ["a pane scrolled back with the wheel", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.core.program("t1").output(Array.from({ length: 60 }, (_, n) => `row-${n}`).join("\r\n"));
+    await run.advance(20);
+    await run.keys("wheelup@40:20");
+    // t1's grid has 36 rows: its screen shows the rows three above its newest
+    const history = run.loop.panes.view("t1")?.emulator?.history();
+    expect(history?.ok && history.value.total - 36 - history.value.viewportTop).toBe(3);
+    return { run };
+  }],
+  ["a divider drag ended", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("press@71:10,drag@60:10,release@60:10");
+    await run.advance(20);
+    expect(run.loop.report().actions).toContain("divider:done");
+    return { run };
+  }],
 ];
 
 describe("nothing in, nothing out, in every state the screen rests in", () => {
