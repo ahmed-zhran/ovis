@@ -410,6 +410,41 @@ const RESTING: [state: string, enter: () => Promise<Resting>][] = [
     expect(run.loop.model().notices).toEqual([]);
     return { run };
   }],
+  ["an armed prefix", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("ctrl+b");
+    expect(run.loop.model().armed).toBe(true);
+    return { run };
+  }],
+  ["navigate mode", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("ctrl+b,w");
+    expect(run.loop.model().mode.name).toBe("navigate");
+    return { run };
+  }],
+  ["resize mode", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("ctrl+b,r");
+    expect(run.loop.model().mode.name).toBe("resize");
+    return { run };
+  }],
+  ["copy mode", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("ctrl+b,[");
+    expect(run.loop.model().mode.name).toBe("copy");
+    return { run };
+  }],
+  ["the sidebar collapsed", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("ctrl+b,b");
+    expect(run.loop.model().sidebarCollapsed).toBe(true);
+    return { run };
+  }],
 ];
 
 describe("nothing in, nothing out, in every state the screen rests in", () => {
@@ -473,8 +508,10 @@ describe("the whole screen", () => {
     await run.cutLine();
     await run.advance(1_000);
     expect(run.loop.link.state.kind).toBe("Offline");
-    // the offline state as data, for the chrome (row 26): the link's kind and stable code
+    // the offline state as data and drawn on the screen
     expect(run.loop.report().link).toEqual({ kind: "Offline", code: OFFLINE_CODE });
+    expect(run.grid().join("\n")).toContain("herdr-core is not answering");
+    expect(run.grid().join("\n")).toContain("hc server start");
     expect(run.loop.panes.views().map((view) => view.state.kind)).toEqual(["Waiting", "Waiting"]);
     await run.keys("l,o,s,t,enter");
     const lines = run.core.viewers().length;

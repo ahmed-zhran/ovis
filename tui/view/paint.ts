@@ -55,6 +55,8 @@ export interface PaneScene {
   hold: boolean;
   /** showing history above the screen */
   scrolledBack: boolean;
+  /** dimmed last picture while the pane or the core link is not live */
+  dim?: boolean;
 }
 
 export interface Scene {
@@ -351,7 +353,9 @@ export class Painter {
       }
       const i = gy * grid.cols + gx;
       const width = grid.width[i]!;
-      const style = grid.style[i]!;
+      const rawStyle = grid.style[i]!;
+      const baseStyle = this.styles.get(rawStyle);
+      const style = pane.dim ? this.styles.id(baseStyle.fg, baseStyle.bg, baseStyle.flags | STYLE_FAINT) : rawStyle;
       if (width === 0) {
         // the covered column of a wide cell whose first column lies left of the clip
         if (col === clip.x) this.put(col, row, " ", 1, this.styles.blank(style));
@@ -500,7 +504,7 @@ function layoutKey(scene: Scene): string {
   return [
     `${scene.width}x${scene.height}`,
     ...scene.parts.map((part) => `p ${part.key} ${rect(part.rect)}`),
-    ...scene.panes.map((pane) => `t ${pane.id} ${rect(pane.rect)} ${pane.view?.col ?? 0},${pane.view?.row ?? 0} ${pane.grid.grid.cols}x${pane.grid.grid.rows}`),
+    ...scene.panes.map((pane) => `t ${pane.id} ${rect(pane.rect)} ${pane.view?.col ?? 0},${pane.view?.row ?? 0} ${pane.grid.grid.cols}x${pane.grid.grid.rows} ${pane.dim ? 1 : 0}`),
     ...scene.overlays.map((overlay) => `o ${overlay.key} ${rect(overlay.rect)}`),
   ].join("\n");
 }

@@ -153,4 +153,43 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
       expect((await hc.call("terminal.get", { terminal: address })).state).toBe("live");
     }
   }, TEST_MS);
+
+  it("draws the chrome (session header, sidebar, tabs, borders, mode bar, help overlay, notices) and the offline state on a real pty", async () => {
+    const { core: isolated, hc, root } = await core();
+    await hc.call("terminal.run", {
+      argv: ["sh", "-c", "echo CHROME-LIVE-MARK; exec sh"],
+      labels: { ...labels, "ovis.workspace": "live-ws", "ovis.tab": "live-tab", "ovis.pane": "live-pane" },
+      cwd: root,
+    });
+    const run = screen(isolated, root);
+    await run.until(/CHROME-LIVE-MARK[\s\S]*\x1b\[\?25h/, "the live pane and its chrome");
+    expect(run.output()).toContain("Spaces");
+    expect(run.output()).toContain("Agents");
+    expect(run.output()).toContain("live-ws");
+    expect(run.output()).toContain("1:live-tab");
+    expect(run.output()).toContain("live-pane");
+    expect(run.output()).toContain("TERMINAL");
+
+    // Armed prefix -> mode bar shows PREFIX, then '?' opens Keyboard Shortcuts help overlay, 'q' closes it
+    run.type("\x02");
+    await run.until("PREFIX", "the armed prefix mode bar");
+    run.type("?");
+    await run.until("Keyboard Shortcuts", "the help overlay");
+    run.type("q");
+    // Parity action prefix+s shows not_built notice
+    run.type("\x02s");
+    await run.until("not_built", "the parity action notice");
+
+    // Stop the isolated core while the screen stays open -> screen draws the offline state with the command
+    const stopped = await isolated.stop();
+    expect(stoppedCleanly(stopped)).toBe(true);
+    await run.until("herdr-core is not answering", "the offline banner");
+    expect(run.output()).toContain("hc server start");
+
+    run.type(DETACH);
+    const end = await run.ended;
+    expect(end.code).toBe(0);
+    expect(end.after?.canonical).toBe(true);
+    expect(end.after?.echo).toBe(true);
+  }, TEST_MS);
 });

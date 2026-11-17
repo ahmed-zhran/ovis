@@ -19,7 +19,8 @@ import { errorCode } from "./crash.ts";
 import type { Host, HostEnd } from "./host/index.ts";
 import type { InputEvent } from "./input/decode.ts";
 import { Framer } from "./input/framer.ts";
-import { placeholderChrome } from "./view/chrome.ts";
+import type { TuiThemeMode } from "./theme.generated.ts";
+import { buildChrome, sessionFromSocket } from "./view/chrome.ts";
 import { type Deadlines, earliest, FRAME_PASS_MS, HOLD_RELEASE_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, QUIT_BOUND_MS, STYLE_TABLE_LIMIT, CRASH_ACTIONS_KEPT } from "./model/deadlines.ts";
 import type { Effect } from "./model/effects.ts";
 import { focused } from "./model/focus.ts";
@@ -45,6 +46,10 @@ export interface LoopOptions {
   readKeys?: () => unknown;
   /** one attempt at the socket: the real socket transport unless a test wraps it */
   connect?: (path: string) => Promise<HcTransport>;
+  /** the hc session joined, shown in the header */
+  session?: string;
+  /** the folder the command was typed in, shown when the core has no workspaces */
+  cwd?: string;
 }
 
 /**
@@ -108,6 +113,10 @@ export function startLoop(options: LoopOptions): Loop {
   let painter: Painter | null = null;
   /** the host answered DECRQM 2026 at start */
   let sync = false;
+  let theme: TuiThemeMode = "dark";
+  let lastOfflineCode: string | null = null;
+  const session = options.session ?? sessionFromSocket(options.socket);
+  const cwd = options.cwd ?? "~";
   let grids = new Map<string, { emulator: unknown; grid: PaneGrid }>();
   let shape: ScreenShape | null = null;
   let shownKey = "";
@@ -189,7 +198,9 @@ export function startLoop(options: LoopOptions): Loop {
         firstState = null;
         told(notice.state);
       }
+      if ("code" in notice.state) lastOfflineCode = notice.state.code;
       if (notice.state.kind === "Online") {
+        lastOfflineCode = null;
         const epoch = notice.state.epoch;
         void link.hello().then((info) => {
           if (link.state.kind === "Online" && link.state.epoch === epoch) {
@@ -264,7 +275,7 @@ export function startLoop(options: LoopOptions): Loop {
         dispatch({ type: "keys", keys: options.readKeys ? options.readKeys() : options.keys, at: clock.now() });
         return;
       case "mouse":
-        // the hit map's actions are row 27's; the event is dropped here
+        // the hit map's mouse actions plug in here; the event is dropped for now
         act(`mouse:${effect.over}`);
         return;
       case "host_reply":
@@ -360,13 +371,28 @@ export function startLoop(options: LoopOptions): Loop {
         held.grid.copy(emulator, held.grid.allDirty);
         drawn.add(spot.pane);
       }
-      scenes.push(paneScene(spot, held.grid, actual, { live: view?.state.kind === "Live", hold: holds.has(spot.pane) }));
+      const live = view?.state.kind === "Live" && link.state.kind === "Online";
+      scenes.push(paneScene(spot, held.grid, actual, { live, hold: holds.has(spot.pane), dim: !live }));
     }
     const size = host.size();
+    const paneViews = new Map(panes.views().map((v) => [v.terminal, v]));
+    const linkInfo = { kind: link.state.kind === "Online" ? ("Online" as const) : ("Offline" as const), code: link.state.kind === "Online" ? null : ("code" in link.state ? link.state.code : lastOfflineCode) };
+    const chrome = buildChrome({
+      regions: shape.regions,
+      spots: shape.spots,
+      splits: shape.splits,
+      state,
+      world: world.view(),
+      panes: paneViews,
+      link: linkInfo,
+      session,
+      cwd,
+      theme,
+      colors: host.colorDepth,
+    });
     const frame = painter.paint({
-      // row 26's chrome replaces the placeholder here and draws the link's state from report().link (kind and code)
-      width: size.cols, height: size.rows, parts: placeholderChrome(shape.regions, shape.spots.filter((spot) => !spot.covered).map((spot) => spot.cells)),
-      panes: scenes, overlays: [], focus: paneFocus, input: null,
+      width: size.cols, height: size.rows, parts: chrome.parts,
+      panes: scenes, overlays: chrome.overlays, focus: paneFocus, input: chrome.input,
     });
     let taken = true;
     if (frame.bytes.length > 0) {
@@ -527,6 +553,7 @@ export function startLoop(options: LoopOptions): Loop {
     guard(() => {
       framer.setModes({ kitty: (probe.kittyFlags ?? 0) > 0 });
       sync = probe.syncOutput === true;
+      if (probe.theme === "light" || probe.theme === "dark") theme = probe.theme;
       painter = new Painter({ sync, colors: host.colorDepth });
       reshow();
       owePass();
