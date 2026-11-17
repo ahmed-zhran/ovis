@@ -8,7 +8,7 @@ import { emptyProbe, PROBE_QUERY, ReplyFilter, withReply } from "./probe.ts";
  * LEAVE undoes exactly these in reverse; raw mode goes last.
  */
 const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1004h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[>1u";
-const LEAVE = "\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l";
+export const LEAVE = "\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l";
 /**
  * Sent again after a resize and a focus-in, as some hosts drop them. The kitty flags are set on the
  * entry already pushed (`=1;1`), so the stack still holds one entry of ours.

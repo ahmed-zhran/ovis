@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { HeadlessHost } from "../testing/headless-host.ts";
+import { LEAVE as EXPORTED_LEAVE } from "./guard.ts";
 
 // The host's rules, run on the headless twin: it drives the same guard as the real host, with an
 // in-memory terminal, a manual clock and signals delivered by the test. The byte strings are the
@@ -29,6 +30,10 @@ describe("enter and leave", () => {
     host.leave();
     expect(host.log()).toEqual(["raw on", `write ${ENTER}`, `write ${LEAVE}`, "raw off"]);
     expect(host.hooked()).toBe(false);
+  });
+
+  it("exports exactly the bytes leave writes, for a parent that gives the terminal back after the screen died", () => {
+    expect(EXPORTED_LEAVE).toBe(LEAVE);
   });
 
   it("leaves once however often it is asked, and on the process's exit after a leave does nothing more", () => {
