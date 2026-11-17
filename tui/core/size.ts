@@ -35,8 +35,8 @@
  * A wait that outlived its cause would be counted again by a later attach: an attach with the
  * rectangle that nobody asked for, which between two idle screens takes the terminal back.
  *
- * A repaint leaves the terminal at the size the last viewer chose, and one that has nothing to
- * repaint is not made:
+ * Beside one other viewer, a repaint leaves the terminal at the size the last viewer chose, and one
+ * that has nothing to repaint is not made:
  * - when another viewer leaves, the core hands the terminal to a viewer that stays, at the size its
  *   attach advertises. For that viewer's pane the emulator already has that grid: no repaint is owed;
  * - every new attach needs a CLOSE first, and when this screen is the terminal's only viewer that
@@ -62,6 +62,15 @@
  *   is another viewer's choice of that very size, and a size heard behind the reply of a repaint
  *   that changed nothing is another viewer's later doing, as on any attach in use: neither is a
  *   sign of this repaint.
+ * Three cases are left open, each until someone types or changes a window (docs/tui/parity.md says
+ * what the user sees): an idle viewer whose window is exactly UNVIEWED attaching inside the pane's
+ * gap, which nothing tells from nobody; a viewer attaching as a repaint leaves beside an idle viewer
+ * that stays, when the core's reply overtakes that viewer's event (the repaint reads it as a later
+ * choice and keeps the older size); and three or more viewers of which two repaint in one turn: on
+ * the wire another screen's repaint and a choice are the same resumed attach, so a repaint can take
+ * the other's older size for a choice. In each the terminal rests at a size some viewer chose with
+ * its own rectangle, never at UNVIEWED, nothing attaches again, and the next key in a pane gives
+ * that pane's rectangle back (size.test.ts names each).
  * So "alone, the terminal takes the pane's rectangle" holds at every attach that carries the rectangle
  * (the first, and each one after a change of the rectangle) and at the user's next input. In between
  * a pane can be alone at another size in one way only: it repainted at the size another viewer chose,
@@ -75,7 +84,7 @@ export interface Size { cols: number; rows: number }
 export const sameSize = (a: Size | null, b: Size | null): boolean => a !== null && b !== null && a.cols === b.cols && a.rows === b.rows;
 
 /** where herdr-core runs a terminal nobody views (hc 0.1.17 and 0.1.18): the one sign of it, since the core's record names no viewers */
-export const UNVIEWED: Size = { cols: 200, rows: 120 };
+const UNVIEWED: Size = { cols: 200, rows: 120 };
 
 /**
  * Where the pane's own attach stands when a `size` event comes while no attach of the pane is shown: `none` left since the one before

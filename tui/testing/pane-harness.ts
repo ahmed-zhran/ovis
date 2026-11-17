@@ -524,7 +524,8 @@ export class Stage {
       // over a real socket a frame can be on its way with nothing in flight here: a call on that line comes back after it
       await Promise.all(this.screens.map((screen) => screen.overSocket && screen.link.state.kind === "Online" ? screen.link.call(BARRIER, {}).catch(() => {}) : null));
       await new Promise<void>((resolve) => setImmediate(resolve));
-      const resting = this.screens.every((screen) => screen.inflight === 0 && screen.link.state.kind !== "Connecting");
+      // a `size` event the fake holds back (`late`) is still on its way
+      const resting = this.core.heldEvents() === 0 && this.screens.every((screen) => screen.inflight === 0 && screen.link.state.kind !== "Connecting");
       quiet = resting && this.activity() === before ? quiet + 1 : 0;
     }
   }

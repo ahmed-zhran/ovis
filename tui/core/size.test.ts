@@ -4,7 +4,7 @@ import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../
 import { REATTACH_SETTLE_MS } from "../model/deadlines.ts";
 import { type Screen, Stage } from "../testing/pane-harness.ts";
 import type { PaneView } from "./pane.ts";
-import { attachSent, attachSize, clipTop, detached, newPaneSize, overtaken, type PaneSize, reattachDue, reattaching, rectangleChanged, replied, sizedBy, sizeHeard, sizeTold, took, UNVIEWED } from "./size.ts";
+import { attachSent, attachSize, clipTop, detached, newPaneSize, overtaken, type PaneSize, reattachDue, reattaching, rectangleChanged, replied, sizedBy, sizeHeard, sizeTold, took } from "./size.ts";
 
 // The size rules of the pane machine on the fake core, which carries herdr-core's own size rule as
 // probe c measured it: the eleven cases of the design (UB Q3) as row 23 narrows them (only the
@@ -1040,8 +1040,10 @@ describe("a repaint advertises the size the last viewer chose", () => {
   });
 
   it("the one order left open: a choice overtaken by the reply of a repaint that left beside another viewer is not seen", async () => {
-    // herdr-core let an attach's reply overtake the event of a change made just before it in 10 of 4,212 races. Beside a viewer that
-    // stays, such an event behind the reply reads like that viewer coming and going (the case above), so the repaint is not made again
+    // herdr-core lets an attach's reply overtake the event of a change made just before it: beside an idle viewer that stays, in more
+    // than half of the races where two attaches were written in one turn and the other was applied first (683 of 1,197 on hc 0.1.18,
+    // 695 of 1,195 on hc 0.1.17; docs/tui/parity.md has the other rates). Such an event behind the reply reads like that viewer coming
+    // and going (the case above), so the repaint is not made again: the terminal keeps the older size until the next input
     const { core, stage, screen, t } = await scene();
     await stage.live(screen, [t, 80, 24]);
     const rival = stage.rival();
@@ -1194,7 +1196,77 @@ describe("a repaint advertises the size the last viewer chose", () => {
   });
 });
 
+describe("three screens on one terminal: what holds when two of them repaint in one turn", () => {
+  // On the wire another screen's repaint and a viewer's choice are the same resumed attach, so a repaint that hears one ahead of its
+  // reply cannot tell which it was: with three screens the terminal can end at an older size (docs/tui/parity.md). What holds is
+  // pinned here, in three firing orders of the same sequence: the user types in A (80x24) beside B (110x35) and C (90x28), A's window
+  // becomes 100x30, and 150 ms later all three are due in one turn
+  const three = async (options: FakeCoreOptions, order: string) => {
+    const core = new FakeHcCore(options);
+    const stage = new Stage(core);
+    stages.push(stage);
+    const t = core.spawn().address;
+    // the stage fires its screens in the order they were made
+    const made = new Map<string, Screen>();
+    for (const name of order) made.set(name, await stage.screen());
+    const [a, b, c] = ["A", "B", "C"].map((name) => made.get(name)!) as [Screen, Screen, Screen];
+    for (const screen of [a, b, c]) screen.panes.focus(t);
+    await stage.live(a, [t, 80, 24]);
+    await stage.live(b, [t, 110, 35]);
+    await stage.live(c, [t, 90, 28]);
+    await stage.advance(1);
+    a.type("f");
+    a.show([t, 100, 30]);
+    await stage.settle();
+    await stage.advance(REATTACH_SETTLE_MS);
+    // the repaints and their corrections come to rest within twelve steps
+    for (let step = 0; step < 12; step++) {
+      await stage.advance(REATTACH_SETTLE_MS);
+      await stage.pass();
+    }
+    return { core, stage, t, a, b, c };
+  };
+  const rectangles = { A: "100x30", B: "110x35", C: "90x28" } as const;
+  const owner = (size: string) => Object.entries(rectangles).find(([, rect]) => rect === size)?.[0] ?? "nobody";
+
+  for (const [order, rests] of [["ACB", "110x35"], ["CAB", "100x30"], ["CBA", "100x30"]] as const) {
+    it(`fired ${order}: the terminal rests at ${owner(rests)}'s rectangle ${rests}, never at the size of a terminal nobody views; the wire stays as it is; each screen's next key gives its rectangle back`, async () => {
+      for (const options of [{}, OLD]) {
+        const { core, stage, t, a, b, c } = await three(options, order);
+        // the row's sentence holds in the orders where A fires after another screen: A attached with its rectangle last, 100x30.
+        // Where A fires first, B takes C's repaint at B's older 110x35 for a choice and is made again with it: the limit pinned here
+        expect([core.size(t), core.viewers(t).length]).toEqual([rests, 3]);
+        expect(core.size(t)).not.toBe(`${HEADLESS.cols}x${HEADLESS.rows}`);
+        // nothing attaches again and nothing else is sent for fifty steps
+        const wire = () => `${traffic(core).attaches} attaches, ${traffic(core).closes} CLOSE, ${traffic(core).sizes} size events, the terminal ${core.size(t)}`;
+        const still = wire();
+        for (let step = 0; step < 50; step++) {
+          await stage.advance(REATTACH_SETTLE_MS);
+          await stage.pass();
+          expect(wire()).toBe(still);
+        }
+        // no RESIZE, FOCUS or FACTS outside the user's input: A sent its key, the others nothing
+        expect([a.sent(t, SIZE_FRAMES).filter((frame) => frame !== "FOCUS 1"), b.sent(t, SIZE_FRAMES), c.sent(t, SIZE_FRAMES)]).toEqual([["DATA 66"], [], []]);
+        expect([a, b, c].map((screen) => screen.state(t))).toEqual(["Live", "Live", "Live"]);
+        // the next key in each screen: RESIZE with its rectangle where its channel advertises another size, then the key; the
+        // terminal takes that rectangle
+        for (const [name, screen] of [["C", c], ["B", b], ["A", a]] as const) {
+          const before = screen.sent(t, SIZE_FRAMES).length;
+          const view = screen.view(t);
+          const resize = view.advertised && view.advertised.cols === view.wanted.cols && view.advertised.rows === view.wanted.rows ? [] : [`RESIZE ${rectangles[name]}`];
+          expect(screen.type("k")).toEqual([{ sent: true }]);
+          await stage.settle();
+          expect(screen.sent(t, SIZE_FRAMES).slice(before).filter((frame) => frame !== "FOCUS 1")).toEqual([...resize, "DATA 6b"]);
+          expect(core.size(t)).toBe(rectangles[name]);
+        }
+      }
+    });
+  }
+});
+
 describe("the size rules as values", () => {
+  /** where herdr-core runs a terminal nobody views */
+  const UNVIEWED = HEADLESS;
   const at = (size: PaneSize) => reattachDue(size);
   const attached = (wanted: { cols: number; rows: number }, actual = wanted) => replied(attachSent(newPaneSize(wanted), wanted), actual);
   const A = { cols: 80, rows: 24 };

@@ -23,11 +23,15 @@
  * - Close before attach: a new attach leaves only after the core answered the CLOSE of the one before.
  * - The size is never taken by the screen itself: every attach is a resumed plain viewer, and a RESIZE
  *   (and, on a core without automatic input, FOCUS 1) leaves only directly ahead of the user's own
- *   input in the focused pane, which is the one place called the take. A repaint leaves the terminal
- *   at the size the last viewer chose, also when that viewer chose it between the pane's CLOSE and
- *   its next attach: it advertises what the core last said of a viewed terminal, never the size its
- *   own CLOSE left behind, and it is made again at once when the core's event for its own size shows
- *   that it took the terminal from a choice it had not heard of yet (size.ts).
+ *   input in the focused pane, which is the one place called the take. Beside one other viewer a
+ *   repaint leaves the terminal at the size the last viewer chose, also when that viewer chose it
+ *   between the pane's CLOSE and its next attach: it advertises what the core last said of a viewed
+ *   terminal, never the size its own CLOSE left behind, and it is made again at once when the core's
+ *   event for its own size shows that it took the terminal from a choice it had not heard of yet.
+ *   size.ts names the three cases that stay open until a user's next key or window change (an idle
+ *   viewer at exactly 200x120 inside the gap, a reply that overtakes an idle viewer's event, three
+ *   screens on one terminal): in them the terminal rests at an older size some viewer chose with its
+ *   own rectangle, never at 200x120, and nothing attaches again.
  * - Nothing here throws into its caller or into the connection's reader, and no emulator is called
  *   from inside its own callback: what an emulator says during a write is acted on after it returned.
  *

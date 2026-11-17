@@ -32,21 +32,37 @@ import type { PaneInput } from "./pane.ts";
  * somebody views is never left at that size. Which of those sizes a repaint has to advertise, the
  * last one a viewer chose, is what the second part holds.
  *
- * The second part puts TWO screens on ONE terminal, and beside them a viewer that drives it: windows
- * change (also twice 150 ms apart), the screens fire in either order within one turn of the clock, the
+ * The second part puts two screens on one terminal, and beside them a viewer that drives it: windows
+ * change (also twice 150 ms apart), the screens fire in any order within one turn of the clock, the
  * user types, the driving viewer comes, resizes, types and leaves, a screen leaves the tab and comes
- * back, and all of it also
- * inside the other screen's gap (its CLOSE answer or its attach reply held). Beside the fake core
- * runs a reference that hears every call and frame
- * the core gets and keeps the core's own size rule, with one difference: a screen's repaint advertises
- * the size the terminal has at that moment (or, with nobody viewing it, had when somebody last did).
- * Beside a viewer that drives the terminal a repaint's size has no effect, and the reference takes
- * what it advertised as it is. After every quiet tail the terminal must have the reference's size,
- * which is the size the last choosing viewer chose;
- * the wire must stay as it is; and no screen may have sent anything but a resumed attach and CLOSE
- * outside the user's input. Not here: a `size` event the core sends behind an attach's reply for a
- * change it made before (which the fake never does and real cores did in 10 of 4,212 races);
- * size.test.ts holds both forms of it.
+ * back, and all of it also inside another screen's gap (its CLOSE answer or its attach reply held).
+ * Beside the fake core runs a reference that hears every call and frame the core gets and keeps the
+ * core's own size rule, with one difference: a screen's repaint advertises the size the terminal has
+ * at that moment (or, with nobody viewing it, had when somebody last did). Beside a viewer that drives
+ * the terminal a repaint's size has no effect, and the reference takes what it advertised as it is.
+ *
+ * With two screens and the fake's usual order, after every quiet tail the terminal must have the
+ * reference's size, which is the size the last choosing viewer chose; the wire must stay as it is;
+ * and no screen may have sent anything but a resumed attach and CLOSE outside the user's input.
+ *
+ * In a quarter of the sequences a third screen joins, and in three in ten the fake sends a size event
+ * behind the reply of an attach written in the same turn (its `late` option: real cores do so in a
+ * sixth to more than half of such races). There the row's sentence does not hold, and docs/tui/parity.md
+ * says why: on the wire another screen's repaint and a viewer's choice are the same resumed attach,
+ * and an earlier change's event behind a reply reads like a later choice, so a repaint can keep or take
+ * an older size. For those tails with no viewer whose input leads, only this is asserted: the terminal
+ * rests at a size some viewer chose with its own rectangle in the sequence (an attach that carried it,
+ * the take's RESIZE, the driver's attach or RESIZE), never at the size of a terminal nobody views; the
+ * wire stays as it is; nothing leaves a screen outside the user's input but a resumed attach and CLOSE;
+ * and at the end the next key in a screen sends RESIZE with its rectangle (where its channel advertises
+ * another size) and then the key, after which the full rule holds again. Where a viewer's input leads,
+ * the full rule holds in those sequences too.
+ *
+ * The viewer beside the screens drives the terminal. An earlier form of this part also had a viewer
+ * that only views, and with it the model failed in a case of the same family: both screens between
+ * their CLOSE and their next attach, the core falls back to that viewer's older size, and a repaint
+ * takes it for a choice. That viewer was taken out of the generator then, which this header did not
+ * say at first; the third screen stands for that family now, under the weaker oracle above.
  *
  * OVIS_TUI_MODEL_SEQUENCES sets how many sequences of each part run (default 200 one-screen and 150
  * two-screen sequences, which is what the unit lane runs; OVIS_TUI_MODEL_PAIRS sets the second count
@@ -793,25 +809,44 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
 
 const PAIR_SIZES = [[80, 24], [100, 30], [110, 35], [120, 40], [90, 28], [60, 20]] as const;
 const PAIR_ROUNDS = 3;
+/** the shares of second-part sequences with a third screen, and with the core's late order */
+const THREE_SHARE = 0.25;
+const LATE_SHARE = 0.3;
+const ORDERS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] as const;
 const PAIR_STEPS = 7;
 
-interface PairTotals { steps: number; rests: number; attaches: number; repaints: number; unshownAgain: number; inGap: number; sameTurn: number; takes: number }
+interface PairTotals { steps: number; rests: number; attaches: number; repaints: number; unshownAgain: number; inGap: number; sameTurn: number; takes: number; threeScreens: number; late: number; heldEvents: number; weakRests: number; restored: number }
 
-/** Two screens and a rival viewer on one terminal, with a reference beside the core that says what size the last choosing viewer chose. */
+/**
+ * Two screens (or three) and a rival viewer on one terminal, with a reference beside the core that says what size the last choosing
+ * viewer chose. Which sequences have a third screen or the core's late order is drawn apart from the steps, so that a two-screen
+ * sequence without the late order is the same for a seed as before either existed.
+ */
 async function pair(seed: number, totals: PairTotals): Promise<void> {
   const random = mulberry(seed);
   const chance = (share: number) => random() < share;
   const pick = <T>(list: readonly T[]): T => list[Math.floor(random() * list.length)]!;
+  const variant = mulberry(seed ^ 0x57_57_57);
+  const three = variant() < THREE_SHARE;
+  const lateOrder = variant() < LATE_SHARE;
+  const held = mulberry(seed ^ 0x1a_7e_1a);
   const options: FakeCoreOptions = chance(0.4) ? { version: "0.1.17", features: FEATURES_0_1_17 } : {};
-  const core = new FakeHcCore(options);
+  const core = new FakeHcCore(lateOrder ? { ...options, late: () => { const hold = held() < 0.5; if (hold) totals.heldEvents++; return hold; } } : options);
   const stage = new Stage(core);
   const t = core.spawn().address;
-  const screens = [await stage.screen(), await stage.screen()] as const;
+  const screens: Screen[] = [await stage.screen(), await stage.screen()];
+  if (three) screens.push(await stage.screen());
+  if (three) totals.threeScreens++;
+  if (lateOrder) totals.late++;
+  /** the weaker oracle's sequences: what holds there is in the header */
+  const weak = three || lateOrder;
   const rival: Rival = stage.rival();
   const headless = `${HEADLESS.cols}x${HEADLESS.rows}`;
   const broken: string[] = [];
   const trace: string[] = [];
-  const name = (screen: Screen) => (screen === screens[0] ? "A" : "B");
+  const name = (screen: Screen) => "ABC"[screens.indexOf(screen)]!;
+  /** every size a viewer chose with its own rectangle in this sequence: an attach that carried it, the take's RESIZE, the driver's */
+  const rectangles = new Set<string>();
 
   // the test's own account of each screen: its rectangle (null: out of the tab), what its newest attach advertised on the wire (null: none
   // since it was shown), whether its rectangle changed since, so that its next attach has to carry the rectangle (kind (a)), whether it is
@@ -879,6 +914,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
       // kind (a): the first attach since the pane was shown, or one after its rectangle changed; else a repaint
       const repaint = mine.advertised !== null && !mine.changed && !(mine.mayCarry && size === mine.rect);
       if (!repaint && size !== mine.rect) broken.push(`I8 ${name(screen)}'s attach after a change of its rectangle advertises ${size}, not the rectangle ${mine.rect}`);
+      if (!repaint) rectangles.add(size);
       if (repaint && size === headless) broken.push(`I-b ${name(screen)}'s repaint advertises ${headless}, the size of a terminal nobody views`);
       const before = screen.attaches.at(-2);
       // a repaint that follows an attach which was never shown: among them the ones made again at once
@@ -923,6 +959,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
     if (!screen.type("k")[0]!.sent) return;
     // the take: the channel advertises the rectangle from here on
     mine.advertised = mine.rect;
+    if (mine.rect !== null) rectangles.add(mine.rect);
     mine.changed = false;
   };
   const pass = (): void => {
@@ -934,8 +971,10 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
   };
   const fire = (): void => {
     const due = screens.filter((screen) => screen.panes.deadlines().has("reattach") && screen.panes.deadlines().get("reattach")! <= stage.clock.now);
-    if (due.length === 2) totals.sameTurn++;
-    for (const screen of chance(0.5) ? screens : [screens[1], screens[0]]) screen.fire();
+    if (due.length >= 2) totals.sameTurn++;
+    // two screens in either order; three in any of the six, drawn apart from the steps
+    const order = screens.length === 2 ? (chance(0.5) ? screens : [screens[1]!, screens[0]!]) : ORDERS[Math.floor(variant() * ORDERS.length)]!.map((at) => screens[at]!);
+    for (const screen of order) screen.fire();
   };
   const size = () => pick(PAIR_SIZES).join("x");
   /** a screen between its CLOSE and its next attach's reply */
@@ -945,11 +984,13 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
     if (between()) totals.inGap++;
     // a viewer that drives the terminal: each screen is already the viewer that only views beside the other
     if (!rival.attached) {
+      rectangles.add(`${cols}x${rows}`);
       await rival.attach(t, cols, rows);
       return `the driver attaches ${cols}x${rows}`;
     }
     const kind = random();
     if (kind < 0.45) {
+      rectangles.add(`${cols}x${rows}`);
       rival.resize(cols, rows);
       return `the driver resizes ${cols}x${rows}`;
     }
@@ -1005,7 +1046,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
     if (broken.length > 0) throw new Error(`after "${after}": ${broken.slice(0, 4).join(" | ")}`);
   };
   /** Nobody acts any more: the wire comes to rest, and the terminal has the size the last choosing viewer chose. */
-  const rest = async (label: string): Promise<void> => {
+  const rest = async (label: string, counted = true): Promise<void> => {
     for (const screen of screens) screen.release();
     await stage.settle();
     let still = "";
@@ -1021,7 +1062,11 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
     const expected = chosen();
     const actual = core.size(t);
     const told = [...viewers.values()].map((viewer) => `${viewer.size}${viewer.stamp === null ? "" : " (drives)"}`).join(", ");
-    if (expected !== null && actual !== expected) broken.push(`I-a ${label}: the terminal rests at ${actual}, and the last choosing viewer chose ${expected} (the reference's viewers: ${told}; the core's: ${core.viewers(t).map((viewer) => `${viewer.cols}x${viewer.rows}`).join(", ")})`);
+    // with three screens, or a reply that overtakes an earlier event, and no viewer whose input leads: an older size some viewer chose
+    if (weak && expected !== null && leader()?.stamp == null) {
+      totals.weakRests++;
+      if (!rectangles.has(actual)) broken.push(`I-a (three screens or the late order) ${label}: the terminal rests at ${actual}, a size no viewer chose with its own rectangle (${[...rectangles].join(", ")})`);
+    } else if (expected !== null && actual !== expected) broken.push(`I-a ${label}: the terminal rests at ${actual}, and the last choosing viewer chose ${expected} (the reference's viewers: ${told}; the core's: ${core.viewers(t).map((viewer) => `${viewer.cols}x${viewer.rows}`).join(", ")})`);
     if (expected === null && actual !== headless) broken.push(`I-a ${label}: nobody views the terminal and it is at ${actual}`);
     if (expected !== null && actual === headless) broken.push(`I-b ${label}: a viewed terminal rests at ${headless}`);
     for (const screen of screens) {
@@ -1030,9 +1075,27 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
       if (view?.state.kind !== "Live") broken.push(`${label}: ${name(screen)}'s pane is ${screen.state(t)} at rest`);
       else if (!view.actual || `${view.actual.cols}x${view.actual.rows}` !== actual) broken.push(`I10 ${label}: ${name(screen)} holds ${JSON.stringify(view.actual)} and the terminal is at ${actual}`);
     }
-    totals.rests++;
+    if (counted) totals.rests++;
     trace.push("rest");
     fail(label);
+  };
+  /** The next key in a screen gives its rectangle back: RESIZE with it where the channel advertises another size, then the key. */
+  const restores = async (): Promise<void> => {
+    const ready = screens.filter((screen) => own.get(screen)!.rect !== null && screen.panes.view(t)?.state.kind === "Live");
+    if (ready.length === 0) return;
+    const screen = ready[Math.floor(variant() * ready.length)]!;
+    const rect = own.get(screen)!.rect!;
+    const view = screen.view(t);
+    const resize = view.advertised && `${view.advertised.cols}x${view.advertised.rows}` === rect ? [] : [`RESIZE ${rect}`];
+    const from = screen.calls.length;
+    type(screen);
+    const made = screen.calls.slice(from).filter((call) => call.op !== "credit" && call.text !== "FOCUS 1").map((call) => call.text.startsWith("DATA ") ? "DATA" : call.text);
+    if (JSON.stringify(made) !== JSON.stringify([...resize, "DATA"])) broken.push(`the next key in ${name(screen)} sent ${made.join(", ")}, not ${[...resize, "DATA"].join(", ")}`);
+    trace.push(`${name(screen)} types`);
+    await rest("after the next key", false);
+    if (core.size(t) !== rect) broken.push(`the next key in ${name(screen)}: the terminal rests at ${core.size(t)}, not its rectangle ${rect}`);
+    totals.restored++;
+    fail("the next key");
   };
 
   try {
@@ -1056,6 +1119,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
       fail("the steps");
       await rest(`round ${round + 1}`);
     }
+    if (weak) await restores();
   } catch (error) {
     throw new Error(`two-screen sequence seed ${seed} failed (replay: OVIS_TUI_MODEL_PAIR=${seed}) ${error instanceof Error ? error.message : String(error)}\nsteps: ${trace.join(" > ")}`);
   } finally {
@@ -1064,7 +1128,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
 }
 
 it(`${PAIR ? 1 : PAIRS} seeded sequences of two screens on one terminal rest at the size the last viewer chose (seed ${PAIR ?? SEED})`, async () => {
-  const totals: PairTotals = { steps: 0, rests: 0, attaches: 0, repaints: 0, unshownAgain: 0, inGap: 0, sameTurn: 0, takes: 0 };
+  const totals: PairTotals = { steps: 0, rests: 0, attaches: 0, repaints: 0, unshownAgain: 0, inGap: 0, sameTurn: 0, takes: 0, threeScreens: 0, late: 0, heldEvents: 0, weakRests: 0, restored: 0 };
   const seeds = PAIR ? [Number(PAIR)] : Array.from({ length: PAIRS }, (_, index) => SEED * 1_000_003 + index);
   for (const seed of seeds) await pair(seed, totals);
   console.log(`pane model, two screens: seed ${PAIR ?? SEED}, ${seeds.length} sequences, ${JSON.stringify(totals)}`);
@@ -1075,6 +1139,7 @@ it(`${PAIR ? 1 : PAIRS} seeded sequences of two screens on one terminal rest at 
     expect(totals.inGap).toBeGreaterThan(PAIRS / 10);
     expect(totals.sameTurn).toBeGreaterThan(PAIRS / 10);
     expect(totals.unshownAgain).toBeGreaterThan(0);
+    expect([totals.threeScreens, totals.late, totals.heldEvents, totals.weakRests, totals.restored].every((count) => count > 0)).toBe(true);
   }
 }, 1_500_000);
 
