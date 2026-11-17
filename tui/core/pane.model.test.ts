@@ -1,5 +1,6 @@
 import { expect, it } from "bun:test";
-import { type FakeCoreOptions, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../../server/herdr-core/core.fake.ts";
+import { FRAME_CLOSE, FRAME_DATA, FRAME_FOCUS, FRAME_RESIZE } from "../../server/herdr-core/connection.ts";
+import { type FakeCoreOptions, type FakeEntry, FakeHcCore, FEATURES_0_1_17, HEADLESS } from "../../server/herdr-core/core.fake.ts";
 import { typedKey } from "../input/decode.ts";
 import { PANE_REOPEN_LIMIT } from "../model/deadlines.ts";
 import { type AttachRecord, type ChannelCall, type EmulatorRecord, type Rival, type Screen, Stage } from "../testing/pane-harness.ts";
@@ -24,18 +25,40 @@ import type { PaneInput } from "./pane.ts";
  * up. For each the number of attaches must be exactly what the row allows ("once per change"), and
  * the terminal's size must not move while nobody types.
  *
- * A repaint never changes the terminal's size. Two rules hold it, neither of which asks the machine:
- * an attach advertises the pane's rectangle or the size the pane's attach before it was last told
- * (its reply, then the `size` events on it until our CLOSE), never one heard after that CLOSE; and a
- * terminal somebody views is never left at the size of a terminal nobody views.
+ * A repaint leaves the terminal at the size the last viewer chose. Two rules hold it here, neither of
+ * which asks the machine: an attach advertises the pane's rectangle, or a size the core itself said
+ * the terminal has since the pane's last shown attach (what that attach was told, then the `size`
+ * events the core sent from its CLOSE on), never the size of a terminal nobody views; and a terminal
+ * somebody views is never left at that size. Which of those sizes a repaint has to advertise, the
+ * last one a viewer chose, is what the second part holds.
  *
- * OVIS_TUI_MODEL_SEQUENCES sets how many sequences run (default 300, which is what the unit lane
- * runs; the evidence runs use 2000 and several seeds), OVIS_TUI_MODEL_SEED picks the run
- * (default 23) and OVIS_TUI_MODEL_ONLY replays one sequence by the seed a failure printed.
+ * The second part puts TWO screens on ONE terminal, and beside them a viewer that drives it: windows
+ * change (also twice 150 ms apart), the screens fire in either order within one turn of the clock, the
+ * user types, the driving viewer comes, resizes, types and leaves, a screen leaves the tab and comes
+ * back, and all of it also
+ * inside the other screen's gap (its CLOSE answer or its attach reply held). Beside the fake core
+ * runs a reference that hears every call and frame
+ * the core gets and keeps the core's own size rule, with one difference: a screen's repaint advertises
+ * the size the terminal has at that moment (or, with nobody viewing it, had when somebody last did).
+ * Beside a viewer that drives the terminal a repaint's size has no effect, and the reference takes
+ * what it advertised as it is. After every quiet tail the terminal must have the reference's size,
+ * which is the size the last choosing viewer chose;
+ * the wire must stay as it is; and no screen may have sent anything but a resumed attach and CLOSE
+ * outside the user's input. Not here: a `size` event the core sends behind an attach's reply for a
+ * change it made before (which the fake never does and real cores did in 10 of 4,212 races);
+ * size.test.ts holds both forms of it.
+ *
+ * OVIS_TUI_MODEL_SEQUENCES sets how many sequences of each part run (default 200 one-screen and 150
+ * two-screen sequences, which is what the unit lane runs; OVIS_TUI_MODEL_PAIRS sets the second count
+ * alone; the evidence runs use thousands and several seeds), OVIS_TUI_MODEL_SEED picks the run
+ * (default 23), and OVIS_TUI_MODEL_ONLY or OVIS_TUI_MODEL_PAIR replays one sequence of the first or
+ * the second part by the seed a failure printed.
  */
 const SEED = Number(process.env["OVIS_TUI_MODEL_SEED"] ?? 23);
-const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 300);
+const SEQUENCES = Number(process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 200);
+const PAIRS = Number(process.env["OVIS_TUI_MODEL_PAIRS"] ?? process.env["OVIS_TUI_MODEL_SEQUENCES"] ?? 150);
 const ONLY = process.env["OVIS_TUI_MODEL_ONLY"];
+const PAIR = process.env["OVIS_TUI_MODEL_PAIR"];
 const STEPS = 28;
 const RECTANGLES = [[20, 6], [30, 8], [40, 10], [24, 7]] as const;
 const OUTPUTS = [
@@ -99,17 +122,27 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
     if (attach && attach.received.length > 0 && !attach.closeAsked && !attach.closeHeard) toldSize.set(attach, `${String(notice.event.data?.["cols"])}x${String(notice.event.data?.["rows"])}`);
   };
   const headless = `${HEADLESS.cols}x${HEADLESS.rows}`;
+  /** where the core's log stood when the machine asked each attach's CLOSE: what the core said of the terminal's size from there on is what the pane could hear in its gap */
+  const closedAt = new Map<AttachRecord, { core: FakeHcCore; at: number }>();
 
-  // I8, I9: every attach is a resumed plain viewer with the rectangle or (a repaint) the size its pane was told last, and none leaves while an earlier one is open
+  // I8, I9: every attach is a resumed plain viewer with the rectangle or (a repaint) a size the core said the terminal has since
+  // the pane's last shown attach, never the size of a terminal nobody views, and none leaves while an earlier one is open
   screen.hooks.attach = (record) => {
     totals.attaches++;
     const { terminal } = record;
     const params = record.params;
     if (params["resumed"] !== true || params["history"] !== 2000 || "observe" in params || "resize_notifications" in params) broken.push(`I8 attach params ${JSON.stringify(params)}`);
     const size = `${String(params["cols"])}x${String(params["rows"])}`;
-    const before = screen.attaches.filter((other) => other !== record && other.terminal === terminal).at(-1);
+    const past = screen.attaches.filter((other) => other !== record && other.terminal === terminal);
+    const before = past.at(-1);
     const told = before ? toldSize.get(before) ?? before.reply : null;
-    if (size !== wantedOf(terminal) && size !== told) broken.push(`I8 ${terminal} attached at ${size}: neither its rectangle ${wantedOf(terminal)} nor ${told}, the size its attach before was told last`);
+    // the pane's last attach that was shown (taken live), or its first: the core's `size` events from that attach's CLOSE on
+    const since = [...past].reverse().find((other) => liveAt.has(other)) ?? past[0];
+    const mark = since ? closedAt.get(since) : undefined;
+    const said = mark && mark.core === stage.core
+      ? stage.core.log.slice(mark.at).flatMap((entry) => entry.what === "event" && entry.type === "size" && entry.terminal === terminal ? [`${String((entry.data as Record<string, unknown>)["cols"])}x${String((entry.data as Record<string, unknown>)["rows"])}`] : [])
+      : [];
+    if (size !== wantedOf(terminal) && (size === headless || (size !== told && !said.includes(size)))) broken.push(`I8 ${terminal} attached at ${size}: neither its rectangle ${wantedOf(terminal)}, nor ${told}, the size its attach before was told last, nor a size the core said the terminal has since (${said.join(", ") || "none"}), or the size of a terminal nobody views`);
     if (!shown.has(terminal)) broken.push(`I14 ${terminal} is not shown and was attached`);
     const earlier = screen.attaches.filter((other) => other !== record && other.terminal === terminal && other.state !== "refused" && !other.closeHeard);
     if (earlier.length > 0) broken.push(`I9 ${terminal} attached again while attach ${earlier.map((other) => other.index).join(",")} is not closed`);
@@ -139,7 +172,10 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
     const terminal = attach.terminal;
     const where = `${op} ${text.slice(0, 40)} on attach ${attach.index} (${terminal})`;
     if (attach.closeAsked) broken.push(`I14 ${where} after our CLOSE`);
-    if (op === "close") return;
+    if (op === "close") {
+      closedAt.set(attach, { core: stage.core, at: stage.core.log.length });
+      return;
+    }
     if (shown.get(terminal)?.covered) broken.push(`I6 ${where} while the pane is covered`);
     if (op === "credit") return;
     if (op === "focus" && text === "FOCUS 0") {
@@ -754,6 +790,293 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
     await stage.close();
   }
 }
+
+const PAIR_SIZES = [[80, 24], [100, 30], [110, 35], [120, 40], [90, 28], [60, 20]] as const;
+const PAIR_ROUNDS = 3;
+const PAIR_STEPS = 7;
+
+interface PairTotals { steps: number; rests: number; attaches: number; repaints: number; unshownAgain: number; inGap: number; sameTurn: number; takes: number }
+
+/** Two screens and a rival viewer on one terminal, with a reference beside the core that says what size the last choosing viewer chose. */
+async function pair(seed: number, totals: PairTotals): Promise<void> {
+  const random = mulberry(seed);
+  const chance = (share: number) => random() < share;
+  const pick = <T>(list: readonly T[]): T => list[Math.floor(random() * list.length)]!;
+  const options: FakeCoreOptions = chance(0.4) ? { version: "0.1.17", features: FEATURES_0_1_17 } : {};
+  const core = new FakeHcCore(options);
+  const stage = new Stage(core);
+  const t = core.spawn().address;
+  const screens = [await stage.screen(), await stage.screen()] as const;
+  const rival: Rival = stage.rival();
+  const headless = `${HEADLESS.cols}x${HEADLESS.rows}`;
+  const broken: string[] = [];
+  const trace: string[] = [];
+  const name = (screen: Screen) => (screen === screens[0] ? "A" : "B");
+
+  // the test's own account of each screen: its rectangle (null: out of the tab), what its newest attach advertised on the wire (null: none
+  // since it was shown), whether its rectangle changed since, so that its next attach has to carry the rectangle (kind (a)), whether it is
+  // between its CLOSE and its next attach, and whether its rectangle changed for that CLOSE or inside that gap: then its next attach
+  // may carry the rectangle also when the change was undone meanwhile (it has closed, and attaches with what its window is)
+  const own = new Map<Screen, { rect: string | null; advertised: string | null; changed: boolean; between: boolean; mayCarry: boolean }>(screens.map((screen) => [screen, { rect: null, advertised: null, changed: false, between: false, mayCarry: false }]));
+  /** the attaches of each screen that were taken live */
+  const shown = new Set<AttachRecord>();
+  const newest = (screen: Screen) => screen.attaches.at(-1);
+
+  // the reference: the core's own size rule (the latest stamp leads, else the newest attach) over every viewer the core's log shows,
+  // where a screen's repaint advertises the terminal's size at that moment, or the last one it had while somebody viewed it
+  interface Viewer { size: string; stamp: number | null; attached: number }
+  const viewers = new Map<string, Viewer>();
+  let ticks = 0;
+  let lastViewed: string | null = null;
+  const leader = (): Viewer | null => {
+    let lead: Viewer | null = null;
+    for (const viewer of viewers.values()) if (!lead || (viewer.stamp ?? -1) > (lead.stamp ?? -1) || ((viewer.stamp ?? -1) === (lead.stamp ?? -1) && viewer.attached > lead.attached)) lead = viewer;
+    return lead;
+  };
+  const chosen = (): string | null => leader()?.size ?? null;
+  /** per line: what the screen's attach about to reach the core is (noted as the machine asks it), and the attach the core is answering */
+  const asking = new Map<number, { repaint: boolean }>();
+  const answering = new Map<number, { size: string; resumed: boolean }>();
+  const see = (entry: FakeEntry): void => {
+    if (entry.what === "call" && entry.method === "terminal.attach" && entry.params["terminal"] === t) {
+      const asked = asking.get(entry.line);
+      asking.delete(entry.line);
+      const sent = `${String(entry.params["cols"])}x${String(entry.params["rows"])}`;
+      // beside a viewer that drives the terminal the core does not use what a repaint advertises: it counts as it was sent
+      const copies = asked?.repaint === true && leader()?.stamp == null;
+      answering.set(entry.line, { size: copies ? chosen() ?? lastViewed ?? sent : sent, resumed: entry.params["resumed"] === true });
+    } else if (entry.what === "reply" && entry.method === "terminal.attach") {
+      const attach = answering.get(entry.line);
+      answering.delete(entry.line);
+      const channel = (entry.result as { channel?: number } | undefined)?.channel;
+      if (attach && channel !== undefined) viewers.set(`${entry.line}:${channel}`, { size: attach.size, stamp: attach.resumed ? null : ++ticks, attached: ++ticks });
+    } else if (entry.what === "frame" && entry.from === "viewer") {
+      const key = `${entry.line}:${entry.channel}`;
+      const viewer = viewers.get(key);
+      if (!viewer) return;
+      if (entry.kind === FRAME_CLOSE) viewers.delete(key);
+      else if (entry.kind === FRAME_DATA || (entry.kind === FRAME_FOCUS && entry.payload[0] === 1)) viewer.stamp = ++ticks;
+      else if (entry.kind === FRAME_RESIZE && entry.payload.length >= 4) {
+        viewer.size = `${Buffer.from(entry.payload).readUInt16LE(0)}x${Buffer.from(entry.payload).readUInt16LE(2)}`;
+        viewer.stamp = ++ticks;
+      }
+    } else if (entry.what === "event" && entry.type === "size") trace.push(`[${String((entry.data as Record<string, unknown>)["cols"])}x${String((entry.data as Record<string, unknown>)["rows"])}]`);
+    lastViewed = chosen() ?? lastViewed;
+  };
+  const log = core.log as FakeEntry[];
+  const push = log.push.bind(log);
+  log.push = (...entries: FakeEntry[]) => {
+    for (const entry of entries) see(entry);
+    return push(...entries);
+  };
+
+  for (const screen of screens) {
+    screen.hooks.attach = (record) => {
+      const mine = own.get(screen)!;
+      const size = `${String(record.params["cols"])}x${String(record.params["rows"])}`;
+      if (record.params["resumed"] !== true || "observe" in record.params || "resize_notifications" in record.params) broken.push(`I-c ${name(screen)} attached with ${JSON.stringify(record.params)}`);
+      if (mine.rect === null) broken.push(`${name(screen)} attached while it shows no pane`);
+      // kind (a): the first attach since the pane was shown, or one after its rectangle changed; else a repaint
+      const repaint = mine.advertised !== null && !mine.changed && !(mine.mayCarry && size === mine.rect);
+      if (!repaint && size !== mine.rect) broken.push(`I8 ${name(screen)}'s attach after a change of its rectangle advertises ${size}, not the rectangle ${mine.rect}`);
+      if (repaint && size === headless) broken.push(`I-b ${name(screen)}'s repaint advertises ${headless}, the size of a terminal nobody views`);
+      const before = screen.attaches.at(-2);
+      // a repaint that follows an attach which was never shown: among them the ones made again at once
+      if (repaint && before && !shown.has(before) && before.closeAsked) totals.unshownAgain++;
+      asking.set(record.line, { repaint });
+      trace.push(`[${name(screen)} ${repaint ? "repaints at" : "attaches with"} ${size}]`);
+      Object.assign(mine, { changed: false, between: false, mayCarry: false });
+      mine.advertised = size;
+      totals.attaches++;
+      if (repaint) totals.repaints++;
+    };
+    // I-c: outside the user's input a screen sends nothing but CLOSE and credit, and FOCUS 0 as its pane leaves the tab on a channel that got FOCUS 1
+    screen.hooks.call = (call: ChannelCall) => {
+      if (call.op === "close") Object.assign(own.get(screen)!, { between: true, mayCarry: own.get(screen)!.changed });
+      if (call.op === "close" || call.op === "credit") return;
+      if (call.text === "FOCUS 0" && own.get(screen)!.rect === null) return;
+      if (call.input === null && call.op !== "writeAutomatic") broken.push(`I-c ${name(screen)} sent ${call.text} without the user's input`);
+      if (call.op === "resize") {
+        if (call.text !== `RESIZE ${own.get(screen)!.rect}`) broken.push(`I-c ${name(screen)} sent ${call.text}, not its rectangle ${own.get(screen)!.rect}`);
+        totals.takes++;
+      }
+    };
+  }
+
+  const show = (screen: Screen, rect: string | null): void => {
+    const mine = own.get(screen)!;
+    if (rect === null) {
+      Object.assign(mine, { rect: null, advertised: null, changed: false, between: false, mayCarry: false });
+      screen.show();
+      return;
+    }
+    if (rect === mine.rect) return;
+    if (mine.between) mine.mayCarry = true;
+    // a rectangle that comes back to what the channel advertises leaves nothing to tell the core
+    mine.changed = mine.advertised !== null && rect !== mine.advertised;
+    mine.rect = rect;
+    const [cols, rows] = rect.split("x").map(Number) as [number, number];
+    screen.show([t, cols, rows]);
+  };
+  const type = (screen: Screen): void => {
+    const mine = own.get(screen)!;
+    if (!screen.type("k")[0]!.sent) return;
+    // the take: the channel advertises the rectangle from here on
+    mine.advertised = mine.rect;
+    mine.changed = false;
+  };
+  const pass = (): void => {
+    for (const screen of screens) {
+      screen.pass();
+      const record = newest(screen);
+      if (record && screen.panes.view(t)?.state.kind === "Live") shown.add(record);
+    }
+  };
+  const fire = (): void => {
+    const due = screens.filter((screen) => screen.panes.deadlines().has("reattach") && screen.panes.deadlines().get("reattach")! <= stage.clock.now);
+    if (due.length === 2) totals.sameTurn++;
+    for (const screen of chance(0.5) ? screens : [screens[1], screens[0]]) screen.fire();
+  };
+  const size = () => pick(PAIR_SIZES).join("x");
+  /** a screen between its CLOSE and its next attach's reply */
+  const between = () => screens.some((screen) => { const state = screen.panes.view(t)?.state.kind; return state === "Closing" || state === "Opening"; });
+  const rivalActs = async (): Promise<string> => {
+    const [cols, rows] = pick(PAIR_SIZES);
+    if (between()) totals.inGap++;
+    // a viewer that drives the terminal: each screen is already the viewer that only views beside the other
+    if (!rival.attached) {
+      await rival.attach(t, cols, rows);
+      return `the driver attaches ${cols}x${rows}`;
+    }
+    const kind = random();
+    if (kind < 0.45) {
+      rival.resize(cols, rows);
+      return `the driver resizes ${cols}x${rows}`;
+    }
+    if (kind < 0.6) {
+      rival.type("r");
+      return "the driver types";
+    }
+    await rival.detach();
+    return "the driver leaves";
+  };
+  const windowChanges = (): string => {
+    const screen = pick(screens);
+    const rect = size();
+    if (own.get(screen)!.rect === null) return `${name(screen)} is out of the tab`;
+    if (between()) totals.inGap++;
+    show(screen, rect);
+    return `${name(screen)}'s window ${rect}`;
+  };
+  const clock = (): string => {
+    const ms = pick([0, 50, 149, 150, 150, 151]);
+    stage.clock.now += ms;
+    fire();
+    return `${ms} ms`;
+  };
+
+  const steps: [number, () => string | Promise<string>][] = [
+    [12, windowChanges],
+    [12, clock],
+    [5, () => { pass(); return "pass"; }],
+    [4, () => { const screen = pick(screens); type(screen); return `${name(screen)} types`; }],
+    [8, rivalActs],
+    [2, () => {
+      const screen = pick(screens);
+      const mine = own.get(screen)!;
+      if (mine.rect === null) {
+        show(screen, size());
+        return `${name(screen)} comes back to the tab`;
+      }
+      show(screen, null);
+      return `${name(screen)} leaves the tab`;
+    }],
+    [4, () => { const screen = pick(screens); screen.faults.holdCloses = true; return `${name(screen)}'s CLOSE answers held`; }],
+    [2, () => { const screen = pick(screens); screen.faults.holdReplies = true; return `${name(screen)}'s replies held`; }],
+    [5, () => { const screen = pick(screens); screen.release(); return `${name(screen)}'s held answers let go`; }],
+  ];
+  const total = steps.reduce((sum, [weight]) => sum + weight, 0);
+  const draw = () => {
+    let at = random() * total;
+    return steps.find(([weight]) => (at -= weight) < 0)![1];
+  };
+  const wire = () => `${core.calls().filter((call) => call.method === "terminal.attach").length} attaches, ${core.log.filter((entry) => entry.what === "frame" && entry.from === "viewer" && entry.kind !== 1).length} frames, ${core.events(t, "size").length} size events, the terminal at ${core.size(t)}`;
+  const fail = (after: string) => {
+    if (broken.length > 0) throw new Error(`after "${after}": ${broken.slice(0, 4).join(" | ")}`);
+  };
+  /** Nobody acts any more: the wire comes to rest, and the terminal has the size the last choosing viewer chose. */
+  const rest = async (label: string): Promise<void> => {
+    for (const screen of screens) screen.release();
+    await stage.settle();
+    let still = "";
+    for (let turn = 0; turn < 10; turn++) {
+      stage.clock.now += 150;
+      for (const screen of screens) screen.fire();
+      await stage.settle();
+      pass();
+      await stage.settle();
+      if (turn === 4) still = wire();
+      if (turn > 4 && wire() !== still) broken.push(`I-d ${label}, turn ${turn} of the quiet tail: ${wire()}, after ${still}`);
+    }
+    const expected = chosen();
+    const actual = core.size(t);
+    const told = [...viewers.values()].map((viewer) => `${viewer.size}${viewer.stamp === null ? "" : " (drives)"}`).join(", ");
+    if (expected !== null && actual !== expected) broken.push(`I-a ${label}: the terminal rests at ${actual}, and the last choosing viewer chose ${expected} (the reference's viewers: ${told}; the core's: ${core.viewers(t).map((viewer) => `${viewer.cols}x${viewer.rows}`).join(", ")})`);
+    if (expected === null && actual !== headless) broken.push(`I-a ${label}: nobody views the terminal and it is at ${actual}`);
+    if (expected !== null && actual === headless) broken.push(`I-b ${label}: a viewed terminal rests at ${headless}`);
+    for (const screen of screens) {
+      if (own.get(screen)!.rect === null) continue;
+      const view = screen.panes.view(t);
+      if (view?.state.kind !== "Live") broken.push(`${label}: ${name(screen)}'s pane is ${screen.state(t)} at rest`);
+      else if (!view.actual || `${view.actual.cols}x${view.actual.rows}` !== actual) broken.push(`I10 ${label}: ${name(screen)} holds ${JSON.stringify(view.actual)} and the terminal is at ${actual}`);
+    }
+    totals.rests++;
+    trace.push("rest");
+    fail(label);
+  };
+
+  try {
+    for (const screen of screens) {
+      screen.panes.focus(t);
+      show(screen, size());
+    }
+    await stage.settle();
+    pass();
+    await stage.settle();
+    for (let round = 0; round < PAIR_ROUNDS; round++) {
+      for (let step = 0; step < PAIR_STEPS; step++) {
+        const did = await draw()();
+        trace.push(did);
+        // one step in three runs into the next with nothing settled in between
+        if (!chance(0.33)) await stage.settle();
+        totals.steps++;
+        fail(did);
+      }
+      await stage.settle();
+      fail("the steps");
+      await rest(`round ${round + 1}`);
+    }
+  } catch (error) {
+    throw new Error(`two-screen sequence seed ${seed} failed (replay: OVIS_TUI_MODEL_PAIR=${seed}) ${error instanceof Error ? error.message : String(error)}\nsteps: ${trace.join(" > ")}`);
+  } finally {
+    await stage.close();
+  }
+}
+
+it(`${PAIR ? 1 : PAIRS} seeded sequences of two screens on one terminal rest at the size the last viewer chose (seed ${PAIR ?? SEED})`, async () => {
+  const totals: PairTotals = { steps: 0, rests: 0, attaches: 0, repaints: 0, unshownAgain: 0, inGap: 0, sameTurn: 0, takes: 0 };
+  const seeds = PAIR ? [Number(PAIR)] : Array.from({ length: PAIRS }, (_, index) => SEED * 1_000_003 + index);
+  for (const seed of seeds) await pair(seed, totals);
+  console.log(`pane model, two screens: seed ${PAIR ?? SEED}, ${seeds.length} sequences, ${JSON.stringify(totals)}`);
+  // the runs did reach what the rule is about: repaints, choices inside a gap, both screens due in one turn
+  if (!PAIR) {
+    expect(totals.rests).toBe(PAIRS * PAIR_ROUNDS);
+    expect(totals.repaints).toBeGreaterThan(PAIRS);
+    expect(totals.inGap).toBeGreaterThan(PAIRS / 10);
+    expect(totals.sameTurn).toBeGreaterThan(PAIRS / 10);
+    expect(totals.unshownAgain).toBeGreaterThan(0);
+  }
+}, 1_500_000);
 
 it(`${ONLY ? 1 : SEQUENCES} seeded sequences keep every invariant after every step (seed ${ONLY ?? SEED})`, async () => {
   const totals: Totals = { steps: 0, attaches: 0, lives: 0, accepted: 0, refused: 0, takes: 0, reattaches: 0, lines: 0, settled: 0, handedBack: 0, deep: 0 };

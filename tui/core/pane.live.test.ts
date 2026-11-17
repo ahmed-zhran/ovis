@@ -15,8 +15,10 @@ import { picture, type Screen, Stage } from "../testing/pane-harness.ts";
  * while it prints, follows the size rules beside another viewer and after that viewer left (no
  * repaint leaves the terminal at the size of a terminal nobody views), sends no answer of its own to a
  * query the core answers, refuses everything typed once its core is stopped, and attaches again in a
- * new epoch on the next core at the same socket with none of it sent. Runs only where
- * OVIS_TEST_HC_BIN names an hc.
+ * new epoch on the next core at the same socket with none of it sent. A second case puts two screens
+ * on one terminal: the terminal keeps the rectangle of the screen that attached with its own last,
+ * also when that screen's window changed again in the very turn of the other screen's repaint. Runs
+ * only where OVIS_TEST_HC_BIN names an hc.
  */
 const bin = process.env["OVIS_TEST_HC_BIN"];
 
@@ -76,18 +78,98 @@ describe.skipIf(!bin || process.platform === "win32")("the pane machine against 
     for (const core of cores) reports.push(await core.stop());
     return reports;
   })());
-  /** a signal ends `bun test` without running afterAll: the same teardown runs first */
+  /** the second case's own core and stage, with a teardown of their own: the first case ends by running `stopAll` */
+  const pair: { core: IsolatedCore | null; stage: Stage | null; stopping: Promise<StopReport | null> | null } = { core: null, stage: null, stopping: null };
+  const stopPair = () => (pair.stopping ??= (async () => {
+    await pair.stage?.close();
+    return pair.core ? await pair.core.stop() : null;
+  })());
+  /** a signal ends `bun test` without running afterAll: the same teardowns run first */
   const SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
-  const onSignal = (signal: NodeJS.Signals) => { void stopAll().finally(() => process.exit(128 + constants.signals[signal])); };
+  const onSignal = (signal: NodeJS.Signals) => { void Promise.allSettled([stopAll(), stopPair()]).finally(() => process.exit(128 + constants.signals[signal])); };
+  let armed = false;
+  const arm = () => {
+    if (armed) return;
+    armed = true;
+    for (const signal of SIGNALS) process.once(signal, onSignal);
+  };
 
   afterAll(async () => {
     const reports = await stopAll();
+    const paired = await stopPair();
     for (const signal of SIGNALS) process.off(signal, onSignal);
     expect(reports.map(stoppedCleanly)).toEqual(cores.map(() => true));
+    expect(paired === null || stoppedCleanly(paired)).toBe(true);
+  }, TEST_MS);
+
+  it("two screens on one terminal: a window that changes twice 150 ms apart keeps its last rectangle, with both screens due in one turn", async () => {
+    arm();
+    pair.core = new IsolatedCore(bin!, coreFolder());
+    await pair.core.start();
+    // the stage's own fake core stays unused: both screens' links go through the socket to the real one
+    const two = (pair.stage = new Stage(new FakeHcCore()));
+    // the stage fires its screens in the order they were made: first the one whose window changes
+    const b: Screen = await two.screen({ socket: pair.core.socket });
+    const a: Screen = await two.screen({ socket: pair.core.socket });
+    const { address: t } = await a.link.call("terminal.run", { argv: ["sleep", "900"] });
+    const until = async (label: string, check: () => boolean) => {
+      const started = Date.now();
+      while (!check()) {
+        if (Date.now() - started > WAIT_MS) throw new Error(`no ${label} within ${WAIT_MS}ms; the first screen's pane is ${a.state(t)}, the second's ${b.state(t)}`);
+        a.pass({ live: false });
+        b.pass({ live: false });
+        await two.settle();
+      }
+    };
+    const live = async (screen: Screen) => {
+      await until("first paint", () => screen.panes.view(t)?.ready === true || screen.state(t) === "Live");
+      screen.pass();
+    };
+    const size = async () => {
+      const record = await a.link.call("terminal.get", { terminal: t });
+      return `${record.cols}x${record.rows}`;
+    };
+    const sizedBy = (screen: Screen) => { const by = screen.view(t).sizedBy; return by ? `${by.cols}x${by.rows}` : "its own"; };
+    a.panes.focus(t);
+    b.panes.focus(t);
+    a.show([t, 80, 24]);
+    await live(a);
+    b.show([t, 120, 40]);
+    await live(b);
+    // nobody types: the terminal has the rectangle of the screen that attached last, and the first repaints at it once
+    await until("the second screen's size at the first", () => a.view(t).actual?.cols === 120);
+    await two.advance(REATTACH_SETTLE_MS);
+    await live(a);
+    expect([await size(), a.asked(t).map((params) => `${String(params["cols"])}x${String(params["rows"])}`)]).toEqual(["120x40", ["80x24", "120x40"]]);
+    const rested: string[] = [];
+    for (let round = 0; round < 6; round++) {
+      const first = [100 + round, 30] as const;
+      const last = [110 + round, 35] as const;
+      // the second screen's window changes; 150 ms later it attaches with that rectangle, and the first screen hears of it
+      b.show([t, ...first]);
+      await two.advance(REATTACH_SETTLE_MS);
+      await until("the second screen's first change at the core and at the first screen", () => a.view(t).actual?.cols === first[0] && b.view(t).advertised?.cols === first[0]);
+      // its window changes once more: 150 ms later both are due in one turn, the first screen's repaint and its own attach
+      b.show([t, ...last]);
+      await two.advance(REATTACH_SETTLE_MS);
+      for (let step = 0; step < 6; step++) {
+        await two.advance(REATTACH_SETTLE_MS);
+        a.pass();
+        b.pass();
+        await two.settle();
+      }
+      rested.push(`the terminal ${await size()}, the second screen sized by ${sizedBy(b)}, the first by ${sizedBy(a)}`);
+    }
+    // the second screen attached with its own rectangle last, every time: the terminal has it, and the first draws it clipped
+    expect(rested).toEqual(Array.from({ length: 6 }, (_, round) => `the terminal ${110 + round}x35, the second screen sized by its own, the first by ${110 + round}x35`));
+    // neither screen sent anything but CLOSE: no RESIZE, no FOCUS, no DATA
+    expect([a.did(t).filter((frame) => frame !== "CLOSE"), b.did(t).filter((frame) => frame !== "CLOSE"), a.state(t), b.state(t)]).toEqual([[], [], "Live", "Live"]);
+    const report = await stopPair();
+    expect(report !== null && stoppedCleanly(report)).toBe(true);
   }, TEST_MS);
 
   it("attaches, shows output, hands on what is typed once and in order, follows the size rules, and sends nothing typed while its core was gone", async () => {
-    for (const signal of SIGNALS) process.once(signal, onSignal);
+    arm();
     const folder = coreFolder();
     const first = new IsolatedCore(bin!, folder);
     cores.push(first);

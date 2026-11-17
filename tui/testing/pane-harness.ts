@@ -89,6 +89,8 @@ export interface Faults {
   holdCloses: boolean;
   /** the core's answer to a call of the machine (`terminal.get`) reaches it only at `release()` */
   holdCalls: boolean;
+  /** `size` events reach the machine only at `sizes()`, in the order they came: an event still on its way when an attach leaves or its reply comes */
+  holdSizes: boolean;
   /** what the link says its state is, whatever it is: the machine must ask the link, not only its own panes */
   linkState: CoreLink["state"] | null;
   /** the 9001 mark is taken out of every stream, as a core that changed it would send it */
@@ -113,7 +115,7 @@ export class Screen {
   readonly attaches: AttachRecord[] = [];
   readonly emulators: EmulatorRecord[] = [];
   readonly calls: ChannelCall[] = [];
-  readonly faults: Faults = { attach: null, holdReplies: false, holdCloses: false, holdCalls: false, linkState: null, stripMark: false, create: false, write: null, resize: null, encode: null };
+  readonly faults: Faults = { attach: null, holdReplies: false, holdCloses: false, holdCalls: false, holdSizes: false, linkState: null, stripMark: false, create: false, write: null, resize: null, encode: null };
   /** called as each thing happens, for a test that checks rules at that very moment */
   hooks: { call?: (call: ChannelCall) => void; attach?: (record: AttachRecord) => void; write?: (record: EmulatorRecord, bytes: Uint8Array) => void; notice?: (notice: PaneNotice) => void; link?: (notice: LinkNotice) => void } = {};
   /** work of this screen that has not come back yet */
@@ -123,6 +125,7 @@ export class Screen {
   private inputs = 0;
   private held: (() => void)[] = [];
   private heldCloses: (() => void)[] = [];
+  private heldSizes: LinkNotice[] = [];
   /** the fake's numbers of the lines this screen's link opened, per core */
   private readonly lines = new Map<FakeHcCore, number[]>();
   /** whether the link goes through the real socket transport */
@@ -139,7 +142,8 @@ export class Screen {
         this.hooks.link?.(notice);
         // a line that ended settles every CLOSE on it, as the connection does: none can be held past it
         if (notice.type === "state" && notice.state.kind !== "Online") for (const resolve of this.heldCloses.splice(0)) resolve();
-        this.panes.notice(notice);
+        if (this.faults.holdSizes && notice.type === "event" && notice.event.type === "size") this.heldSizes.push(notice);
+        else this.panes.notice(notice);
       },
       connect: options.socket === undefined
         ? async () => {
@@ -320,6 +324,12 @@ export class Screen {
     // the record holds what the machine holds, so a test can find a pane's emulator among the records
     record.emulator = emulator;
     return { ok: true, value: emulator };
+  }
+
+  /** Lets the held `size` events through to the machine, in the order they came, and holds no more. */
+  sizes(): void {
+    this.faults.holdSizes = false;
+    for (const notice of this.heldSizes.splice(0)) this.panes.notice(notice);
   }
 
   /** Lets the held attach replies, CLOSE answers and call answers through to the machine. */
