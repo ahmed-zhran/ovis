@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA } from "../server/herdr-core/connection.ts";
+import { FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, HcConnection } from "../server/herdr-core/connection.ts";
 import { CREDIT_WINDOW, FakeHcCore } from "../server/herdr-core/core.fake.ts";
 import { OVIS_LAYOUT_DOC } from "../server/herdr-core/layout-doc.ts";
 import { startLoop } from "./loop.ts";
-import { FRAME_PASS_MS, HOLD_RELEASE_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, PASTE_LIMIT_BYTES, QUIT_BOUND_MS } from "./model/deadlines.ts";
+import { FRAME_PASS_MS, HOLD_RELEASE_MS, NOTICE_SHOW_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, PASTE_LIMIT_BYTES, QUIT_BOUND_MS, RECONNECT_MOST_MS } from "./model/deadlines.ts";
 import { demo } from "./testing/fixtures/demo.ts";
 import { place } from "./testing/fixtures/fixture.ts";
 import { SCALE_LARGEST_TAB, SCALE_TERMINALS, SCALE_WORKSPACES, scale } from "./testing/fixtures/scale.ts";
@@ -205,6 +205,15 @@ describe("the loop", () => {
       await run.advance(50);
       const frame = run.host.output().slice(from);
       expect([colorTerm, frame.includes("RGB-CELL"), frame.includes(written), frame.includes(never)]).toEqual([colorTerm, true, true, false]);
+      // a host resize makes the painter anew: it still draws for the host's depth
+      run.host.resize(100, 30);
+      await run.advance(1_000);
+      await run.live();
+      const resized = run.host.output().length;
+      run.core.program("t1").output("\x1b[38;2;95;135;175mRGB-AGAIN\x1b[0m\r\n");
+      await run.advance(50);
+      const after = run.host.output().slice(resized);
+      expect([colorTerm, "after a resize", after.includes("RGB-AGAIN"), after.includes(written), after.includes(never)]).toEqual([colorTerm, "after a resize", true, true, false]);
     }
   }, TEST_MS);
 
@@ -220,6 +229,22 @@ describe("the loop", () => {
     expect(run.core.calls().filter(({ method }) => method === "terminal.kill" || method === "terminal.rm")).toEqual([]);
     for (const terminal of ["t1", "t2", "t3", "t4"]) expect(run.core.terminal(terminal).state).toBe("live");
     expect(run.host.log().at(-1)).toBe("raw off");
+  }, TEST_MS);
+
+  it("quit detaches when giving the terminal back fails: done settles within the bound, a quit with the write's code", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    const ended: { how: Awaited<typeof run.loop.done> | null } = { how: null };
+    void run.loop.done.then((how) => { ended.how = how; });
+    run.host.failWrites("EBADF");
+    // the prefix and the detach key in one read: the quit starts before any frame could be written
+    run.type("\x02q");
+    await run.advance(QUIT_BOUND_MS);
+    expect(ended.how).toEqual({ kind: "quit", leaveError: "EBADF" });
+    expect(run.loop.report().leaveError).toBe("EBADF");
+    expect(run.sent.filter((frame) => frame.kind === FRAME_CLOSE).length).toBe(3);
+    expect(run.core.calls().filter(({ method }) => method === "terminal.kill" || method === "terminal.rm")).toEqual([]);
+    for (const terminal of ["t1", "t2", "t3", "t4"]) expect(run.core.terminal(terminal).state).toBe("live");
   }, TEST_MS);
 
   it("quit detaches within its bound when the core never answers", async () => {
@@ -299,6 +324,114 @@ describe("the loop", () => {
   }, TEST_MS);
 });
 
+/** A screen brought to a state it can rest in: the run, and what arrives each simulated second while it rests. */
+interface Resting { run: Run; each?: () => void }
+
+/** One terminal a viewer of its own already sized past what an emulator takes (1000 columns): the screen's pane fails with `size`. */
+async function failedPane(): Promise<Resting> {
+  const core = oneTab(1);
+  const rival = new HcConnection(() => core.transport());
+  await rival.open("terminal.attach", { terminal: "t1", cols: 1200, rows: 50 }, { onData: () => {}, onClose: () => {} });
+  const run = await start({ core });
+  await run.advance(1_000);
+  expect(run.loop.panes.view("t1")?.state).toMatchObject({ kind: "Failed", code: "size" });
+  return { run };
+}
+
+/** Every state the screen can rest in, each brought about through the screen's own inputs or the core. */
+const RESTING: [state: string, enter: () => Promise<Resting>][] = [
+  ["a plain tab", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    return { run };
+  }],
+  ["a zoomed tab with bytes owed behind its zoom", async () => {
+    const run = await start({ core: oneTab(2, true) });
+    await run.live();
+    run.core.program("t2").output(megabyte("covered!\r\n"));
+    await run.advance(1_000);
+    expect(run.loop.panes.view("t2")?.owed).toBeGreaterThan(0);
+    return { run };
+  }],
+  ["a hidden tab's panes with output arriving", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    return { run, each: () => { for (const terminal of ["t3", "t4"]) run.core.program(terminal).output("hidden\r\n"); } };
+  }],
+  ["an overlay open", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.loop.dispatch({ type: "action", action: "help", at: run.clock.current });
+    expect(run.loop.model().overlays.map((overlay) => overlay.kind)).toEqual(["help"]);
+    return { run };
+  }],
+  ["the lock on", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.loop.dispatch({ type: "action", action: "lock", at: run.clock.current });
+    expect(run.loop.model().locked).toBe(true);
+    return { run };
+  }],
+  ["a pane waiting for its lost terminal's new shell", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.core.lose("t1");
+    await run.advance(1_000);
+    expect(run.loop.panes.view("t1")?.state).toEqual({ kind: "Waiting", why: "lost" });
+    return { run };
+  }],
+  ["a pane failed", failedPane],
+  ["a refused paste abandoned", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.type(`\x1b[200~${"a".repeat(PASTE_LIMIT_BYTES + 10)}`);
+    await run.advance(PASTE_ABANDON_MS + 1);
+    expect(run.loop.report().actions).toContain("paste_reset");
+    return { run };
+  }],
+  ["after a notice expired", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    run.loop.dispatch({ type: "notice", code: "test_notice", at: run.clock.current });
+    await run.advance(NOTICE_SHOW_MS + 1);
+    expect(run.loop.model().notices).toEqual([]);
+    return { run };
+  }],
+];
+
+describe("nothing in, nothing out, in every state the screen rests in", () => {
+  for (const [state, enter] of RESTING) {
+    it(`nothing in, nothing out: ${state}`, async () => {
+      const { run, each } = await enter();
+      // past the last deadline any of these states names: the notice (5 s), the paste (3 s), a reattach, a paint's quiet
+      await run.advance(NOTICE_SHOW_MS + 1_000);
+      const passes = run.loop.report().passes;
+      const written = run.host.bytes().length;
+      for (let second = 0; second < 10; second++) {
+        each?.();
+        await run.advance(1_000);
+      }
+      expect([state, run.loop.report().passes - passes, run.host.bytes().length - written, run.loop.report().due, run.clock.maxArmed])
+        .toEqual([state, 0, 0, ["link:silence"], 1]);
+    }, TEST_MS);
+  }
+
+  it("nothing in, nothing out: with the core's line gone, only the link's retry wakes the screen, and nothing is written", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.cutLine();
+    await run.advance(30_000);
+    expect(run.loop.panes.views().map((view) => view.state)).toEqual([{ kind: "Waiting", why: "offline" }, { kind: "Waiting", why: "offline" }]);
+    const passes = run.loop.report().passes;
+    const written = run.host.bytes().length;
+    await run.advance(10 * RECONNECT_MOST_MS);
+    expect(run.host.bytes().length - written).toBe(0);
+    expect(run.loop.report().due).toEqual(["link:reconnect"]);
+    // a retry changes the link's state twice (Connecting, then Offline again): at most a pass each, writing nothing
+    expect(run.loop.report().passes - passes).toBeLessThanOrEqual(2 * 10);
+  }, TEST_MS);
+});
+
 describe("the whole screen", () => {
   it("shows the demo's panes with their Korean text, and typed keys reach the focused pane once and in order while another floods", async () => {
     const run = await start({ fixture: demo, cols: 120, rows: 40 });
@@ -354,6 +487,9 @@ describe("the whole screen", () => {
       Bun.gc(true);
       return process.memoryUsage().heapUsed;
     };
+    /** what the loop itself keeps, as it exposes it: these counts must not grow with time */
+    const kept = () => ({ actions: run.loop.report().actions.length, notices: run.loop.model().notices.length, deadlines: run.loop.model().deadlines.size });
+    let keptMiddle = kept();
     const memory = { start: process.memoryUsage().rss, middle: 0, end: 0, heapMiddle: 0, heapEnd: 0 };
     const sizes = [[120, 40], [100, 30], [80, 24], [140, 45]] as const;
     for (let second = 0; second < 600; second++) {
@@ -372,10 +508,12 @@ describe("the whole screen", () => {
       }
       await run.advance(1_000);
       if (second === 120) {
+        keptMiddle = kept();
         memory.heapMiddle = ownHeap();
         memory.middle = process.memoryUsage().rss;
       }
     }
+    const keptEnd = kept();
     memory.heapEnd = ownHeap();
     memory.end = process.memoryUsage().rss;
     // the same place a fresh screen opens: the first workspace's first tab, at the first size
@@ -389,6 +527,9 @@ describe("the whole screen", () => {
     expect(run.clock.armed()).toBe(1);
     expect(run.loop.report().due).toEqual(["link:silence"]);
     expect(run.loop.report().actions.some((code) => code.startsWith("end:") || code === "crash")).toBe(false);
+    // what the loop keeps at second 600 is what it kept at second 120, and its panes are the shown tab's at most
+    expect(keptEnd).toEqual(keptMiddle);
+    expect(run.loop.panes.views().length).toBeLessThanOrEqual(2);
     // the screen's own heap over the last 480 simulated seconds of output, input, resizes and a reconnect
     expect(memory.heapEnd - memory.heapMiddle).toBeLessThan(OWN_HEAP_GROWTH_BYTES);
     const fresh = await start({ core: run.core, cols: 120, rows: 40 });

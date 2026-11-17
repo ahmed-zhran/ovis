@@ -15,7 +15,7 @@ import type { LinkNotice } from "./link.ts";
 /** One tab as the screen lays it out: its tree over terminal addresses and the pane a zoom shows alone. */
 export interface TabShape { readonly root: LayoutNode; readonly zoomed: string | null }
 
-export interface CoreView {
+interface CoreView {
   readonly world: World;
   readonly tabs: ReadonlyMap<string, TabShape>;
 }

@@ -4,7 +4,6 @@ import { type Fixture, place } from "./fixture.ts";
 const STATES = ["working", "blocked", "done", "idle"] as const;
 
 export const agents: Fixture = {
-  name: "agents",
   build(core) {
     for (const state of STATES) place(core, { space: "w-agents", spaceName: "agents", tab: "t-agents", tabName: "agents", pane: state }, `claude: ${state}\r\n`);
   },

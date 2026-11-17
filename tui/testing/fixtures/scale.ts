@@ -7,7 +7,6 @@ export const SCALE_LARGEST_TAB = 16;
 
 /** 200 terminals in 50 workspaces: the first workspace's one tab holds 16 panes, the rest are spread two tabs to a workspace. */
 export const scale: Fixture = {
-  name: "scale",
   build(core) {
     for (let n = 0; n < SCALE_LARGEST_TAB; n++) place(core, { space: "w00", spaceName: "big", tab: "t00", tabName: "big" }, `pane ${n}\r\n`);
     for (let n = SCALE_LARGEST_TAB; n < SCALE_TERMINALS; n++) {

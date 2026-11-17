@@ -2,7 +2,6 @@ import { type Fixture, place } from "./fixture.ts";
 
 /** This PC's core and two machines it reaches, each running a terminal; the screen shows this PC's. */
 export const machines: Fixture = {
-  name: "machines",
   options: {
     machines: [
       { id: "m-build", name: "build", host: "build.local", state: "connected", target: "build", version: "0.1.18" },

@@ -8,7 +8,7 @@ import type { PaneScene } from "./paint.ts";
 export const SIDEBAR_COLUMNS = 24;
 
 /** A pane of the shown tab: its cells, and whether a zoom covers it (then it is attached, silent and not drawn). */
-export interface PaneSpot { pane: string; cells: PaneCells; covered: boolean }
+interface PaneSpot { pane: string; cells: PaneCells; covered: boolean }
 
 export interface ScreenShape { regions: Regions; spots: PaneSpot[] }
 

@@ -15,6 +15,7 @@ import type { HcTransport, HelloInfo } from "../server/herdr-core/connection.ts"
 import { type CoreLink, type LinkNotice, type LinkState, openLink } from "./core/link.ts";
 import { createPanes, type PaneNotice, type Panes } from "./core/pane.ts";
 import { CoreWorld, focusDirection, paneToward } from "./core/world.ts";
+import { errorCode } from "./crash.ts";
 import type { Host, HostEnd } from "./host/index.ts";
 import type { InputEvent } from "./input/decode.ts";
 import { Framer } from "./input/framer.ts";
@@ -33,7 +34,7 @@ export interface LoopClock {
   arm(at: number, fire: () => void): () => void;
 }
 
-export interface LoopOptions {
+interface LoopOptions {
   host: Host;
   clock: LoopClock;
   /** the core's socket, as the entry worked it out */
@@ -53,7 +54,8 @@ export interface LoopOptions {
  * first, then writes the crash record).
  */
 export type LoopEnd =
-  | { kind: "quit" }
+  /** `leaveError`: giving the terminal back failed with this code; it is still a quit */
+  | { kind: "quit"; leaveError?: string }
   | { kind: "gone"; why: "hangup" | "write-failed" }
   | { kind: "signal"; signal: "SIGINT" | "SIGTERM" }
   | { kind: "no_core"; code: string; reason: string }
@@ -63,8 +65,7 @@ export type LoopEnd =
 
 /** What a test and the crash record read of a running loop. */
 export interface LoopReport {
-  /** the timer armed now: 0 or 1, and the names due at its time */
-  timers: number;
+  /** the names due when the one armed timer fires (none: no timer) */
   due: string[];
   passes: number;
   /** frame writes handed to the host (an unchanged frame writes nothing) */
@@ -74,6 +75,8 @@ export interface LoopReport {
   hc: { version: string; features: string[] } | null;
   size: { cols: number; rows: number };
   mode: { name: string; locked: boolean; armed: boolean; overlays: string[] };
+  /** the stable code of the error giving the terminal back at quit failed with, or null */
+  leaveError: string | null;
   /** the core link's state as data: what the chrome shows (Offline and its code, NoCore, Incompatible) */
   link: { kind: LinkState["kind"]; code: string | null };
 }
@@ -90,7 +93,6 @@ export interface Loop {
   /** the painter's composed screen: what the host shows once the last write was taken */
   screen(): Painter["screen"] | null;
 }
-
 
 export function startLoop(options: LoopOptions): Loop {
   const { host, clock } = options;
@@ -116,6 +118,7 @@ export function startLoop(options: LoopOptions): Loop {
   let quitting: { at: number; settle: () => void } | null = null;
   /** every channel is being closed (quit, hang-up, a signal): nothing is drawn again, whatever arrives meanwhile */
   let closing = false;
+  let leaveError: string | null = null;
   let passOwed = false;
   let lastPass = -Infinity;
   let passes = 0;
@@ -379,7 +382,8 @@ export function startLoop(options: LoopOptions): Loop {
       if (budget <= 0) break;
       budget -= panes.credit(spot.pane, budget);
     }
-    if (order.some((spot) => (panes.view(spot.pane)?.owed ?? 0) > 0)) owePass();
+    // bytes a covered pane owes stay owed by design (it takes no credit until the zoom ends): they owe no pass
+    if (order.some((spot) => { const view = panes.view(spot.pane); return view !== undefined && !view.covered && view.owed > 0; })) owePass();
     const ready = [...drawn].filter((pane) => panes.view(pane)?.ready);
     if (ready.length > 0 && !draining) drainThenLive(ready);
   }
@@ -460,8 +464,14 @@ export function startLoop(options: LoopOptions): Loop {
   function quit(): void {
     if (ended) return;
     void closeAll().then(() => {
-      host.leave();
-      end({ kind: "quit" });
+      // the terminal is restored before the host throws a held write error: the quit stands, with the error's code
+      try {
+        host.leave();
+      } catch (error) {
+        leaveError = errorCode(error);
+        act(`leave_failed:${leaveError}`);
+      }
+      end(leaveError === null ? { kind: "quit" } : { kind: "quit", leaveError });
     });
   }
 
@@ -540,11 +550,11 @@ export function startLoop(options: LoopOptions): Loop {
       const first = earliest(deadlines());
       const due = first ? [...deadlines()].filter(([, at]) => at === first.at).map(([name]) => name) : [];
       return {
-        timers: timer ? 1 : 0,
         due: timer ? due : [],
         passes,
         writes,
         actions: [...actions],
+        leaveError,
         hc: hello ? { version: hello.version, features: [...hello.features] } : null,
         size: entered ? host.size() : { cols: 0, rows: 0 },
         mode: { name: state.mode.name, locked: state.locked, armed: state.armed, overlays: state.overlays.map((overlay) => overlay.kind) },

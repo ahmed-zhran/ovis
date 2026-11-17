@@ -76,7 +76,13 @@ process.on("unhandledRejection", crash);
 const end = await loop.done;
 switch (end.kind) {
   case "quit":
-    process.stdout.write(`ovis tui: detached from herdr-core session ${target.session}; its terminals and agents keep running.\n`);
+    // a terminal that refused the restore may refuse this line too: the quit's exit code stands either way
+    process.stdout.on("error", () => {});
+    try {
+      process.stdout.write(`ovis tui: detached from herdr-core session ${target.session}; its terminals and agents keep running.\n`);
+    } catch {
+      // the line could not be written: nothing else to say it with
+    }
     process.exit(EXIT_OK);
     break;
   case "crashed":
@@ -97,7 +103,11 @@ switch (end.kind) {
   case "gone":
     // a hang-up is a signal: the host ends the process with 129 itself once the channels are closed
     if (end.why === "hangup") break;
-    host.leave();
+    try {
+      host.leave();
+    } catch {
+      // the terminal that refused a write refuses its restore too: the line below still goes to stderr
+    }
     say("terminal_gone", "the terminal refused a write; the agents keep running in herdr-core");
     process.exit(EXIT_FAILED);
     break;

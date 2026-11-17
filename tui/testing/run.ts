@@ -28,10 +28,10 @@ import { machines } from "./fixtures/machines.ts";
 import { scale } from "./fixtures/scale.ts";
 import { HeadlessHost } from "./headless-host.ts";
 
-export const FIXTURES: Readonly<Record<string, Fixture>> = { demo, agents, machines, scale };
+const FIXTURES: Readonly<Record<string, Fixture>> = { demo, agents, machines, scale };
 
 /** What the headless host answers the start probe with: the kitty flags in force, DECRQM 2026 known, then DA1. */
-export const PROBE_ANSWER = "\x1b[?1u\x1b[?2026;2$y\x1b[?62;22c";
+const PROBE_ANSWER = "\x1b[?1u\x1b[?2026;2$y\x1b[?62;22c";
 /** hc sends a heartbeat this often; `advance` sends them on the fake core (none while `muted`) */
 const HEARTBEAT_MS = 15_000;
 /** how far `advance` moves at most while the host has a timer of its own (its probe, a drain) */
@@ -82,9 +82,6 @@ export class ManualClock implements LoopClock {
   }
 }
 
-/** One frame the screen wrote to its line, as it left: the channel, the kind, the payload, and the write it was in. */
-export interface SentFrame { line: number; write: number; channel: number; kind: number; payload: Uint8Array }
-
 export interface RunOptions {
   fixture?: Fixture;
   /** a core of the test's own instead of the fixture's */
@@ -96,11 +93,11 @@ export interface RunOptions {
 }
 
 export class Run {
-  readonly sent: SentFrame[] = [];
+  /** every frame the screen wrote to its line, as it left: the channel, the kind, the payload */
+  readonly sent: Frame[] = [];
   /** the clock at each frame write the host was handed */
   readonly writeTimes: number[] = [];
   private listener: { close: () => Promise<void> } | null = null;
-  private lines = 0;
   private writesSeen = 0;
   private nextBeat: number;
   private counted = { read: 0, sum: 0 };
@@ -113,7 +110,6 @@ export class Run {
     readonly clock: ManualClock,
     readonly folder: string,
     readonly socket: string,
-    readonly fixture: Fixture | null,
   ) {
     this.nextBeat = HEARTBEAT_MS;
     this.loop = startLoop({ host, clock, socket, keys: undefined, connect: (path) => this.connect(path) });
@@ -128,7 +124,7 @@ export class Run {
     const folder = mkdtempSync(join(process.env["TMPDIR"] || tmpdir(), "run-"));
     const socket = join(folder, "hc.sock");
     const host = new HeadlessHost({ cols: options.cols ?? 120, rows: options.rows ?? 40, colorTerm: options.colorTerm ?? "truecolor", answer: PROBE_ANSWER });
-    const run = new Run(core, host, new ManualClock(), folder, socket, fixture);
+    const run = new Run(core, host, new ManualClock(), folder, socket);
     await run.listen();
     await run.settle();
     if (run.loop.link.state.kind === "Online") fixture?.online?.(core);
@@ -150,10 +146,8 @@ export class Run {
 
   private async connect(path: string): Promise<HcTransport> {
     const transport = await connectCoreSocket(path);
-    const line = ++this.lines;
-    let writes = 0;
     let framed = false;
-    const reader = makeFrameReader((frame: Frame) => this.sent.push({ line, write: writes, ...frame }), () => {});
+    const reader = makeFrameReader((frame: Frame) => this.sent.push(frame), () => {});
     const readable = transport.readable.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
       transform: (chunk, controller) => { if (!this.muted) controller.enqueue(chunk); },
     }));
@@ -162,7 +156,6 @@ export class Run {
       exited: transport.exited,
       kill: transport.kill,
       write: (bytes) => {
-        writes++;
         if (framed) reader(bytes);
         else {
           const end = bytes.indexOf(0x0a);
@@ -304,7 +297,7 @@ const KEYS: Record<string, string> = {
   enter: "\r", tab: "\t", esc: "\x1b", space: " ", backspace: "\x7f", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
 };
 
-export function keyBytes(item: string): string {
+function keyBytes(item: string): string {
   const named = KEYS[item];
   if (named !== undefined) return named;
   const ctrl = /^ctrl\+([a-z])$/.exec(item);
@@ -313,7 +306,7 @@ export function keyBytes(item: string): string {
 }
 
 /** `COLSxROWS` within what an emulator takes (1x1 to 1000x500), or null. */
-export function parseSize(text: string): { cols: number; rows: number } | null {
+function parseSize(text: string): { cols: number; rows: number } | null {
   const match = /^(\d{1,4})x(\d{1,4})$/.exec(text);
   if (!match) return null;
   const cols = Number(match[1]);

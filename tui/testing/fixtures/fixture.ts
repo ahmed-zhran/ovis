@@ -6,14 +6,13 @@ import { PANE_NAME_LABEL, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME
  * documents); `online` runs once the screen's line is up, for what only reaches a subscriber (events).
  */
 export interface Fixture {
-  readonly name: string;
   readonly options?: FakeCoreOptions;
   build(core: FakeHcCore): void;
   online?(core: FakeHcCore): void;
 }
 
 /** Text as the fake core sends it: its UTF-8 bytes, one char per byte. */
-export const wire = (text: string): string => Buffer.from(text, "utf8").toString("latin1");
+const wire = (text: string): string => Buffer.from(text, "utf8").toString("latin1");
 
 /** A terminal in workspace `space` and tab `tab` (ids and names), its first paint `paint`; answers its address. */
 export function place(core: FakeHcCore, where: { space: string; spaceName: string; tab: string; tabName: string; pane?: string; on?: string }, paint: string): string {

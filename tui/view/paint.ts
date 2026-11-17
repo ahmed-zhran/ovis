@@ -1,3 +1,4 @@
+import type { ColorDepth } from "../host/index.ts";
 import { STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_STRIKE, STYLE_UNDERLINE_MASK, type EngineCursor, type WrittenColor } from "../emulator/index.ts";
 import { holds, intersect, type Rect } from "./geometry.ts";
 import { Grid, STYLE_BLINK, STYLE_OVERLINE, Styles, type PaneGrid, type Style } from "./grid.ts";
@@ -88,9 +89,6 @@ export interface PainterOptions {
   /** what the host shows (tui/host `colorDepth`): on a 256-colour host an RGB colour is written as its nearest palette index */
   colors?: ColorDepth;
 }
-
-/** the colours a host shows: RGB as written, or the 256 of its palette */
-export type ColorDepth = "truecolor" | "256";
 
 const ESC = "\x1b";
 const CAN = "\x18";

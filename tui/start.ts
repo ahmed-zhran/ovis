@@ -9,7 +9,7 @@ import { plainSession } from "../server/herdr-core/core-socket.ts";
 
 export const USAGE = "usage: ovis tui [--session NAME] | -h | -V";
 
-export type Args =
+type Args =
   | { kind: "help" }
   | { kind: "version" }
   | { kind: "run"; session: string | null }
