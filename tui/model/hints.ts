@@ -20,9 +20,11 @@ export function cleanConfigText(text: string): string {
   return chars.length <= CONFIG_TEXT_MAX_CHARS ? chars.join("") : `${chars.slice(0, CONFIG_TEXT_MAX_CHARS - 1).join("")}\u2026`;
 }
 
+/** The texts of a row's keys: a range as written while it holds all nine digits, else one text per digit it still holds. */
 function keysOf(row: KeyRow, prefixed: boolean | null): string[] {
   return row.bindings.filter((binding) => prefixed === null || binding.prefixed === prefixed)
-    .map((binding) => cleanConfigText(prefixed === true ? binding.text.replace(/^prefix\+/, "") : binding.text));
+    .flatMap((binding) => binding.range && binding.chords.length < 9 ? binding.chords.map(({ chord }) => binding.text.replace("1..9", chord.key)) : [binding.text])
+    .map((text) => cleanConfigText(prefixed === true ? text.replace(/^prefix\+/, "") : text));
 }
 
 function hints(rows: readonly KeyRow[], prefixed: boolean | null): Hint[] {

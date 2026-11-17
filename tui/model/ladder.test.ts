@@ -51,6 +51,8 @@ describe("the ladder", () => {
       check: (step) => expect(step.state.armed).toBe(true) },
     { level: 0, takes: true, name: "host focus", state: idle, event: { type: "focus", focused: true, at: AT }, levels: [0], pane: false },
     { level: 0, takes: true, name: "a host resize", state: idle, event: { type: "resize", cols: 100, rows: 30, at: AT }, levels: [0], pane: false },
+    { level: 0, takes: true, name: "a host resize to no usable size is ignored", state: idle, event: { type: "resize", cols: Infinity, rows: -3, at: AT }, levels: [0], pane: false,
+      check: (step) => expect(step.state.host).toEqual(idle.host) },
     { level: 0, takes: true, name: "a key release", state: idle, event: { ...key("x"), action: "release" } as InputEvent, levels: [0], pane: false },
     { level: 0, takes: true, name: "a paste refused at the limit", state: idle, event: paste("x".repeat(64), false), levels: [0], pane: false,
       check: (step) => expect(step.state.notices.map((notice) => notice.code)).toEqual(["paste_refused"]) },

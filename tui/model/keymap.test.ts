@@ -97,6 +97,54 @@ describe("the keymap table", () => {
     expect({ armed: escaped.armed, overlays: escaped.overlays }).toEqual({ armed: false, overlays: [] });
   });
 
+  it("drops every binding no input event can fire, with one note naming why, and the action shows no key for it", () => {
+    const rows: { keys: Record<string, unknown>; action: string; note: Record<string, string> }[] = [
+      { keys: { new_tab: "prefix+\u314a" }, action: "new_tab", note: { code: "not_typable", action: "new_tab", binding: "prefix+\u314a" } },
+      { keys: { split_vertical: "prefix+hyper+v" }, action: "split_vertical", note: { code: "no_such_modifier", action: "split_vertical", binding: "prefix+hyper+v" } },
+      { keys: { navigate_pane_down: "left" }, action: "navigate_pane_down", note: { code: "fixed_key", action: "navigate_pane_down", binding: "left" } },
+      { keys: { navigate_pane_up: "shift+tab" }, action: "navigate_pane_up", note: { code: "fixed_key", action: "navigate_pane_up", binding: "shift+tab" } },
+      { keys: { zoom: "prefix+shift+1" }, action: "zoom", note: { code: "shift_in_text", action: "zoom", binding: "prefix+shift+1" } },
+      { keys: { zoom: "ctrl+!" }, action: "zoom", note: { code: "shifted_character", action: "zoom", binding: "ctrl+!" } },
+      { keys: { zoom: "prefix+f30" }, action: "zoom", note: { code: "not_typable", action: "zoom", binding: "prefix+f30" } },
+      { keys: { zoom: "prefix+esc" }, action: "zoom", note: { code: "cancel_key", action: "zoom", binding: "prefix+esc" } },
+      { keys: { prefix: "hyper+b", zoom: "prefix+z" }, action: "zoom", note: { code: "no_prefix", action: "zoom", binding: "prefix+z" } },
+    ];
+    for (const row of rows) {
+      const keymap = buildKeymap(row.keys);
+      const label = JSON.stringify(row.keys);
+      const notes: unknown[] = keymap.notes.filter((note) => "action" in note && note.action === row.action);
+      expect({ label, notes }).toEqual({ label, notes: [row.note] });
+      const shown = helpRows(keymap).filter((help) => help.action === row.action && help.mode === (row.action.startsWith("navigate") ? "navigate" : "terminal"));
+      expect({ label, keys: shown.flatMap((help) => help.keys).filter((text) => text === row.note.binding) }).toEqual({ label, keys: [] });
+      expect({ label, notice: reduce(start(), { type: "keys", keys: row.keys, at: AT }).state.notices.map((notice) => notice.code) }).toEqual({ label, notice: ["keys_refused"] });
+    }
+    // an unusable prefix is noted too, and then nothing after the prefix is shown
+    const noPrefix = buildKeymap({ prefix: "hyper+b" });
+    expect(noPrefix.prefixes).toEqual([]);
+    expect(noPrefix.notes).toContainEqual({ code: "no_such_modifier", action: "prefix", binding: "hyper+b" });
+    expect(helpRows(noPrefix).filter((help) => help.keys.some((text) => text.startsWith("prefix+")))).toEqual([]);
+    // the verifier's two repros: nothing shown for those keys, and the action has no key
+    const repro = buildKeymap({ new_tab: "prefix+\u314a", split_vertical: "prefix+hyper+v" });
+    const armed = reduce(reduce(initialState({ new_tab: "prefix+\u314a", split_vertical: "prefix+hyper+v" }), { type: "world", world: WORLD, at: 0 }).state, key("b", { ctrl: true })).state;
+    expect(modeBar(armed).hints.filter((hint) => hint.action === "new_tab" || hint.action === "split_vertical")).toEqual([]);
+    expect(helpRows(repro).filter((help) => help.action === "new_tab" || help.action === "split_vertical").map((help) => help.keys)).toEqual([[], []]);
+    const navigate = buildKeymap({ navigate_pane_down: "left", navigate_pane_up: "shift+tab" });
+    expect(navigate.notes).toEqual([{ code: "fixed_key", action: "navigate_pane_down", binding: "left" }, { code: "fixed_key", action: "navigate_pane_up", binding: "shift+tab" }]);
+  });
+
+  it("gives the lock's chord to a custom command that binds it, with a note", () => {
+    const keymap = buildKeymap({ command: [{ key: "ctrl+alt+g", command: "x" }] });
+    expect(keymap.rows.find((row) => row.action === "lock")!.bindings).toEqual([]);
+    expect(keymap.notes).toEqual([{ code: "lock_taken", holder: "command" }]);
+  });
+
+  it("shows a range that lost a digit as the digits it still holds", () => {
+    const keymap = buildKeymap({ copy_mode: "prefix+9" });
+    expect(helpRows(keymap).find((row) => row.action === "switch_tab")!.keys).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((digit) => `prefix+${digit}`));
+    const armed = reduce(start({ copy_mode: "prefix+9" }), key("b", { ctrl: true })).state;
+    expect(modeBar(armed).hints.find((hint) => hint.action === "switch_tab")!.keys).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
+  });
+
   it("cleans, clamps and caps the config text it shows", () => {
     expect(cleanConfigText("a\u0007b\u202ec\u200bd\n")).toBe("abcd");
     expect([...cleanConfigText("x".repeat(500))]).toHaveLength(80);

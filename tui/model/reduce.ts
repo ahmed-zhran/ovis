@@ -13,7 +13,7 @@ import { CATALOGUE_BY_ID } from "./catalogue.ts";
 import { clearDeadline, type Deadlines, NO_DEADLINES, NOTICE_SHOW_MS, NOTICES_KEPT, setDeadline } from "./deadlines.ts";
 import type { Effect, KeyInput, MouseInput, PaneInput, PasteInput, TextInput } from "./effects.ts";
 import { EMPTY_WORLD, exists, type Focus, focused, focusOn, NO_FOCUS, nextFocus, type Target, type World } from "./focus.ts";
-import { boundIn, buildKeymap, charChords, isPrefix, type Bound, type KeyAction, type Keymap, keyChords, unlockChords } from "./keymap.ts";
+import { boundIn, buildKeymap, charChords, isPrefix, type KeyAction, type Keymap, keyChords, unlockChords } from "./keymap.ts";
 import { field, type Overlay, overlayInput, type OverlayInput, overlayTarget } from "./overlays.ts";
 
 export type ModeState =
@@ -53,7 +53,7 @@ export type ScreenEvent =
   /** a deadline the state named came due */
   | { readonly type: "deadline"; readonly name: string; readonly at: number }
   /** an action chosen without a key (a menu entry, a click) */
-  | { readonly type: "action"; readonly action: HerdrAction | "lock"; readonly index?: number; readonly at: number }
+  | { readonly type: "action"; readonly action: KeyAction; readonly index?: number; readonly at: number }
   /** focus a workspace, tab or pane (a click, or the neighbour a directional focus found) */
   | { readonly type: "select"; readonly target: Target; readonly at: number }
   /** a notice from elsewhere (a failed layout write) */
@@ -91,10 +91,14 @@ export function reduce(state: ModelState, event: ModelEvent): Step {
       acc.s = { ...acc.s, host: { ...acc.s.host, focused: event.focused } };
       if (!event.focused) disarm(acc);
       break;
-    case "resize":
+    case "resize": {
       acc.levels.push(0);
-      acc.s = { ...acc.s, host: { ...acc.s.host, cols: Math.max(0, Math.trunc(event.cols) || 0), rows: Math.max(0, Math.trunc(event.rows) || 0) } };
+      const cols = Math.trunc(event.cols);
+      const rows = Math.trunc(event.rows);
+      // a size that is not a whole number of cells above zero (infinite, NaN, negative) is no size: it is ignored
+      if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) acc.s = { ...acc.s, host: { ...acc.s.host, cols, rows } };
       break;
+    }
     case "key":
       if (event.action === "release") acc.levels.push(0);
       else ladder(acc, { kind: "key", event });
@@ -163,7 +167,7 @@ function ladder(acc: Acc, unit: Unit): void {
   if (s.mode.name !== "terminal") {
     acc.levels.push(3);
     const bound = boundIn(s.keymap.modeKeys[s.mode.name], chords);
-    if (bound !== undefined) runBound(acc, bound, at);
+    if (bound !== undefined) runAction(acc, bound.action, bound.index, at);
     return;
   }
   if (unit.kind === "paste") {
@@ -176,7 +180,7 @@ function ladder(acc: Acc, unit: Unit): void {
     const bound = boundIn(s.keymap.direct, chords);
     if (bound !== undefined) {
       acc.levels.push(4);
-      runBound(acc, bound, at);
+      runAction(acc, bound.action, bound.index, at);
       return;
     }
     if (isPrefix(s.keymap, chords)) {
@@ -195,7 +199,7 @@ function ladder(acc: Acc, unit: Unit): void {
   acc.levels.push(5);
   // Escape and ctrl+[ hold no binding after the prefix (the key table drops one): they only return to Idle
   const bound = boundIn(s.keymap.afterPrefix, chords);
-  if (bound !== undefined) runBound(acc, bound, at);
+  if (bound !== undefined) runAction(acc, bound.action, bound.index, at);
   else if (unit.event.text !== undefined && HANGUL.test(unit.event.text)) notice(acc, "ime_prefix", {}, at);
 }
 
@@ -236,7 +240,7 @@ function ladderText(acc: Acc, event: TextInput): void {
     if (s.mode.name !== "terminal") {
       acc.levels.push(3);
       const bound = boundIn(s.keymap.modeKeys[s.mode.name], charChords(first, false));
-      if (bound !== undefined) runBound(acc, bound, event.at);
+      if (bound !== undefined) runAction(acc, bound.action, bound.index, event.at);
       rest = after;
       continue;
     }
@@ -247,7 +251,7 @@ function ladderText(acc: Acc, event: TextInput): void {
       else {
         acc.levels.push(5);
         const bound = boundIn(s.keymap.afterPrefix, chords);
-        if (bound !== undefined) runBound(acc, bound, event.at);
+        if (bound !== undefined) runAction(acc, bound.action, bound.index, event.at);
         else if (HANGUL.test(first)) notice(acc, "ime_prefix", {}, event.at);
       }
       rest = after;
@@ -350,10 +354,6 @@ function select(acc: Acc, target: Target, at: number): void {
   const focus = focusOn(acc.s.world, acc.s.focus, target);
   if (focus === null) notice(acc, "target_gone", { [target.kind]: target.id }, at);
   else acc.s = { ...acc.s, focus };
-}
-
-function runBound(acc: Acc, bound: Bound, at: number): void {
-  runAction(acc, bound.action, bound.index, at);
 }
 
 function setMode(acc: Acc, mode: ModeState): void {

@@ -6,7 +6,7 @@
  * the mode bar and the help all read this one table.
  */
 import { type HerdrAction, type HerdrChord, type HerdrKeptBinding, type HerdrKeyRefusal, type HerdrNavigateKey, parseHerdrBinding, resolveAllHerdrKeys } from "../../shared/herdr-keys.ts";
-import type { InputEvent } from "../input/decode.ts";
+import { decodeControl, decodeCsi, decodeSs3, type InputEvent, typedKey } from "../input/decode.ts";
 
 export type Mode = "terminal" | "navigate" | "resize" | "copy";
 
@@ -26,14 +26,33 @@ export interface KeyRow {
 
 export interface Bound { readonly action: KeyAction; readonly index: number | null }
 
+/**
+ * Why no input event can ever fire a binding the resolver keeps, so the table drops it. Each reason is a fact
+ * of the host input decoder (tui/input/decode.ts) or of the ladder:
+ * - no_such_modifier: a key event carries only shift, alt, ctrl and super; the decoder drops a sequence with
+ *   hyper or meta (its UNSENDABLE_BITS), so a chord with hyper never arrives.
+ * - not_typable: a character outside printable ASCII arrives as text or an UNIDENTIFIED key, which match no
+ *   chord, and a named key the decoder never names (F26 and up) has no event.
+ * - shift_in_text: without ctrl or super a key that types text carries shift in the text, not in its mods
+ *   (typedKey): shift+1 arrives as "!", so shift with a digit, punctuation or space never matches.
+ * - shifted_character: with ctrl or super the decoder names a character typed with shift by its base key and
+ *   shift (typedKey): ctrl+! arrives as ctrl+shift+1.
+ * - cancel_key: after the prefix, Escape and ctrl+[ end the prefix before a binding is looked up.
+ * - fixed_key: a key the screen fixes for that mode holds it first.
+ * - no_prefix: no prefix key can be typed, so nothing after the prefix is reached.
+ * Chords these leave in can fire, some only on a host with the kitty keyboard flag (ctrl+shift+1, ctrl+1,
+ * super chords): there the decoder reports them whole.
+ */
+export type DropCode = "no_such_modifier" | "not_typable" | "shift_in_text" | "shifted_character" | "cancel_key" | "fixed_key" | "no_prefix";
+
 /** What the config writes that holds no key and is no refusal of the resolver. */
 export type KeymapNote =
   | { readonly code: "indexed_legacy"; readonly entry: string }
   | { readonly code: "blank_binding"; readonly action: string }
-  /** the lock's chord is held by `holder` (an action, or "prefix"), so the lock has no key */
+  /** the lock's chord is held by `holder` (an action, "prefix" or "command"), so the lock has no key */
   | { readonly code: "lock_taken"; readonly holder: string }
-  /** a binding after the prefix on Escape or ctrl+[, which always cancel the prefix: it could never fire */
-  | { readonly code: "cancel_key"; readonly action: string; readonly binding: string };
+  /** a binding the resolver keeps that no input event can fire (`action` is "prefix" for a prefix key) */
+  | { readonly code: DropCode; readonly action: string; readonly binding: string };
 
 type Lookup = Readonly<Record<string, Bound>>;
 
@@ -81,9 +100,40 @@ export function chordId(chord: HerdrChord): string {
 
 const CANCEL_IDS: ReadonlySet<string> = new Set(CANCEL_KEYS.map((text) => chordId(parseHerdrBinding(text)!.chord)));
 
-/** Whether one of `chords` is Escape or ctrl+[. */
-export function isCancel(chords: readonly HerdrChord[]): boolean {
-  return chords.some((chord) => CANCEL_IDS.has(chordId(chord)));
+/** The levels a binding is matched at. */
+type Level = "prefix" | "direct" | "after_prefix" | "navigate";
+
+/** Why no input event can fire `chord` at `level` (see DropCode), or null when one can. `fixed`: the chords the screen fixes there. */
+function dropReason(chord: HerdrChord, level: Level, fixed: ReadonlySet<string>, prefixReachable: boolean): DropCode | null {
+  if (chord.hyper) return "no_such_modifier";
+  const char = /^[\x20-\x7e]$/.test(chord.key);
+  if (!char && !NAMED_KEYS.has(chord.key)) return "not_typable";
+  if (char && !/^[a-z]$/.test(chord.key)) {
+    if (chord.ctrl || chord.meta) {
+      if (typedKey(chord.key, { ctrl: true }).mods.shift) return "shifted_character";
+    } else if (chord.shift) return "shift_in_text";
+  }
+  if (level === "after_prefix" && !prefixReachable) return "no_prefix";
+  if (level === "after_prefix" && CANCEL_IDS.has(chordId(chord))) return "cancel_key";
+  if (fixed.has(chordId(chord))) return "fixed_key";
+  return null;
+}
+
+const NOTHING_FIXED: ReadonlySet<string> = new Set();
+
+/** The direct chords the config's `[[keys.command]]` entries hold (the resolver gives commands no action), when it reads the config. */
+function commandChords(keys: unknown, configRead: boolean): ReadonlySet<string> {
+  const commands = configRead ? table(keys)?.["command"] : undefined;
+  if (!Array.isArray(commands)) return NOTHING_FIXED;
+  return new Set(commands.flatMap((entry) => {
+    const command = table(entry);
+    if (command === null || typeof command["command"] !== "string" || command["command"].trim() === "") return [];
+    const written = command["key"];
+    return (typeof written === "string" ? [written] : Array.isArray(written) ? written : []).flatMap((text) => {
+      const binding = typeof text === "string" ? parseHerdrBinding(text) : null;
+      return binding === null || binding.prefixed || binding.range ? [] : [chordId(binding.chord)];
+    });
+  }));
 }
 
 /** A fixed key as a binding: a range is its nine digits, each with its index. */
@@ -118,7 +168,19 @@ function configNotes(keys: unknown, names: ReadonlySet<string>): KeymapNote[] {
 /** The key table for the user's `[keys]` table (anything else: herdr's defaults). Pure: it reads no file. */
 export function buildKeymap(keys: unknown): Keymap {
   const resolved = resolveAllHerdrKeys(keys);
-  const prefixIds: Record<string, true> = Object.fromEntries(resolved.prefixes.map(({ chord }) => [chordId(chord), true]));
+  const notes = configNotes(keys, new Set([...resolved.actions.map(({ action }) => action), ...resolved.navigate.map(({ name }) => name)]));
+  const prefixes = resolved.prefixes.filter(({ text, chord }) => {
+    const code = dropReason(chord, "prefix", NOTHING_FIXED, true);
+    if (code !== null) notes.push({ code, action: "prefix", binding: text });
+    return code === null;
+  });
+  const prefixIds: Record<string, true> = Object.fromEntries(prefixes.map(({ chord }) => [chordId(chord), true]));
+  /** `binding` when every chord of it can fire at `level`; else null, with the binding's one note. */
+  const firing = (action: string, binding: HerdrKeptBinding, level: Level, fixed: ReadonlySet<string>): HerdrKeptBinding | null => {
+    const code = binding.chords.map(({ chord }) => dropReason(chord, level, fixed, prefixes.length > 0)).find((reason) => reason !== null) ?? null;
+    if (code !== null) notes.push({ code, action, binding: binding.text });
+    return code === null ? binding : null;
+  };
   const afterPrefix: Record<string, Bound> = {};
   const direct: Record<string, Bound> = {};
   const rows: KeyRow[] = [];
@@ -128,29 +190,19 @@ export function buildKeymap(keys: unknown): Keymap {
     lookup[id] = { action, index };
     return true;
   };
-  const notes = configNotes(keys, new Set([...resolved.actions.map(({ action }) => action), ...resolved.navigate.map(({ name }) => name)]));
   for (const { action, default: defaults, bindings } of resolved.actions) {
-    const live: HerdrKeptBinding[] = [];
-    for (const binding of bindings) {
-      // Escape and ctrl+[ cancel an armed prefix before any binding is looked at: one after the prefix never fires
-      const firing = binding.prefixed ? kept(binding, (chord) => !isCancel([chord])) : binding;
-      if (firing === null) {
-        notes.push({ code: "cancel_key", action, binding: binding.text });
-        continue;
-      }
-      // the resolver already gave every chord to one action: these claims never collide
-      kept(firing, claim(firing.prefixed ? afterPrefix : direct, action));
-      live.push(firing);
-    }
+    const live = bindings.flatMap((binding) => firing(action, binding, binding.prefixed ? "after_prefix" : "direct", NOTHING_FIXED) ?? []);
+    // the resolver already gave every chord to one action: these claims never collide
+    for (const binding of live) kept(binding, claim(binding.prefixed ? afterPrefix : direct, action));
     rows.push({ action, default: defaults, mode: "terminal", source: "herdr", bindings: live });
   }
   const lockBinding = fixedBinding(LOCK_KEY);
-  const lock = kept(lockBinding, claim(direct, "lock"));
-  if (lock === null) {
-    const id = chordId(lockBinding.chords[0]!.chord);
-    notes.push({ code: "lock_taken", holder: Object.hasOwn(direct, id) ? direct[id]!.action : "prefix" });
-  }
-  rows.push({ action: "lock", default: LOCK_KEY, mode: "terminal", source: "fixed", bindings: lock === null ? [] : [lock] });
+  const lockId = chordId(lockBinding.chords[0]!.chord);
+  const commands = commandChords(keys, resolved.configRead);
+  const lockHolder = Object.hasOwn(direct, lockId) ? direct[lockId]!.action : Object.hasOwn(prefixIds, lockId) ? "prefix" : commands.has(lockId) ? "command" : null;
+  if (lockHolder === null) claim(direct, "lock")(lockBinding.chords[0]!.chord, null);
+  else notes.push({ code: "lock_taken", holder: lockHolder });
+  rows.push({ action: "lock", default: LOCK_KEY, mode: "terminal", source: "fixed", bindings: lockHolder === null ? [lockBinding] : [] });
 
   const modeKeys = { navigate: {}, resize: {}, copy: {} } as Record<Exclude<Mode, "terminal">, Record<string, Bound>>;
   const fixedRows = new Map<string, HerdrKeptBinding[]>();
@@ -159,7 +211,7 @@ export function buildKeymap(keys: unknown): Keymap {
     fixedRows.set(`${mode}:${action}`, bindings);
   }
   // navigate mode is left with the prefix as well (herdr: "Esc, the prefix or Ctrl+[ cancels")
-  for (const { text, chord } of resolved.prefixes) {
+  for (const { text, chord } of prefixes) {
     if (claim(modeKeys.navigate, "navigate_cancel")(chord, null)) fixedRows.get("navigate:navigate_cancel")!.push({ text, prefixed: false, range: false, chords: [{ chord, index: null }] });
   }
   // resize mode is left with the key that entered it (the one after the prefix)
@@ -167,13 +219,15 @@ export function buildKeymap(keys: unknown): Keymap {
     const leave = kept({ ...binding, text: binding.text.replace(/^prefix\+/, "") }, claim(modeKeys.resize, "resize_leave"));
     if (leave !== null) fixedRows.get("resize:resize_leave")!.push(leave);
   }
+  const navigateFixed: ReadonlySet<string> = new Set(Object.keys(modeKeys.navigate));
   for (const name of new Set(resolved.navigate.map((entry) => entry.name))) {
     const entries = resolved.navigate.filter((entry) => entry.name === name);
     const bindings = [...fixedRows.get(`navigate:${name}`) ?? []];
     for (const { text, chord } of entries) {
       if (chord === null) continue;
-      const binding = kept({ text, prefixed: false, range: false, chords: [{ chord, index: null }] }, claim(modeKeys.navigate, name));
-      if (binding !== null) bindings.push(binding);
+      const binding = firing(name, { text, prefixed: false, range: false, chords: [{ chord, index: null }] }, "navigate", navigateFixed);
+      // the resolver gave every navigate chord to one name and the fixed ones are noted: this claim never collides
+      if (binding !== null && kept(binding, claim(modeKeys.navigate, name)) !== null) bindings.push(binding);
     }
     rows.push({ action: name, default: entries[0]!.default, mode: "navigate", source: "herdr", bindings });
   }
@@ -181,7 +235,7 @@ export function buildKeymap(keys: unknown): Keymap {
     if (rows.some((row) => row.action === action && row.mode === mode)) continue;
     rows.push({ action, default: texts.join(", "), mode, source: "fixed", bindings: fixedRows.get(`${mode}:${action}`)! });
   }
-  return { configRead: resolved.configRead, prefixes: resolved.prefixes, rows, refusals: resolved.refusals, notes, prefixIds, afterPrefix, direct, modeKeys };
+  return { configRead: resolved.configRead, prefixes, rows, refusals: resolved.refusals, notes, prefixIds, afterPrefix, direct, modeKeys };
 }
 
 /** The lock's chords: the unlock chord exists exactly when this is not empty. */
@@ -224,6 +278,15 @@ export function boundIn(lookup: Lookup, chords: readonly HerdrChord[]): Bound | 
   }
   return undefined;
 }
+
+/** The named keys the decoder can deliver, asked of the decoder: control bytes, the CSI ~, u and letter forms, SS3. */
+const NAMED_KEYS: ReadonlySet<string> = new Set([
+  ...[...Array.from({ length: 0x20 }, (_, i) => i), 0x7f].filter((byte) => byte !== 0x1b).map((byte) => decodeControl(byte, false)),
+  ...Array.from({ length: 40 }, (_, i) => decodeCsi(String(i + 1), "~", false)),
+  ...[9, 13, 27, 127, ...Array.from({ length: 120 }, (_, i) => 57344 + i)].map((code) => decodeCsi(String(code), "u", false)),
+  ...[..."ABCDEFGHPQRSZ"].map((final) => decodeCsi("", final, false)),
+  ...Array.from({ length: 0x3f }, (_, i) => decodeSs3(String.fromCharCode(0x40 + i))),
+].flatMap((event) => event?.type === "key" ? keyChords({ ...event, at: 0 }).map((chord) => chord.key) : []).filter((key) => key.length > 1));
 
 export function isPrefix(keymap: Keymap, chords: readonly HerdrChord[]): boolean {
   return chords.some((chord) => Object.hasOwn(keymap.prefixIds, chordId(chord)));
