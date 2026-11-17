@@ -34,7 +34,7 @@ export interface LoopClock {
   arm(at: number, fire: () => void): () => void;
 }
 
-interface LoopOptions {
+export interface LoopOptions {
   host: Host;
   clock: LoopClock;
   /** the core's socket, as the entry worked it out */
@@ -57,8 +57,8 @@ export type LoopEnd =
   /** `leaveError`: giving the terminal back failed with this code; it is still a quit */
   | { kind: "quit"; leaveError?: string }
   | { kind: "gone"; why: "hangup" | "write-failed" }
-  | { kind: "signal"; signal: "SIGINT" | "SIGTERM" }
-  | { kind: "no_core"; code: string; reason: string }
+  | { kind: "signal" }
+  | { kind: "no_core"; code: string }
   | { kind: "incompatible"; code: string; reason: string }
   | { kind: "not_a_terminal" }
   | { kind: "crashed"; error: unknown };
@@ -480,7 +480,7 @@ export function startLoop(options: LoopOptions): Loop {
     act(`host:${how.kind}`);
     // closeAll puts the loop in its closing state: no frame is drawn from here on
     return closeAll().then(() => {
-      end(how.kind === "gone" ? { kind: "gone", why: how.why } : { kind: "signal", signal: how.signal });
+      end(how.kind === "gone" ? { kind: "gone", why: how.why } : { kind: "signal" });
     });
   }
 
@@ -492,7 +492,7 @@ export function startLoop(options: LoopOptions): Loop {
     if (ended) return;
     if (first.kind === "NoCore" || first.kind === "Incompatible") {
       void link.close().catch(() => {});
-      end(first.kind === "NoCore" ? { kind: "no_core", code: first.code, reason: first.reason } : { kind: "incompatible", code: first.code, reason: first.reason });
+      end(first.kind === "NoCore" ? { kind: "no_core", code: first.code } : { kind: "incompatible", code: first.code, reason: first.reason });
       return;
     }
     if (!host.enter()) {

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { version } from "../package.json";
 import { FakeHcCore } from "../server/herdr-core/core.fake.ts";
 import { crashRecord, recordCrash } from "./crash.ts";
-import { CRASH_RECORDS_KEPT } from "./model/deadlines.ts";
+import { CRASH_RECORDS_KEPT, QUIT_BOUND_MS } from "./model/deadlines.ts";
+import { ending } from "./start.ts";
 import { demo } from "./testing/fixtures/demo.ts";
 import { Run } from "./testing/run.ts";
 
@@ -97,6 +98,28 @@ describe("the entry", () => {
       expect(own.calls()).toEqual([]);
     } finally {
       for (const listener of listeners) await listener.close();
+    }
+  }, TEST_MS);
+
+  it("a quit whose terminal restore failed prints its quit line, then one line with the write's code, and exits 0", async () => {
+    const run = await Run.start({ fixture: demo });
+    try {
+      await run.live();
+      run.host.failWrites("EBADF");
+      // the prefix and the detach key in one read: the quit starts before any frame could be written
+      run.type("\x02q");
+      await run.advance(QUIT_BOUND_MS);
+      const end = await run.loop.done;
+      // a quit, not a crash: the entry writes a crash record only for `crashed`
+      expect(end.kind).toBe("quit");
+      if (end.kind !== "quit") return;
+      const target = { path: run.socket, session: "default" };
+      const said = ending(end, target);
+      expect(said.out).toBe(ending({ kind: "quit" }, target).out);
+      expect(said.err.map(([code]) => code)).toEqual(["EBADF"]);
+      expect(said.exit).toBe(0);
+    } finally {
+      await run.close();
     }
   }, TEST_MS);
 });

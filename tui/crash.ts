@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { LoopReport } from "./loop.ts";
 import { CRASH_RECORDS_KEPT } from "./model/deadlines.ts";
 
-interface CrashRecord {
+export interface CrashRecord {
   at: string;
   version: string;
   hc: LoopReport["hc"];

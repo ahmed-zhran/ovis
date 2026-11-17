@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, HcConnection } from "../server/herdr-core/connection.ts";
 import { CREDIT_WINDOW, FakeHcCore } from "../server/herdr-core/core.fake.ts";
 import { OVIS_LAYOUT_DOC } from "../server/herdr-core/layout-doc.ts";
-import { startLoop } from "./loop.ts";
+import { type LoopEnd, startLoop } from "./loop.ts";
 import { FRAME_PASS_MS, HOLD_RELEASE_MS, NOTICE_SHOW_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, PASTE_LIMIT_BYTES, QUIT_BOUND_MS, RECONNECT_MOST_MS } from "./model/deadlines.ts";
 import { demo } from "./testing/fixtures/demo.ts";
 import { place } from "./testing/fixtures/fixture.ts";
@@ -20,6 +20,19 @@ const SOAK_MS = 600_000;
 const OWN_HEAP_GROWTH_BYTES = 2 * 1024 * 1024;
 /** the link's code once its line was cut and a retry found no core listening (tui/core/link.ts) */
 const OFFLINE_CODE = "no_core";
+
+// `bun run typecheck` checks the lines marked with ts-expect-error below: each must stay a compile error. The loop's
+// end carries only what a reader takes: the host ends the process with a signal's own exit code, and the entry says
+// itself what a missing core means.
+function typeOnly(): LoopEnd[] {
+  return [
+    // @ts-expect-error a signal's end names no signal
+    { kind: "signal", signal: "SIGINT" },
+    // @ts-expect-error a missing core's end carries no reason
+    { kind: "no_core", code: "no_core", reason: "nothing listens" },
+  ];
+}
+void typeOnly;
 
 const runs: Run[] = [];
 afterEach(async () => {
