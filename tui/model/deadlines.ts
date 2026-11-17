@@ -72,3 +72,22 @@ export function earliest(deadlines: Deadlines): { name: string; at: number } | u
   }
   return first;
 }
+
+// The state core's waits and limits (row 24). Its deadline names are `prefix` and `notice`.
+
+/**
+ * An armed prefix that got no key for this long returns to Idle, so a prefix left armed by mistake does not
+ * swallow the next key typed much later. herdr's prefix waits without end; a person never pauses this long
+ * inside one chord.
+ */
+export const PREFIX_WAIT_MS = 60_000;
+/** How long a notice stays on screen (herdr keeps a failure on screen for 5 s). */
+export const NOTICE_SHOW_MS = 5_000;
+/** The most notices kept at once; a new one pushes out the oldest. */
+export const NOTICES_KEPT = 8;
+/** The most code points of config text (a binding or a reason as written) drawn; longer text is cut with an ellipsis. */
+export const CONFIG_TEXT_MAX_CHARS = 80;
+/** The most refusals of the key config listed; the rest are counted. */
+export const REFUSALS_SHOWN = 20;
+/** The most graphemes a one-line text field (rename, new tab name, goto) holds; typing or pasting past it is cut. */
+export const TEXT_FIELD_MAX_GRAPHEMES = 256;
