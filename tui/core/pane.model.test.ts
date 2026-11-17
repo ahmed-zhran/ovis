@@ -859,7 +859,8 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
 
   // the reference: the core's own size rule (the latest stamp leads, else the newest attach) over every viewer the core's log shows,
   // where a screen's repaint advertises the terminal's size at that moment, or the last one it had while somebody viewed it
-  interface Viewer { size: string; stamp: number | null; attached: number }
+  /** `size`: what the reference lets the viewer advertise; `sent`: what its attach or RESIZE really advertised, which the core uses once the viewer's input stamps it */
+  interface Viewer { size: string; sent: string; stamp: number | null; attached: number }
   const viewers = new Map<string, Viewer>();
   let ticks = 0;
   let lastViewed: string | null = null;
@@ -871,7 +872,7 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
   const chosen = (): string | null => leader()?.size ?? null;
   /** per line: what the screen's attach about to reach the core is (noted as the machine asks it), and the attach the core is answering */
   const asking = new Map<number, { repaint: boolean }>();
-  const answering = new Map<number, { size: string; resumed: boolean }>();
+  const answering = new Map<number, { size: string; sent: string; resumed: boolean }>();
   const see = (entry: FakeEntry): void => {
     if (entry.what === "call" && entry.method === "terminal.attach" && entry.params["terminal"] === t) {
       const asked = asking.get(entry.line);
@@ -879,20 +880,21 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
       const sent = `${String(entry.params["cols"])}x${String(entry.params["rows"])}`;
       // beside a viewer that drives the terminal the core does not use what a repaint advertises: it counts as it was sent
       const copies = asked?.repaint === true && leader()?.stamp == null;
-      answering.set(entry.line, { size: copies ? chosen() ?? lastViewed ?? sent : sent, resumed: entry.params["resumed"] === true });
+      answering.set(entry.line, { size: copies ? chosen() ?? lastViewed ?? sent : sent, sent, resumed: entry.params["resumed"] === true });
     } else if (entry.what === "reply" && entry.method === "terminal.attach") {
       const attach = answering.get(entry.line);
       answering.delete(entry.line);
       const channel = (entry.result as { channel?: number } | undefined)?.channel;
-      if (attach && channel !== undefined) viewers.set(`${entry.line}:${channel}`, { size: attach.size, stamp: attach.resumed ? null : ++ticks, attached: ++ticks });
+      if (attach && channel !== undefined) viewers.set(`${entry.line}:${channel}`, { size: attach.size, sent: attach.sent, stamp: attach.resumed ? null : ++ticks, attached: ++ticks });
     } else if (entry.what === "frame" && entry.from === "viewer") {
       const key = `${entry.line}:${entry.channel}`;
       const viewer = viewers.get(key);
       if (!viewer) return;
       if (entry.kind === FRAME_CLOSE) viewers.delete(key);
-      else if (entry.kind === FRAME_DATA || (entry.kind === FRAME_FOCUS && entry.payload[0] === 1)) viewer.stamp = ++ticks;
+      // a viewer whose input stamps it leads with what it really advertised: a repaint's copy of the terminal's size was the reference's
+      else if (entry.kind === FRAME_DATA || (entry.kind === FRAME_FOCUS && entry.payload[0] === 1)) Object.assign(viewer, { size: viewer.sent, stamp: ++ticks });
       else if (entry.kind === FRAME_RESIZE && entry.payload.length >= 4) {
-        viewer.size = `${Buffer.from(entry.payload).readUInt16LE(0)}x${Buffer.from(entry.payload).readUInt16LE(2)}`;
+        viewer.size = viewer.sent = `${Buffer.from(entry.payload).readUInt16LE(0)}x${Buffer.from(entry.payload).readUInt16LE(2)}`;
         viewer.stamp = ++ticks;
       }
     } else if (entry.what === "event" && entry.type === "size") trace.push(`[${String((entry.data as Record<string, unknown>)["cols"])}x${String((entry.data as Record<string, unknown>)["rows"])}]`);
