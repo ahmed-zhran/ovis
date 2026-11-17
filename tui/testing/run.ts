@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { version } from "../../package.json";
-import { FRAME_DATA, type Frame, type HcTransport, makeFrameReader } from "../../server/herdr-core/connection.ts";
+import { type Frame, type HcTransport, makeFrameReader } from "../../server/herdr-core/connection.ts";
 import { FakeHcCore } from "../../server/herdr-core/core.fake.ts";
 import { connectCoreSocket } from "../../server/herdr-core/socket-transport.ts";
 import { crashRecord, recordCrash } from "../crash.ts";
@@ -32,7 +32,7 @@ export const FIXTURES: Readonly<Record<string, Fixture>> = { demo, agents, machi
 
 /** What the headless host answers the start probe with: the kitty flags in force, DECRQM 2026 known, then DA1. */
 export const PROBE_ANSWER = "\x1b[?1u\x1b[?2026;2$y\x1b[?62;22c";
-/** hc sends a heartbeat this often; `advance` sends them on the fake core unless a run asks for silence */
+/** hc sends a heartbeat this often; `advance` sends them on the fake core (none while `muted`) */
 const HEARTBEAT_MS = 15_000;
 /** how far `advance` moves at most while the host has a timer of its own (its probe, a drain) */
 const HOST_STEP_MS = 10;
@@ -91,12 +91,8 @@ export interface RunOptions {
   core?: FakeHcCore;
   cols?: number;
   rows?: number;
+  /** the host's COLORTERM: "truecolor" by default; anything else is a 256-colour host (tui/host colorDepth) */
   colorTerm?: string;
-  /** what the host answers the start probe with (PROBE_ANSWER by default; null: nothing) */
-  answer?: string | null;
-  /** send hc's heartbeat every 15 s of the clock while advancing (default true) */
-  heartbeats?: boolean;
-  keys?: unknown;
 }
 
 export class Run {
@@ -118,11 +114,9 @@ export class Run {
     readonly folder: string,
     readonly socket: string,
     readonly fixture: Fixture | null,
-    private readonly heartbeats: boolean,
-    keys: unknown,
   ) {
     this.nextBeat = HEARTBEAT_MS;
-    this.loop = startLoop({ host, clock, socket, keys, connect: (path) => this.connect(path) });
+    this.loop = startLoop({ host, clock, socket, keys: undefined, connect: (path) => this.connect(path) });
   }
 
   readonly loop: Loop;
@@ -133,8 +127,8 @@ export class Run {
     if (!options.core) fixture?.build(core);
     const folder = mkdtempSync(join(process.env["TMPDIR"] || tmpdir(), "run-"));
     const socket = join(folder, "hc.sock");
-    const host = new HeadlessHost({ cols: options.cols ?? 120, rows: options.rows ?? 40, colorTerm: options.colorTerm ?? "truecolor", answer: options.answer === undefined ? PROBE_ANSWER : options.answer });
-    const run = new Run(core, host, new ManualClock(), folder, socket, fixture, options.heartbeats ?? true, options.keys);
+    const host = new HeadlessHost({ cols: options.cols ?? 120, rows: options.rows ?? 40, colorTerm: options.colorTerm ?? "truecolor", answer: PROBE_ANSWER });
+    const run = new Run(core, host, new ManualClock(), folder, socket, fixture);
     await run.listen();
     await run.settle();
     if (run.loop.link.state.kind === "Online") fixture?.online?.(core);
@@ -221,12 +215,12 @@ export class Run {
       const next = this.clock.next();
       if (next !== undefined && next > this.clock.current) step = Math.min(step, next);
       if (this.host.timers() > 0) step = Math.min(step, this.clock.current + HOST_STEP_MS);
-      if (this.heartbeats) step = Math.min(step, this.nextBeat);
+      step = Math.min(step, this.nextBeat);
       step = Math.max(step, this.clock.current + (next !== undefined && next <= this.clock.current ? 0 : 1));
       const delta = step - this.clock.current;
       this.clock.current = step;
       this.host.advance(delta);
-      if (this.heartbeats && this.clock.current >= this.nextBeat) {
+      if (this.clock.current >= this.nextBeat) {
         this.nextBeat += HEARTBEAT_MS;
         if (!this.muted) this.core.heartbeat();
       }
@@ -276,9 +270,19 @@ export class Run {
     return rows;
   }
 
-  /** The DATA payloads the screen wrote to `terminal`'s streams, as text. */
-  typedInto(terminal: string): string {
-    return this.core.sentOn(terminal, { kinds: [FRAME_DATA] }).map((frame) => frame.replace(/^DATA /, "")).map((hex) => Buffer.from(hex, "hex").toString("utf8")).join("");
+  /**
+   * Empties what the run keeps for its tests: the frames the screen sent, the write times, the fake core's log and the
+   * headless host's kept writes. A long run calls it before it measures memory, so it measures the screen and not this
+   * tooling. The headless host (row 21's) keeps every write and has no call to drop them: its two lists are emptied here.
+   */
+  forget(): void {
+    this.sent.length = 0;
+    this.writeTimes.length = 0;
+    this.core.log.length = 0;
+    this.counted.read = 0;
+    const kept = this.host as unknown as { entries: string[]; chunks: Uint8Array[] };
+    kept.entries.length = 0;
+    kept.chunks.length = 0;
   }
 
   /** Detaches through the screen's own quit (the reducer's `detach`) unless it ended already, then lets go of everything. */
@@ -362,7 +366,7 @@ async function main(argv: string[]): Promise<number> {
   if (choice.dump) process.stdout.write(`${run.grid().join("\n")}\n`);
   const report = run.loop.report();
   const end = await run.close();
-  process.stderr.write(`fixture=${choice.fixture} size=${choice.size.cols}x${choice.size.rows} passes=${report.passes} writes=${report.writes} link=${report.link} end=${end.kind} maxArmed=${run.clock.maxArmed}\n`);
+  process.stderr.write(`fixture=${choice.fixture} size=${choice.size.cols}x${choice.size.rows} passes=${report.passes} writes=${report.writes} link=${report.link.kind}${report.link.code ? `:${report.link.code}` : ""} end=${end.kind} maxArmed=${run.clock.maxArmed}\n`);
   return 0;
 }
 

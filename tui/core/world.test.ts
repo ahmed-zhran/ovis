@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type LayoutNode, OVIS_LAYOUT_DOC, type PaneDirection, place } from "../../server/herdr-core/layout-doc.ts";
 import { LAYOUT_DOC, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "../../server/herdr-core/snapshot.ts";
 import type { LinkNotice } from "./link.ts";
-import { CoreWorld, paneToward, treeOf } from "./world.ts";
+import { CoreWorld, focusDirection, paneToward, treeOf } from "./world.ts";
 
 const leaf = (id: string): LayoutNode => ({ leaf: id });
 const right = (ratio: number, first: LayoutNode, second: LayoutNode): LayoutNode => ({ split: "right", ratio, first, second });
@@ -49,6 +49,13 @@ describe("the pane that lies that way (layout-doc.ts neighbour, on the tree the 
       expect(paneToward({ root, zoomed: null }, from, direction)).toBe(expected);
     });
   }
+});
+
+describe("herdr's directional focus actions", () => {
+  it("map to the side each looks to, and nothing else does", () => {
+    expect(["focus_pane_left", "focus_pane_right", "focus_pane_up", "focus_pane_down", "swap_pane_left", "split_vertical", "toString", ""].map(focusDirection))
+      .toEqual(["left", "right", "up", "down", null, null, null, null]);
+  });
 });
 
 const record = (address: string, space: string, tab: string, extra: Record<string, unknown> = {}) => ({

@@ -45,6 +45,13 @@ export function treeOf(layout: Pick<PaneLayoutSnapshot, "splits" | "panes">): La
   return leaves.length === 0 ? null : build("");
 }
 
+/** herdr's directional focus actions and the side each looks to; null for any other action. */
+const FOCUS_DIRECTIONS: Readonly<Record<string, PaneDirection>> = { focus_pane_left: "left", focus_pane_right: "right", focus_pane_up: "up", focus_pane_down: "down" };
+
+export function focusDirection(action: string): PaneDirection | null {
+  return Object.hasOwn(FOCUS_DIRECTIONS, action) ? FOCUS_DIRECTIONS[action]! : null;
+}
+
 /** The pane on that side of `pane` in the tab's tree (layout-doc.ts `neighbour`): the one sharing most of its edge; null at the edge. */
 export function paneToward(shape: TabShape, pane: string, direction: PaneDirection): string | null {
   return neighbour(shape.root, pane, direction);
@@ -77,14 +84,6 @@ export class CoreWorld {
     }
     this.stale = true;
     return true;
-  }
-
-  /** Forgets everything: the core's line is gone and the next snapshot tells it anew. */
-  clear(): void {
-    this.records.clear();
-    this.docs.clear();
-    this.shown = EMPTY;
-    this.stale = false;
   }
 
   /** hc's version, for the snapshot's own field */

@@ -22,6 +22,8 @@ const WAIT_MS = 30_000;
 /** above twice the helper's own 10 s wait for a stopped core, and the waits of every run */
 const TEST_MS = 300_000;
 const DETACH = "\x02q";
+/** what the host writes when it gives the terminal back (tui/host/guard.ts LEAVE): exactly once per run */
+const LEAVE = "\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l";
 /** what a terminal answers to the queries the screen's start probe ends with */
 const ANSWERS: [query: string, answer: string][] = [["\x1b[c", "\x1b[?62;22c"], ["\x1b[?2026$p", "\x1b[?2026;2$y"]];
 
@@ -95,6 +97,7 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
     expect(end.after?.canonical).toBe(true);
     expect(end.after?.echo).toBe(true);
     expect(first.output()).toContain("detached from herdr-core session");
+    expect(first.output().split(LEAVE).length - 1).toBe(1);
     expect(readFileSync(ran, "utf8")).toBe("typed-42\n");
     const record = await hc.call("terminal.get", { terminal: address });
     expect(record.state).toBe("live");
@@ -146,7 +149,7 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
       // a quit may finish before the signal lands
       expect([codes[signal], ...(stage === "quit" ? [0] : [])]).toContain(end.code);
       expect([stage, end.after?.canonical, end.after?.echo]).toEqual([stage, true, true]);
-      expect(run.output().endsWith("\x1b[?1049l") || run.output().includes("\x1b[?1049l")).toBe(true);
+      expect([stage, run.output().split(LEAVE).length - 1]).toEqual([stage, 1]);
       expect((await hc.call("terminal.get", { terminal: address })).state).toBe("live");
     }
   }, TEST_MS);

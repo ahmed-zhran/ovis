@@ -6,7 +6,7 @@ import { FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA } from "../server/herdr-core/conn
 import { CREDIT_WINDOW, FakeHcCore } from "../server/herdr-core/core.fake.ts";
 import { OVIS_LAYOUT_DOC } from "../server/herdr-core/layout-doc.ts";
 import { startLoop } from "./loop.ts";
-import { FRAME_PASS_MS, HOLD_RELEASE_MS, PASS_CREDIT_BYTES, QUIT_BOUND_MS } from "./model/deadlines.ts";
+import { FRAME_PASS_MS, HOLD_RELEASE_MS, PASS_CREDIT_BYTES, PASTE_ABANDON_MS, PASTE_LIMIT_BYTES, QUIT_BOUND_MS } from "./model/deadlines.ts";
 import { demo } from "./testing/fixtures/demo.ts";
 import { place } from "./testing/fixtures/fixture.ts";
 import { SCALE_LARGEST_TAB, SCALE_TERMINALS, SCALE_WORKSPACES, scale } from "./testing/fixtures/scale.ts";
@@ -16,6 +16,10 @@ import { ManualClock, Run, type RunOptions } from "./testing/run.ts";
 /** every test drives the loop on the injected clock; only the socket's own turns are real */
 const TEST_MS = 120_000;
 const SOAK_MS = 600_000;
+/** the most the screen's own heap may grow over the soak's last 480 simulated seconds (measured: well under 1 MB) */
+const OWN_HEAP_GROWTH_BYTES = 2 * 1024 * 1024;
+/** the link's code once its line was cut and a retry found no core listening (tui/core/link.ts) */
+const OFFLINE_CODE = "no_core";
 
 const runs: Run[] = [];
 afterEach(async () => {
@@ -91,6 +95,8 @@ describe("the loop", () => {
     for (let at = 1; at < times.length; at++) expect(times[at]! - times[at - 1]!).toBeGreaterThanOrEqual(FRAME_PASS_MS);
     expect(run.loop.report().passes - passes).toBeLessThanOrEqual(Math.ceil(200 / FRAME_PASS_MS) + 1);
     expect(run.clock.maxArmed).toBe(1);
+    // the row's numbers: a pass at most every 8 ms, 512 KiB of credit a pass, quit within 2 s
+    expect([FRAME_PASS_MS, PASS_CREDIT_BYTES, QUIT_BOUND_MS]).toEqual([8, 512 * 1024, 2_000]);
   }, TEST_MS);
 
   it("credit follows passes: none between passes, none past the window, then at most 512 KiB a pass", async () => {
@@ -115,9 +121,12 @@ describe("the loop", () => {
   it("credit follows passes: the focused pane first, and no pass hands out more than 512 KiB", async () => {
     const run = await start({ core: oneTab(3) });
     await run.live();
+    // the LAST pane in tree order has focus, so tree order alone would credit another first
+    run.loop.dispatch({ type: "select", target: { kind: "pane", id: "t3" }, at: run.clock.current });
+    await run.advance(1);
     for (const terminal of ["t1", "t2", "t3"]) run.core.program(terminal).output(megabyte("0123456789abcde\n"));
     await run.settle();
-    const focused = channelOf(run, "t1");
+    const focused = channelOf(run, "t3");
     const sent = run.sent.length;
     await run.advance(FRAME_PASS_MS);
     const credits = framesOf(run, FRAME_CREDIT, sent);
@@ -162,6 +171,41 @@ describe("the loop", () => {
     run.core.program("t2").output("\x1b[?2026l");
     await run.advance(50);
     expect(run.grid().join("\n")).toContain("HELD-B");
+  }, TEST_MS);
+
+  it("a paste over the limit is refused; the input layer is reset only once no read brought an event for the named wait", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    run.type(`\x1b[200~${"a".repeat(PASTE_LIMIT_BYTES + 10)}`);
+    await run.settle();
+    expect(run.loop.model().notices.map((notice) => notice.code)).toContain("paste_refused");
+    // a slow paste keeps arriving, each piece within the wait: none of it is typed as keys
+    for (let piece = 0; piece < 3; piece++) {
+      await run.advance(PASTE_ABANDON_MS - 500);
+      run.type("bbbb");
+      await run.settle();
+    }
+    await run.advance(PASTE_ABANDON_MS - 1);
+    expect(run.loop.report().actions).not.toContain("paste_reset");
+    expect(run.core.program("t1").receivedHex()).toBe("");
+    await run.advance(1);
+    expect(run.loop.report().actions).toContain("paste_reset");
+    await run.keys("k");
+    await run.advance(20);
+    expect(run.core.program("t1").receivedHex()).toBe(Buffer.from("k").toString("hex"));
+  }, TEST_MS);
+
+  it("the loop draws for the host's colour depth: an RGB cell leaves as RGB on a truecolour host, as a palette colour on a 256-colour one", async () => {
+    for (const [colorTerm, written, never] of [["truecolor", "38;2;95;135;175", "38;5;67"], ["", "38;5;67", "38;2;"]] as const) {
+      const run = await start({ fixture: demo, colorTerm });
+      await run.live();
+      const from = run.host.output().length;
+      run.core.program("t1").output("\x1b[38;2;95;135;175mRGB-CELL\x1b[0m\r\n");
+      await run.advance(50);
+      const frame = run.host.output().slice(from);
+      expect([colorTerm, frame.includes("RGB-CELL"), frame.includes(written), frame.includes(never)]).toEqual([colorTerm, true, true, false]);
+    }
   }, TEST_MS);
 
   it("quit detaches: CLOSE on every channel, no terminal killed or removed, the terminal given back", async () => {
@@ -283,6 +327,8 @@ describe("the whole screen", () => {
     await run.cutLine();
     await run.advance(1_000);
     expect(run.loop.link.state.kind).toBe("Offline");
+    // the offline state as data, for the chrome (row 26): the link's kind and stable code
+    expect(run.loop.report().link).toEqual({ kind: "Offline", code: OFFLINE_CODE });
     expect(run.loop.panes.views().map((view) => view.state.kind)).toEqual(["Waiting", "Waiting"]);
     await run.keys("l,o,s,t,enter");
     const lines = run.core.viewers().length;
@@ -302,7 +348,12 @@ describe("the whole screen", () => {
   it("soak: 10 simulated minutes of output, input, resizes, tab switches and two reconnects", async () => {
     const run = await start({ fixture: demo });
     await run.live();
-    Bun.gc(true);
+    /** the heap after GC with the test tooling's kept lists emptied: what the screen itself holds */
+    const ownHeap = () => {
+      run.forget();
+      Bun.gc(true);
+      return process.memoryUsage().heapUsed;
+    };
     const memory = { start: process.memoryUsage().rss, middle: 0, end: 0, heapMiddle: 0, heapEnd: 0 };
     const sizes = [[120, 40], [100, 30], [80, 24], [140, 45]] as const;
     for (let second = 0; second < 600; second++) {
@@ -320,27 +371,26 @@ describe("the whole screen", () => {
         await run.listen();
       }
       await run.advance(1_000);
-      if (second === 300) {
-        Bun.gc(true);
+      if (second === 120) {
+        memory.heapMiddle = ownHeap();
         memory.middle = process.memoryUsage().rss;
-        memory.heapMiddle = process.memoryUsage().heapUsed;
       }
     }
+    memory.heapEnd = ownHeap();
+    memory.end = process.memoryUsage().rss;
     // the same place a fresh screen opens: the first workspace's first tab, at the first size
     run.loop.dispatch({ type: "select", target: { kind: "tab", id: "t-main" }, at: run.clock.current });
     run.host.resize(120, 40);
     await run.advance(5_000);
     await run.live();
     await run.advance(60_000);
-    Bun.gc(true);
-    memory.end = process.memoryUsage().rss;
-    memory.heapEnd = process.memoryUsage().heapUsed;
     process.stderr.write(`soak memory: ${JSON.stringify(memory)} passes=${run.loop.report().passes} maxArmed=${run.clock.maxArmed}\n`);
     expect(run.clock.maxArmed).toBe(1);
     expect(run.clock.armed()).toBe(1);
     expect(run.loop.report().due).toEqual(["link:silence"]);
     expect(run.loop.report().actions.some((code) => code.startsWith("end:") || code === "crash")).toBe(false);
-    expect(memory.heapEnd - memory.heapMiddle).toBeLessThan(32 * 1024 * 1024);
+    // the screen's own heap over the last 480 simulated seconds of output, input, resizes and a reconnect
+    expect(memory.heapEnd - memory.heapMiddle).toBeLessThan(OWN_HEAP_GROWTH_BYTES);
     const fresh = await start({ core: run.core, cols: 120, rows: 40 });
     await fresh.live();
     expect(run.grid()).toEqual(fresh.grid());

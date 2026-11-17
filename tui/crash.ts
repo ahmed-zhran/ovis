@@ -40,7 +40,7 @@ export function crashRecord(version: string, report: LoopReport | null, error: u
     hc: report?.hc ?? null,
     size: report?.size ?? { cols: 0, rows: 0 },
     mode: report?.mode ?? { name: "terminal", locked: false, armed: false, overlays: [] },
-    link: report?.link ?? "Connecting",
+    link: report?.link ?? { kind: "Connecting", code: null },
     actions: report?.actions ?? [],
     error: {
       code: codeOf(error),

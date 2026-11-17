@@ -12,10 +12,9 @@
  */
 
 import type { HcTransport, HelloInfo } from "../server/herdr-core/connection.ts";
-import type { PaneDirection } from "../server/herdr-core/layout-doc.ts";
 import { type CoreLink, type LinkNotice, type LinkState, openLink } from "./core/link.ts";
-import { createPanes, type PaneNotice, type Panes, type PanesOptions } from "./core/pane.ts";
-import { CoreWorld, paneToward } from "./core/world.ts";
+import { createPanes, type PaneNotice, type Panes } from "./core/pane.ts";
+import { CoreWorld, focusDirection, paneToward } from "./core/world.ts";
 import type { Host, HostEnd } from "./host/index.ts";
 import type { InputEvent } from "./input/decode.ts";
 import { Framer } from "./input/framer.ts";
@@ -45,9 +44,6 @@ export interface LoopOptions {
   readKeys?: () => unknown;
   /** one attempt at the socket: the real socket transport unless a test wraps it */
   connect?: (path: string) => Promise<HcTransport>;
-  createEmulator?: PanesOptions["createEmulator"];
-  /** how long hello and each call wait (the connection's own 10 s unless a test shortens it) */
-  timeoutMs?: number;
 }
 
 /**
@@ -78,7 +74,8 @@ export interface LoopReport {
   hc: { version: string; features: string[] } | null;
   size: { cols: number; rows: number };
   mode: { name: string; locked: boolean; armed: boolean; overlays: string[] };
-  link: LinkState["kind"];
+  /** the core link's state as data: what the chrome shows (Offline and its code, NoCore, Incompatible) */
+  link: { kind: LinkState["kind"]; code: string | null };
 }
 
 export interface Loop {
@@ -94,7 +91,6 @@ export interface Loop {
   screen(): Painter["screen"] | null;
 }
 
-const DIRECTIONS: Readonly<Record<string, PaneDirection>> = { focus_pane_left: "left", focus_pane_right: "right", focus_pane_up: "up", focus_pane_down: "down" };
 
 export function startLoop(options: LoopOptions): Loop {
   const { host, clock } = options;
@@ -170,7 +166,6 @@ export function startLoop(options: LoopOptions): Loop {
       arm();
     },
     ...(options.connect ? { connect: options.connect } : {}),
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   });
 
   const panes = createPanes({
@@ -180,7 +175,6 @@ export function startLoop(options: LoopOptions): Loop {
       guard(() => onPaneNotice(notice));
       arm();
     },
-    ...(options.createEmulator ? { createEmulator: options.createEmulator } : {}),
   });
 
   function onLinkNotice(notice: LinkNotice): void {
@@ -246,7 +240,7 @@ export function startLoop(options: LoopOptions): Loop {
       }
       case "run": {
         act(`run:${effect.action}`);
-        const direction = DIRECTIONS[effect.action];
+        const direction = focusDirection(effect.action);
         if (direction && effect.target?.kind === "pane") {
           const tab = focused(state.world, state.focus).tab;
           const shapeOf = tab ? world.view().tabs.get(tab.id) : undefined;
@@ -367,6 +361,7 @@ export function startLoop(options: LoopOptions): Loop {
     }
     const size = host.size();
     const frame = painter.paint({
+      // row 26's chrome replaces the placeholder here and draws the link's state from report().link (kind and code)
       width: size.cols, height: size.rows, parts: placeholderChrome(shape.regions, shape.spots.filter((spot) => !spot.covered).map((spot) => spot.cells)),
       panes: scenes, overlays: [], focus: paneFocus, input: null,
     });
@@ -377,9 +372,9 @@ export function startLoop(options: LoopOptions): Loop {
     }
     painter.taken(taken);
     if (ended || !taken) return;
-    // credit after the write was taken: the focused pane first, then the others; a covered pane takes none
+    // credit after the write was taken: the focused pane first, then the others (the pane machine credits a covered pane nothing)
     let budget = PASS_CREDIT_BYTES;
-    const order = [...shape.spots].filter((spot) => !spot.covered).sort((a, b) => Number(b.pane === paneFocus) - Number(a.pane === paneFocus));
+    const order = [...shape.spots].sort((a, b) => Number(b.pane === paneFocus) - Number(a.pane === paneFocus));
     for (const spot of order) {
       if (budget <= 0) break;
       budget -= panes.credit(spot.pane, budget);
@@ -553,7 +548,7 @@ export function startLoop(options: LoopOptions): Loop {
         hc: hello ? { version: hello.version, features: [...hello.features] } : null,
         size: entered ? host.size() : { cols: 0, rows: 0 },
         mode: { name: state.mode.name, locked: state.locked, armed: state.armed, overlays: state.overlays.map((overlay) => overlay.kind) },
-        link: link.state.kind,
+        link: { kind: link.state.kind, code: "code" in link.state ? link.state.code : null },
       };
     },
   };
