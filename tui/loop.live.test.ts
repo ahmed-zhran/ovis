@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { coreFolder, IsolatedCore, type StopReport, stoppedCleanly } from "../scripts/test-hc.ts";
 import { HcConnection } from "../server/herdr-core/connection.ts";
 import { SPACE_LABEL, TAB_LABEL } from "../server/herdr-core/snapshot.ts";
 import { connectCoreSocket } from "../server/herdr-core/socket-transport.ts";
-import { runSupervised, stopAllPtyRuns, type SupervisedRun } from "./testing/pty.ts";
+import { gridText, runSupervised, stopAllPtyRuns, type SupervisedRun } from "./testing/pty.ts";
 
 /**
  * The real entry (`bun tui/main.ts`) on a real pseudo-terminal against a real hc, in cores of the test's own: the
@@ -152,6 +152,52 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
       expect([stage, run.output().split(LEAVE).length - 1]).toEqual([stage, 1]);
       expect((await hc.call("terminal.get", { terminal: address })).state).toBe("live");
     }
+  }, TEST_MS);
+
+  /** The screen's grid once more output arrived than now; the run's own deadline bounds the wait. */
+  const nextGrid = async (run: SupervisedRun): Promise<string> => {
+    await run.until(new RegExp(`^[\\s\\S]{${run.output().length + 1}}`), "more output");
+    return gridText(run.output(), 100, 30);
+  };
+
+  it("shows a program named like an agent coming to the front as that agent, in its pane's title and the Agents list, with no reconnect", async () => {
+    const { core: isolated, hc, root } = await core();
+    mkdirSync(join(root, "bin"));
+    symlinkSync("/usr/bin/less", join(root, "bin", "claude"));
+    await hc.call("terminal.run", { argv: ["sh", "-c", "echo FRONT-MARK; exec sh"], labels: { ...labels, "ovis.pane": "front-pane" }, cwd: root });
+    const run = screen(isolated, root);
+    await run.until(/FRONT-MARK[\s\S]*\x1b\[\?25h/, "the live pane");
+    const before = await gridText(run.output(), 100, 30);
+    expect([before.includes("[claude]"), before.includes("No agents")]).toEqual([false, true]);
+    run.type(`exec ${join(root, "bin", "claude")} /etc/hostname\r`);
+    await run.until("[claude]", "the agent in the pane's title");
+    let grid = await gridText(run.output(), 100, 30);
+    while (grid.includes("No agents")) grid = await nextGrid(run);
+    expect(grid.split("\n").filter((line) => line.startsWith(" · front-pane /")).length).toBe(1);
+    expect(grid.split("\n")[1]).toContain("front-pane");
+    expect(grid.split("\n")[1]).toContain("[claude]");
+    expect(run.output()).not.toContain("herdr-core is not answering");
+    run.type(DETACH);
+    expect((await run.ended).code).toBe(0);
+  }, TEST_MS);
+
+  it("keeps a pane whose program exited in its place with ended (code), until the core removes its terminal", async () => {
+    const { core: isolated, hc, root } = await core();
+    await hc.call("terminal.run", { argv: ["sh", "-c", "echo STAY-MARK; exec sh"], labels: { ...labels, "ovis.pane": "stays" }, cwd: root });
+    const { address } = await hc.call("terminal.run", { argv: ["sh", "-c", "echo END-MARK; read line; exit 3"], labels: { ...labels, "ovis.pane": "ends" }, cwd: root });
+    const run = screen(isolated, root);
+    await run.until(/(?=[\s\S]*STAY-MARK)(?=[\s\S]*END-MARK)[\s\S]*\x1b\[\?25h/, "both panes live");
+    await hc.call("terminal.send", { terminal: address, text: "go\r" });
+    await run.until("ended (3)", "the ended pane's banner");
+    const ended = await gridText(run.output(), 100, 30);
+    expect([ended.includes("+- stays "), ended.includes("+- ends "), ended.includes("+- ended (3) ")]).toEqual([true, true, true]);
+    expect((await hc.call("terminal.get", { terminal: address })).state).toBe("finished");
+    await hc.call("terminal.rm", { terminal: address });
+    let grid = ended;
+    while (grid.includes("+- ends ")) grid = await nextGrid(run);
+    expect([grid.includes("+- stays "), grid.includes("ended (3)")]).toEqual([true, false]);
+    run.type(DETACH);
+    expect((await run.ended).code).toBe(0);
   }, TEST_MS);
 
   it("draws the chrome (session header, sidebar, tabs, borders, mode bar, help overlay, notices) and the offline state on a real pty", async () => {

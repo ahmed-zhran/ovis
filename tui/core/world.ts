@@ -1,30 +1,30 @@
 /**
  * What the core shows the screen: its workspaces, their tabs and each tab's panes, each tab's split tree and the pane
- * it zooms. Built from the core link's notices (the snapshot, the events that change a terminal's record, the two layout
- * documents) through the browser's own grouping, snapshot.ts `buildSnapshot`, so both clients group and order by one
- * rule. A pane is its terminal: its id is the terminal's address.
+ * it zooms. Built from the core link's notices through the browser's own code: the shared core model's change records
+ * (core-model.ts) say what an event changed, the terminals are read again from the core when a record says so, and the
+ * browser's grouping, snapshot.ts `buildSnapshot`, turns them into workspaces and tabs. A pane is its terminal: its id
+ * is the terminal's address.
  */
 
+import type { CoreChange } from "../../server/herdr-core/core-model.ts";
 import type { LayoutNode, PaneDirection } from "../../server/herdr-core/layout-doc.ts";
 import { neighbour, OVIS_LAYOUT_DOC } from "../../server/herdr-core/layout-doc.ts";
-import { buildSnapshot, type HcTerminal, isRecord, LAYOUT_DOC } from "../../server/herdr-core/snapshot.ts";
-import { agentGroup, type AgentGroup, groupAgentRows, type KnownStatus, rollupStatus, stateSeqs } from "../../shared/attention.ts";
-import type { AgentStatus, PaneLayoutSnapshot, SessionSnapshot, WorkspaceWorktreeInfo } from "../../shared/herdr-api.generated.ts";
+import { buildSnapshot, coreHost, type FirstTurn, type HcTerminal, isRecord, LAYOUT_DOC } from "../../server/herdr-core/snapshot.ts";
+import { groupAgentRows, type KnownStatus, rollupStatus, stateSeqs } from "../../shared/attention.ts";
+import type { AgentStatus, PaneLayoutSnapshot } from "../../shared/herdr-api.generated.ts";
+import { folderName } from "../../shared/pane-title.ts";
+import { worktreeGroups } from "../../shared/worktree-groups.ts";
 import type { World } from "../model/focus.ts";
 import type { LinkNotice } from "./link.ts";
 
 /** One tab as the screen lays it out: its tree over terminal addresses and the pane a zoom shows alone. */
 export interface TabShape { readonly root: LayoutNode; readonly zoomed: string | null }
 
-/** One pane's metadata as the chrome draws it (never reading agent_status off a tab or workspace). */
+/** One pane as the chrome draws it (never reading agent_status off a tab or workspace). */
 interface PaneSummary {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly tabId: string;
   readonly label: string;
   readonly title: string;
   readonly folder: string;
-  readonly cwd: string;
   readonly agent: string | null;
   readonly status: AgentStatus;
   readonly parentId?: string;
@@ -33,31 +33,18 @@ interface PaneSummary {
 /** One row of the sidebar's Agents section, ordered by shared/attention.ts. */
 interface AgentRowView {
   readonly paneId: string;
-  readonly workspaceId: string;
-  readonly tabId: string;
   readonly name: string;
   readonly agent: string;
   readonly folder: string;
   readonly status: AgentStatus;
-  readonly group: AgentGroup;
+  /** a helper agent started by another agent row */
   readonly helper: boolean;
 }
 
-/** A top-level workspace in the sidebar and any linked worktree workspaces grouped under it. */
-interface WorkspaceGroupView {
-  readonly id: string;
-  readonly name: string;
-  readonly number: number;
-  readonly status: KnownStatus;
-  readonly worktree: WorkspaceWorktreeInfo | null;
-  readonly children: readonly {
-    readonly id: string;
-    readonly name: string;
-    readonly number: number;
-    readonly status: KnownStatus;
-    readonly worktree: WorkspaceWorktreeInfo | null;
-  }[];
-}
+interface WorkspaceRowView { readonly id: string; readonly name: string; readonly number: number; readonly status: KnownStatus }
+
+/** A top-level workspace in the sidebar and the linked worktree workspaces grouped under it (shared/worktree-groups.ts). */
+interface WorkspaceGroupView extends WorkspaceRowView { readonly children: readonly WorkspaceRowView[] }
 
 export interface CoreView {
   readonly world: World;
@@ -80,98 +67,62 @@ const EMPTY: CoreView = {
   ownsLayout: true,
 };
 
-function folderName(path: string | null | undefined): string {
-  if (!path) return "";
-  if (/^(?:\\\\[?.]\\)?[A-Za-z]:[\\/]+$/.test(path)) return path;
-  const parts = path.split(/^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) ? /[\\/]/ : "/").filter(Boolean);
-  return parts.at(-1) ?? path;
+/** The one read of the core the world asks for: every terminal, finished ones too (`all`), as the core holds them now. */
+export interface CoreRead {
+  readonly method: "terminal.list";
+  readonly params: { readonly all: true };
+  /** the newest status told before this read was asked for */
+  readonly told: number;
 }
 
-function buildWorktreeGroups(
-  snapshot: SessionSnapshot,
-  workspaceStatuses: ReadonlyMap<string, KnownStatus>,
-): WorkspaceGroupView[] {
-  const ordered = snapshot.workspaces;
-  const firstByRepo = new Map<string, (typeof ordered)[number]>();
-  for (const workspace of ordered) {
-    if (workspace.worktree && !workspace.worktree.is_linked_worktree && !firstByRepo.has(workspace.worktree.repo_key)) {
-      firstByRepo.set(workspace.worktree.repo_key, workspace);
-    }
-  }
-  const nearestByRepo = new Map<string, (typeof ordered)[number]>();
-  const childrenOf = new Map<string, (typeof ordered)[number][]>();
-  const top: (typeof ordered)[number][] = [];
-  for (const workspace of ordered) {
-    const worktree = workspace.worktree;
-    if (worktree && !worktree.is_linked_worktree) nearestByRepo.set(worktree.repo_key, workspace);
-    const parent = worktree?.is_linked_worktree ? nearestByRepo.get(worktree.repo_key) ?? firstByRepo.get(worktree.repo_key) : undefined;
-    if (!parent) {
-      top.push(workspace);
-      continue;
-    }
-    const list = childrenOf.get(parent.workspace_id) ?? [];
-    list.push(workspace);
-    childrenOf.set(parent.workspace_id, list);
-  }
-  return top.map((workspace) => ({
-    id: workspace.workspace_id,
-    name: workspace.label,
-    number: workspace.number,
-    status: workspaceStatuses.get(workspace.workspace_id) ?? "unknown",
-    worktree: workspace.worktree ?? null,
-    children: (childrenOf.get(workspace.workspace_id) ?? []).map((child) => ({
-      id: child.workspace_id,
-      name: child.label,
-      number: child.number,
-      status: workspaceStatuses.get(child.workspace_id) ?? "unknown",
-      worktree: child.worktree ?? null,
-    })),
-  }));
+/**
+ * A terminal whose program ended by itself keeps its place in its tab, its last picture and "ended (code)" drawn there
+ * (the pane machine's Ended state), for as long as the core keeps its finished record: until something removes it (hc
+ * 0.1.17 and 0.1.18 keep it until `terminal.rm`). A terminal someone killed, or one finished by the core stopping, leaves
+ * at once, as in the browser.
+ */
+function keepsPlace(record: Record<string, unknown>): Record<string, unknown> {
+  return record["state"] === "finished" && record["reason"] === "exited" ? { ...record, state: "live" } : record;
 }
 
-function buildAgents(snapshot: SessionSnapshot, panes: ReadonlyMap<string, PaneSummary>): AgentRowView[] {
+function byAddress(terminals: readonly unknown[]): Map<string, Record<string, unknown>> {
+  const records = new Map<string, Record<string, unknown>>();
+  for (const record of terminals) if (isRecord(record) && typeof record["address"] === "string") records.set(record["address"], record);
+  return records;
+}
+
+function buildAgents(snapshot: ReturnType<typeof buildSnapshot>, panes: ReadonlyMap<string, PaneSummary>): AgentRowView[] {
   const seqs = stateSeqs(snapshot);
-  const candidates = snapshot.panes.filter((pane) => Boolean(pane.agent?.trim()));
-  if (candidates.length === 0) return [];
   interface Row {
     machine: { id: string };
     entry: { pane: { pane_id: string; parent_pane_id?: string; agent_status: AgentStatus } };
+    id: string;
     summary: PaneSummary;
   }
-  const rows: Row[] = candidates.map((pane) => {
-    const summary = panes.get(pane.pane_id)!;
-    return {
+  const rows: Row[] = [];
+  for (const [id, summary] of panes) {
+    if (!summary.agent?.trim()) continue;
+    rows.push({
       machine: { id: "local" },
-      entry: {
-        pane: {
-          pane_id: pane.pane_id,
-          ...(summary.parentId === undefined ? {} : { parent_pane_id: summary.parentId }),
-          agent_status: summary.status,
-        },
-      },
+      entry: { pane: { pane_id: id, ...(summary.parentId === undefined ? {} : { parent_pane_id: summary.parentId }), agent_status: summary.status } },
+      id,
       summary,
-    };
-  });
-  const byId = new Set(rows.map((r) => r.summary.id));
-  const grouped = groupAgentRows<Row>(rows, {
+    });
+  }
+  const agentIds = new Set(rows.map((row) => row.id));
+  return groupAgentRows<Row>(rows, {
     sort: "wait",
     status: (row) => row.summary.status,
-    name: (row) => row.summary.label || row.summary.agent || row.summary.id,
+    name: (row) => row.summary.label || row.summary.agent || row.id,
     seqs: () => seqs,
-  });
-  return grouped.flatMap(({ group, rows: groupRows }) =>
-    groupRows.map(({ summary }): AgentRowView => ({
-      paneId: summary.id,
-      workspaceId: summary.workspaceId,
-      tabId: summary.tabId,
-      name: summary.label || summary.title || summary.agent || summary.id,
-      agent: summary.agent ?? "",
-      folder: summary.folder,
-      status: summary.status,
-      group: group ?? agentGroup(summary.status),
-      helper: summary.parentId !== undefined && byId.has(summary.parentId),
-    })),
-  );
+  }).flatMap(({ rows: groupRows }) => groupRows.map(({ id, summary }): AgentRowView => ({
+    paneId: id,
+    name: summary.label || summary.title || summary.agent || id,
+    agent: summary.agent ?? "",
+    folder: summary.folder,
+    status: summary.status,
+    helper: summary.parentId !== undefined && agentIds.has(summary.parentId),
+  })));
 }
 
 /**
@@ -211,12 +162,32 @@ export function paneToward(shape: TabShape, pane: string, direction: PaneDirecti
 
 /** The terminals and documents the link told of, and what they show. */
 export class CoreWorld {
-  private readonly records = new Map<string, Record<string, unknown>>();
+  private records = new Map<string, Record<string, unknown>>();
   private readonly docs = new Map<string, unknown>();
   private readonly firstTurns = new Map<string, number>();
+  /** what the shared core model last told of a terminal's state, newer than its record until the next read */
+  private readonly told = new Map<string, { shown: AgentStatus; agent: string | null; at: number }>();
+  private tellings = 0;
+  private wanted = false;
+  private reading: CoreRead | null = null;
   private shown: CoreView = EMPTY;
   private stale = false;
   private version = "";
+
+  /**
+   * What the link's core model is made with: the first turn each terminal had when this screen first saw it, and this
+   * PC as the core's host, so the model's change records and the world's own view read every terminal by one rule.
+   */
+  readonly model: { firstTurn: FirstTurn; host: ReturnType<typeof coreHost> } = {
+    firstTurn: (terminal) => {
+      const first = this.firstTurns.get(terminal.address);
+      if (first !== undefined) return first;
+      const turn = terminal.turn ?? 0;
+      this.firstTurns.set(terminal.address, turn);
+      return turn;
+    },
+    host: coreHost(false),
+  };
 
   /** Takes one notice of the link; answers whether what the screen shows may have changed. */
   notice(notice: LinkNotice): boolean {
@@ -224,24 +195,56 @@ export class CoreWorld {
       case "state":
         return false;
       case "snapshot":
-        this.records.clear();
-        for (const record of notice.terminals) {
-          if (isRecord(record) && typeof record["address"] === "string") {
-            this.records.set(record["address"], { ...record });
-            if (!this.firstTurns.has(record["address"])) {
-              this.firstTurns.set(record["address"], typeof record["turn"] === "number" ? record["turn"] : 0);
-            }
-          }
-        }
+        this.records = byAddress(notice.terminals);
+        for (const address of this.firstTurns.keys()) if (!this.records.has(address)) this.firstTurns.delete(address);
+        this.told.clear();
+        this.wanted = false;
+        this.reading = null;
         break;
       case "doc":
         if (notice.name !== LAYOUT_DOC && notice.name !== OVIS_LAYOUT_DOC) return false;
         this.docs.set(notice.name, notice.doc.value ?? null);
         break;
       case "event":
-        if (!this.event(notice.event.type, notice.event.terminal, notice.event.data)) return false;
+        if (!this.changed(notice.changes)) return false;
         break;
     }
+    this.stale = true;
+    return true;
+  }
+
+  /** A status the model told is shown at once; any other change asks for the terminals to be read again. */
+  private changed(changes: readonly CoreChange[]): boolean {
+    let shown = false;
+    for (const change of changes) {
+      if (change.type === "status") {
+        this.told.set(change.terminal, { shown: change.shown, agent: change.agent, at: ++this.tellings });
+        shown = true;
+      } else {
+        this.wanted = true;
+      }
+    }
+    return shown;
+  }
+
+  /** The read to make now: one at a time, and only after a change asked for it; null when none is due. */
+  nextRead(): CoreRead | null {
+    if (!this.wanted || this.reading) return null;
+    this.wanted = false;
+    this.reading = { method: "terminal.list", params: { all: true }, told: this.tellings };
+    return this.reading;
+  }
+
+  /**
+   * The core's answer to `read` (null: the call failed; a change since asks again). An answer to a read made before the
+   * last snapshot is dropped. Answers whether what the screen shows may have changed.
+   */
+  answer(read: CoreRead, terminals: readonly unknown[] | null): boolean {
+    if (read !== this.reading) return false;
+    this.reading = null;
+    if (terminals === null) return false;
+    this.records = byAddress(terminals);
+    for (const [address, told] of this.told) if (told.at <= read.told) this.told.delete(address);
     this.stale = true;
     return true;
   }
@@ -256,14 +259,7 @@ export class CoreWorld {
     this.stale = false;
     const appDoc = this.docs.get(LAYOUT_DOC) ?? null;
     const ovisDoc = this.docs.get(OVIS_LAYOUT_DOC) ?? null;
-    const ownsLayout = appDoc === null || appDoc === undefined;
-    const snapshot = buildSnapshot(
-      [...this.records.values()] as unknown as HcTerminal[],
-      appDoc,
-      this.version,
-      (terminal) => this.firstTurns.get(terminal.address) ?? terminal.turn ?? 0,
-      ovisDoc,
-    );
+    const snapshot = buildSnapshot([...this.records.values()].map(keepsPlace) as unknown as HcTerminal[], appDoc, this.version, this.model.firstTurn, ovisDoc, undefined, this.model.host);
     const tabs = new Map<string, TabShape>();
     for (const layout of snapshot.layouts) {
       const root = treeOf(layout);
@@ -271,41 +267,33 @@ export class CoreWorld {
     }
     const panes = new Map<string, PaneSummary>();
     for (const pane of snapshot.panes) {
-      const raw = pane as unknown as { parent_pane_id?: string };
-      const cwd = pane.foreground_cwd ?? pane.cwd ?? "";
+      const parent = (pane as unknown as { parent_pane_id?: string }).parent_pane_id;
+      const told = this.told.get(pane.pane_id);
       panes.set(pane.pane_id, {
-        id: pane.pane_id,
-        workspaceId: pane.workspace_id,
-        tabId: pane.tab_id,
         label: pane.label ?? "",
         title: pane.title ?? pane.terminal_title ?? "",
-        folder: folderName(cwd),
-        cwd,
-        agent: pane.agent ?? null,
-        status: pane.agent_status,
-        ...(raw.parent_pane_id === undefined ? {} : { parentId: raw.parent_pane_id }),
+        folder: folderName(pane.foreground_cwd ?? pane.cwd ?? ""),
+        agent: told ? told.agent : pane.agent ?? null,
+        status: told ? told.shown : pane.agent_status,
+        ...(parent === undefined ? {} : { parentId: parent }),
       });
     }
     const order = new Map(snapshot.layouts.map((layout) => [layout.tab_id, layout.panes.map((pane) => pane.pane_id)]));
     const tabStatuses = new Map<string, KnownStatus>();
-    for (const tab of snapshot.tabs) {
-      const ids = order.get(tab.tab_id) ?? [];
-      tabStatuses.set(tab.tab_id, rollupStatus(ids.map((id) => panes.get(id)?.status)));
-    }
-    const workspaceStatuses = new Map<string, KnownStatus>();
-    for (const workspace of snapshot.workspaces) {
-      const wsPanes = snapshot.panes.filter((pane) => pane.workspace_id === workspace.workspace_id);
-      workspaceStatuses.set(workspace.workspace_id, rollupStatus(wsPanes.map((pane) => panes.get(pane.pane_id)?.status)));
-    }
-    const workspaceGroups = buildWorktreeGroups(snapshot, workspaceStatuses);
-    const agents = buildAgents(snapshot, panes);
+    for (const tab of snapshot.tabs) tabStatuses.set(tab.tab_id, rollupStatus((order.get(tab.tab_id) ?? []).map((id) => panes.get(id)?.status)));
+    const workspaceRow = (workspace: (typeof snapshot.workspaces)[number]): WorkspaceRowView => ({
+      id: workspace.workspace_id,
+      name: workspace.label,
+      number: workspace.number,
+      status: rollupStatus(snapshot.panes.filter((pane) => pane.workspace_id === workspace.workspace_id).map((pane) => panes.get(pane.pane_id)?.status)),
+    });
     this.shown = {
       tabs,
       panes,
       tabStatuses,
-      workspaceGroups,
-      agents,
-      ownsLayout,
+      workspaceGroups: worktreeGroups(snapshot.workspaces).map(({ workspace, children }) => ({ ...workspaceRow(workspace), children: children.map(workspaceRow) })),
+      agents: buildAgents(snapshot, panes),
+      ownsLayout: appDoc === null,
       world: {
         workspaces: snapshot.workspaces.map((workspace) => ({
           id: workspace.workspace_id,
@@ -319,57 +307,5 @@ export class CoreWorld {
       },
     };
     return this.shown;
-  }
-
-  /** An event's change to a terminal's record; false when it changes nothing the screen shows. */
-  private event(type: string, terminal: string | undefined, data: Record<string, unknown> | undefined): boolean {
-    if (terminal === undefined) return false;
-    const record = this.records.get(terminal);
-    switch (type) {
-      case "created":
-      case "restarted":
-        if (!isRecord(data) || data["address"] !== terminal) return false;
-        this.records.set(terminal, { ...data });
-        if (!this.firstTurns.has(terminal)) this.firstTurns.set(terminal, typeof data["turn"] === "number" ? data["turn"] : 0);
-        return true;
-      case "labels":
-        if (!record || !isRecord(data?.["labels"])) return false;
-        record["labels"] = { ...data["labels"] };
-        return true;
-      case "status":
-        if (!record) return false;
-        record["status"] = isRecord(data?.["status"]) ? { ...data["status"] } : null;
-        return true;
-      case "foreground":
-        if (!record) return false;
-        record["foreground"] = isRecord(data?.["foreground"]) ? { ...data["foreground"] } : null;
-        if (typeof data?.["cwd"] === "string") record["cwd"] = data["cwd"];
-        return true;
-      case "turn":
-        if (!record) return false;
-        if (typeof data?.["turn"] === "number") record["turn"] = data["turn"];
-        if (isRecord(data?.["status"])) record["status"] = { ...data["status"] };
-        return true;
-      case "title":
-        if (!record) return false;
-        record["title"] = typeof data?.["title"] === "string" ? data["title"] : null;
-        return true;
-      case "cwd":
-        if (!record || typeof data?.["cwd"] !== "string") return false;
-        record["cwd"] = data["cwd"];
-        return true;
-      case "finished":
-        if (!record) return false;
-        Object.assign(record, data ?? {}, { state: "finished" });
-        return true;
-      case "lost":
-        if (!record) return false;
-        Object.assign(record, data ?? {});
-        return true;
-      case "removed":
-        return this.records.delete(terminal);
-      default:
-        return false;
-    }
   }
 }

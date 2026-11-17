@@ -172,7 +172,7 @@ export function startLoop(options: LoopOptions): Loop {
   const link = openLink({
     socket: options.socket,
     now: () => clock.now(),
-    model: { firstTurn: (terminal) => terminal.turn ?? 0, host: null },
+    model: world.model,
     notify: (notice) => {
       guard(() => onLinkNotice(notice));
       arm();
@@ -212,10 +212,27 @@ export function startLoop(options: LoopOptions): Loop {
       owePass();
       return;
     }
-    if (world.notice(notice)) {
-      dispatch({ type: "world", world: world.view().world, at: clock.now() });
-      reshow();
-    }
+    if (world.notice(notice)) worldChanged();
+    readCore();
+  }
+
+  function worldChanged(): void {
+    dispatch({ type: "world", world: world.view().world, at: clock.now() });
+    reshow();
+  }
+
+  /** The read of the core the world asks for, its answer handed back to it. */
+  function readCore(): void {
+    const read = world.nextRead();
+    if (!read) return;
+    const answered = (terminals: readonly unknown[] | null) => {
+      guard(() => {
+        if (world.answer(read, terminals)) worldChanged();
+        readCore();
+      });
+      arm();
+    };
+    link.call(read.method, read.params).then((result) => answered(result.terminals), () => answered(null));
   }
 
   function onPaneNotice(notice: PaneNotice): void {
