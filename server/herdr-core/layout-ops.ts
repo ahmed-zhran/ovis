@@ -21,6 +21,35 @@ export function layoutCalls(hello: { methods: readonly string[] }): boolean {
 /** What an edit makes of Ovis's layout: the layout to write, or null and why nothing changes (null where no answer says why). */
 export interface Edited { layout: OvisLayout | null; reason: string | null }
 
+/**
+ * One change to Ovis's layout document: read, edit what the snapshot shows (layout-doc.ts
+ * `reconcile`), write back at the version read, read again and redo the edit once if another
+ * writer came first. An edit that answers no layout writes nothing. Refused where the Herdr app
+ * arranges the core, where hc cannot write a document (its hello names no `doc.set`), and where a
+ * newer Ovis wrote it in a schema this one does not know. Answers whether it wrote, with what the
+ * last edit made said besides. It needs only the core's line: a caller that edits the document and
+ * starts no shell needs no store.
+ */
+export async function editLayout<T extends Edited>(hc: Pick<HcConnection, "call" | "hello">, change: (layout: OvisLayout) => T): Promise<Omit<T, "layout"> & { changed: boolean }> {
+  if (!layoutCalls(await hc.hello())) throw new AdapterError("unsupported", "this herdr-core keeps no documents Ovis can write");
+  for (let attempt = 0; ; attempt++) {
+    // the document before the terminals: a list read after it holds every terminal a writer of that version had
+    const doc = await hc.call("doc.get", { name: OVIS_LAYOUT_DOC });
+    const [list, app] = await Promise.all([hc.call("terminal.list", {}), hc.call("doc.get", { name: LAYOUT_DOC })]);
+    if (!ownsLayout(app.value)) throw new AdapterError("unsupported", "the Herdr app arranges this core's workspaces, tabs and panes");
+    if (foreignLayout(doc.value)) throw new AdapterError("unsupported", "a newer Ovis keeps this core's layout");
+    const { layout, ...made } = change(keptLayout(list.terminals, doc.value));
+    if (!layout) return { ...made, changed: false };
+    try {
+      await hc.call("doc.set", { name: OVIS_LAYOUT_DOC, value: layout, version: doc.version });
+      return { ...made, changed: true };
+    } catch (error) {
+      if (error instanceof HcError && error.kind === "conflict" && attempt === 0) continue;
+      throw error;
+    }
+  }
+}
+
 /** The kept tab holding the pane, in a layout being edited; refused for a pane in a tab Ovis does not lay out (Other terminals, a helper's). */
 function tabHolding(layout: OvisLayout, paneId: string): TabLayout {
   for (const workspace of layout.workspaces) for (const tab of workspace.tabs) if (leaves(tab.root).includes(paneId)) return tab;
@@ -284,32 +313,9 @@ export class LayoutStore {
     return {};
   }
 
-  /**
-   * One change to Ovis's layout document: read, edit what the snapshot shows (layout-doc.ts
-   * `reconcile`), write back at the version read, read again and redo the edit once if another
-   * writer came first. An edit that answers no layout writes nothing. Refused where the Herdr app
-   * arranges the core, where hc cannot write a document (its hello names no `doc.set`), and where a
-   * newer Ovis wrote it in a schema this one does not know. Answers whether it wrote, with what the
-   * last edit made said besides.
-   */
-  async edit<T extends Edited>(change: (layout: OvisLayout) => T): Promise<Omit<T, "layout"> & { changed: boolean }> {
-    if (!layoutCalls(await this.hc.hello())) throw new AdapterError("unsupported", "this herdr-core keeps no documents Ovis can write");
-    for (let attempt = 0; ; attempt++) {
-      // the document before the terminals: a list read after it holds every terminal a writer of that version had
-      const doc = await this.hc.call("doc.get", { name: OVIS_LAYOUT_DOC });
-      const [list, app] = await Promise.all([this.hc.call("terminal.list", {}), this.hc.call("doc.get", { name: LAYOUT_DOC })]);
-      if (!ownsLayout(app.value)) throw new AdapterError("unsupported", "the Herdr app arranges this core's workspaces, tabs and panes");
-      if (foreignLayout(doc.value)) throw new AdapterError("unsupported", "a newer Ovis keeps this core's layout");
-      const { layout, ...made } = change(keptLayout(list.terminals, doc.value));
-      if (!layout) return { ...made, changed: false };
-      try {
-        await this.hc.call("doc.set", { name: OVIS_LAYOUT_DOC, value: layout, version: doc.version });
-        return { ...made, changed: true };
-      } catch (error) {
-        if (error instanceof HcError && error.kind === "conflict" && attempt === 0) continue;
-        throw error;
-      }
-    }
+  /** One change to Ovis's layout document (`editLayout`). */
+  edit<T extends Edited>(change: (layout: OvisLayout) => T): Promise<Omit<T, "layout"> & { changed: boolean }> {
+    return editLayout(this.hc, change);
   }
 
   /**

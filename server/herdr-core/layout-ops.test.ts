@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { HcError, type HcConnection } from "./connection.ts";
 import { AdapterError } from "./errors.ts";
 import type { OvisLayout } from "./layout-doc.ts";
-import { type Edited, LayoutStore, moveBesideEdit, ownsLayout, ratioEdit, resizeEdit, splitEdit, swapEdit, tabOrderEdit, workspaceOrderEdit, zoomEdit } from "./layout-ops.ts";
+import { type Edited, editLayout, LayoutStore, moveBesideEdit, ownsLayout, ratioEdit, resizeEdit, splitEdit, swapEdit, tabOrderEdit, workspaceOrderEdit, zoomEdit } from "./layout-ops.ts";
 import { buildSnapshot, type HcTerminal } from "./snapshot.ts";
 
 type Handler = (params: Record<string, unknown>) => unknown;
@@ -89,7 +89,7 @@ function fakeCore({ layout = known() as unknown, app = null as unknown, conflict
     terminal: async (address) => (await hc.call("terminal.get", { terminal: address })) as HcTerminal,
   });
   return {
-    store, docs, calls, appWrites, terminals,
+    hc, store, docs, calls, appWrites, terminals,
     steps: () => calls.map((call) => keyOf(call.method, call.params)),
     hold: (key: string) => holding.add(key),
     /** resolves once a call of `key` was sent */
@@ -145,6 +145,20 @@ describe("layout operations", () => {
       await done;
       expect([name, core.steps()]).toEqual([name, ["doc.get ovis-layout", "terminal.list", "doc.get herdr-app", "doc.set ovis-layout"]]);
     }
+  });
+
+  it("an edit needs only the core's line: the store's calls, document and answer", async () => {
+    const alone = fakeCore();
+    const stored = fakeCore();
+    const answers = [
+      await editLayout(alone.hc as unknown as Pick<HcConnection, "call" | "hello">, ratioEdit("A1", [], 0.3)),
+      await stored.store.edit(ratioEdit("A1", [], 0.3)),
+    ];
+    expect(answers).toEqual([{ changed: true, reason: null }, { changed: true, reason: null }]);
+    expect(alone.steps()).toEqual(["doc.get ovis-layout", "terminal.list", "doc.get herdr-app", "doc.set ovis-layout"]);
+    expect(alone.steps()).toEqual(stored.steps());
+    expect(alone.docs.get("ovis-layout")).toEqual(stored.docs.get("ovis-layout"));
+    expect((alone.docs.get("ovis-layout")!.value as OvisLayout).workspaces[0]!.tabs[0]!.root).toMatchObject({ split: "right", ratio: 0.3 });
   });
 
   it("terminals and the app's document go out together", async () => {
