@@ -12,6 +12,7 @@ import { IsolatedCore, pidAlive } from "../../scripts/test-hc.ts";
  */
 const bin = process.env["OVIS_TEST_HC_BIN"];
 const HELPER = join(import.meta.dir, "with-core.ts");
+const PROBE_ECHO = join(import.meta.dir, "probe-echo.ts");
 const WAIT_MS = 30_000;
 const TEST_MS = 90_000;
 const callerHome = process.env["HOME"] ?? "";
@@ -156,6 +157,7 @@ describe("with-core's options", () => {
     ["--size without --pty", ["--no-core", "--size", "40x5", "--", "true"], {}],
     ["a --size that is not COLSxROWS", ["--no-core", "--pty", "--size", "40", "--", "true"], {}],
     ["an --answer that is not y or n", ["--no-core", "--pty", "--answer", "maybe", "--", "true"], {}],
+    ["an empty --keys list", ["--no-core", "--pty", "--keys", "", "--", "true"], {}],
     ["no command", ["--no-core"], {}],
     ["a limit that is not a number", ["--limit", "soon", "--", "true"], {}],
     ["no hc named", ["--", "true"], { OVIS_TEST_HC_BIN: undefined }],
@@ -271,6 +273,33 @@ describe("with-core --pty", () => {
     expect(run.stdout()).toContain("1b 5b 3f 36 32 3b 32 32 63");
   }, TEST_MS);
 
+  // the queries in the shell's printf notation, and the replies a terminal sends, as hex
+  const DA1 = { query: "\\033[c", reply: "1b5b3f36323b323263" };
+  const SYNC = { query: "\\033[?2026$p", reply: "1b5b3f323032363b322479" };
+  /** each printf, then what the command reads back after it (that many bytes), all printed as hex on one line at the end */
+  const readBack = (...steps: [printf: string, bytes: number][]) =>
+    `stty raw -echo; ${steps.map(([printf, bytes], i) => `${printf}; r${i}=$(head -c ${bytes} | od -An -tx1 -v | tr -d ' \\n')`).join("; ")}; printf '%s' ${steps.map((_, i) => `"$r${i}"`).join(" ")}; stty sane`;
+
+  for (const [what, script, replies] of [
+    ["the start probe's queries (those it does not know left unanswered)", readBack([`printf '\\033[?u${SYNC.query}\\033]10;?\\033\\\\\\033]11;?\\033\\\\\\033]12;?\\033\\\\\\033[16t${DA1.query}'`, 20]), [SYNC, DA1]],
+    ["DA1 before DECRQM 2026", readBack([`printf '${DA1.query}${SYNC.query}'`, 20]), [DA1, SYNC]],
+    // the rest of the cut query is written only once the DA1 reply came back (two reads for certain), and nothing between
+    ["a query cut across two reads", readBack([`printf '${DA1.query}\\033[?20'`, 9], ["printf '26$p'", 11]), [DA1, SYNC]],
+  ] as const) {
+    it(`answers queries in the order they arrive: ${what}`, async () => {
+      const run = helper(["--no-core", "--pty", "--limit", "20", "--dump", "--", "sh", "-c", script], noHc());
+      expect(await run.exited).toBe(0);
+      expect(run.stdout()).toContain(replies.map((answer) => answer.reply).join(""));
+    }, TEST_MS);
+  }
+
+  it("types --keys only after the probe's last reply", async () => {
+    const script = readBack([`printf '${SYNC.query}${DA1.query}\\033[?2026h\\033[?2026l'`, 23]);
+    const run = helper(["--no-core", "--pty", "--limit", "20", "--keys", "x,ctrl+b,y", "--dump", "--", "sh", "-c", script], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain(`${SYNC.reply}${DA1.reply}780279`);
+  }, TEST_MS);
+
   it("ends a command that outlives --limit through the PTY host, and leaves nothing", async () => {
     const run = helper(["--no-core", "--pty", "--limit", "1", "--", "sh", "-c", "printf running; exec sleep 30"], noHc());
     expect(await run.exited).toBe(124);
@@ -332,6 +361,16 @@ describe.skipIf(!bin)("with-core against a real hc", () => {
       expect(leftovers(run)).toEqual(NOTHING_LEFT);
     }, TEST_MS);
   }
+
+  it("a program that enters through tui/host detects synchronized output and gets exactly the typed --keys", async () => {
+    const run = helper(["--limit", "20", "--pty", "--size", "100x30", "--keys", "a,b,ctrl+b", "--", process.execPath, PROBE_ECHO], callerEnv({ OVIS_TEST_HC_BIN: bin }));
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain("SYNC true\r");
+    // a read may cut the typed text in two: text events are taken a character at a time
+    const events = [...run.stdout().matchAll(/EVENT ([^\r]*)\r/g)].flatMap(([, event]) => (event!.startsWith("text ") ? [...event!.slice(5)] : [event!]));
+    expect(events).toEqual(["a", "b", "key ctrl+B"]);
+    expect(leftovers(run)).toEqual(NOTHING_LEFT);
+  }, TEST_MS);
 
   it("--limit ends the command and still cleans up", async () => {
     const started = Date.now();

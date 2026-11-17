@@ -212,6 +212,102 @@ describe("gone after hang-up", () => {
   });
 });
 
+// Write errors that are not gone: three system codes, an error with no code, and the write function's
+// own throw. `inject` makes the next write fail with it (a code keeps failing every write after it).
+const WRITE_ERRORS: [what: string, inject: (host: HeadlessHost) => void, error: string | Error][] = [
+  ...(["EBADF", "ENOSPC", "EINVAL"] as const).map((code): [string, (host: HeadlessHost) => void, string] => [code, (host) => host.failWrites(code), `${code}: write failed`]),
+  ...([["an error with no code", new Error("write failed")], ["a throw from the write function itself", new TypeError("write is not a function")]] as const)
+    .map(([what, error]): [string, (host: HeadlessHost) => void, Error] => [what, (host) => host.duringNextWrite(() => { throw error; }), error]),
+];
+
+/** What `run` threw (which must be something), with the host's log as it was when it surfaced. */
+function thrownBy(host: HeadlessHost, run: () => void): { error: unknown; log: string[] } {
+  try {
+    run();
+  } catch (error) {
+    return { error, log: host.log() };
+  }
+  throw new Error("nothing was thrown");
+}
+
+const sameError = (thrown: unknown, error: string | Error) => (typeof error === "string" ? (thrown as Error).message === error : thrown === error);
+
+describe("a write error that is not gone", () => {
+  for (const [what, inject, error] of WRITE_ERRORS) {
+    it(`${what} during leave: raw mode off and the hooks released first, LEAVE tried once, then the error`, () => {
+      const host = new HeadlessHost({ answer: null });
+      host.enter();
+      inject(host);
+      const { error: thrown, log } = thrownBy(host, () => host.leave());
+      expect(sameError(thrown, error)).toBe(true);
+      expect(log).toEqual(["raw on", `write ${ENTER}`, "raw off"]);
+      expect(host.writeAttempts()).toBe(2);
+      expect(host.hooked()).toBe(false);
+      // given back once: a second leave, the process's exit and a signal change nothing, and enter is refused
+      host.leave();
+      host.processExit();
+      host.signal("SIGTERM");
+      expect(host.enter()).toBe(false);
+      expect(host.log()).toEqual(log);
+      expect(host.writeAttempts()).toBe(2);
+    });
+
+    it(`${what} during enter: enter throws it, and the terminal is given back`, () => {
+      const host = new HeadlessHost();
+      inject(host);
+      const { error: thrown, log } = thrownBy(host, () => host.enter());
+      expect(sameError(thrown, error)).toBe(true);
+      expect(log).toEqual(error instanceof Error ? ["raw on", `write ${LEAVE}`, "raw off"] : ["raw on", "raw off"]);
+      expect(host.writeAttempts()).toBe(2);
+      expect(host.hooked()).toBe(false);
+      expect(host.enter()).toBe(false);
+    });
+
+    it(`${what} while entered: write throws it and changes nothing else`, () => {
+      const host = new HeadlessHost();
+      const ends: unknown[] = [];
+      host.onEnd((end) => { ends.push(end); });
+      host.enter();
+      inject(host);
+      expect(sameError(thrownBy(host, () => host.write("frame")).error, error)).toBe(true);
+      expect(host.log()).toEqual(["raw on", `write ${ENTER}`]);
+      expect(host.hooked()).toBe(true);
+      expect(ends).toEqual([]);
+    });
+  }
+
+  it("a second error while enter gives the terminal back does not replace the first", () => {
+    const host = new HeadlessHost();
+    const first = new Error("the enter write failed");
+    host.duringNextWrite(() => { host.failWrites("EBADF"); throw first; });
+    expect(thrownBy(host, () => host.enter()).error).toBe(first);
+    expect(host.log()).toEqual(["raw on", "raw off"]);
+    expect(host.hooked()).toBe(false);
+  });
+
+  it("on a signal the restore runs to its end and the signal decides the exit, though the leave write fails", () => {
+    const host = new HeadlessHost();
+    const ends: unknown[] = [];
+    host.onEnd((end) => { ends.push(end); });
+    host.enter();
+    host.failWrites("EBADF");
+    host.signal("SIGTERM");
+    expect(host.log()).toEqual(["raw on", `write ${ENTER}`, "raw off"]);
+    expect(ends).toEqual([{ kind: "signal", signal: "SIGTERM" }]);
+    expect(host.exitCode).toBe(143);
+  });
+
+  it("a signal that lands while a failing leave writes: restored once, the signal's exit, and leave still throws", () => {
+    const host = new HeadlessHost();
+    host.enter();
+    host.failWrites("EBADF");
+    host.duringNextWrite(() => host.signal("SIGTERM"));
+    expect((thrownBy(host, () => host.leave()).error as Error).message).toBe("EBADF: write failed");
+    expect(host.log()).toEqual(["raw on", `write ${ENTER}`, "raw off"]);
+    expect(host.exitCode).toBe(143);
+  });
+});
+
 describe("modes again after resize and focus-in", () => {
   it("sends its own modes again after a host resize, then reports the size", () => {
     const host = new HeadlessHost();

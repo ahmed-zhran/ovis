@@ -192,7 +192,11 @@ export function guardedHost(port: TerminalPort): Host {
     cancelHoldTimer = null;
     finishProbe(false);
     finishDrain();
-    if (modesOn) send(encoder.encode(LEAVE));
+    // a write error that is not gone is thrown once the terminal is given back, never before
+    let failed: { error: unknown } | null = null;
+    if (modesOn) {
+      try { send(encoder.encode(LEAVE)); } catch (error) { failed = { error }; }
+    }
     modesOn = false;
     if (rawOn) {
       rawOn = false;
@@ -200,13 +204,15 @@ export function guardedHost(port: TerminalPort): Host {
     }
     // after a signal the hooks stay until the process ends, so a second signal finds the restore done
     if (!ending) { unhook?.(); unhook = null; }
+    if (failed) throw failed.error;
   };
 
   const onSignal = (name: HostSignal) => {
     if (entering) { deferred ??= name; return; }
     if (ending) return;
     ending = true;
-    leave();
+    // the signal decides the end: a leave write that failed changes neither the restore nor the exit code
+    try { leave(); } catch { /* given back all the same: leave throws only after the restore */ }
     const pending = name === "SIGHUP" ? reportGone("hangup") : [...ends].map((listener) => listener({ kind: "signal", signal: name }));
     gone = true;
     const code = 128 + SIGNAL_NUMBERS[name];
@@ -235,7 +241,8 @@ export function guardedHost(port: TerminalPort): Host {
         port.startReading(take);
       } catch (error) {
         entering = false;
-        leave();
+        // the first error is the one enter reports; one the restore meets after it is not
+        try { leave(); } catch { /* given back all the same: leave throws only after the restore */ }
         throw error;
       }
       entering = false;

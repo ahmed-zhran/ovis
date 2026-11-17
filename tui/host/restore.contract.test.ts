@@ -33,7 +33,7 @@ const count = (haystack: string, needle: string) => haystack.split(needle).lengt
 // the fixture ends its report lines with CR LF; the tty's output processing (left on by Bun's raw
 // mode) may turn the LF into CR LF again, so the tests match a line up to its first CR
 
-function start(mode: "exit" | "linger" | "process-exit" | "throw" | "wait", env: Record<string, string> = {}): SupervisedRun {
+function start(mode: "exit" | "linger" | "process-exit" | "throw" | "wait" | "leave-fails" | "fail-wait", env: Record<string, string> = {}): SupervisedRun {
   return runSupervised({ entry: [process.execPath, FIXTURE, mode], env: { ...BASE_ENV, ...env }, cols: 80, rows: 24 });
 }
 
@@ -237,6 +237,30 @@ describe("the module itself gives cooked mode back", () => {
     expect(run.output().endsWith(LEAVE)).toBe(true);
     run.signal("SIGTERM");
     expect((await run.ended).code).toBe(143);
+  }, TEST_MS);
+
+  it("after a write error during leave: the termios equal the ones before, read while the entry still runs", async () => {
+    const run = await ready("leave-fails");
+    run.type("q");
+    await run.until("LEFT EBADF\r");
+    const after = await run.stty();
+    run.signal("SIGTERM");
+    const end = await run.ended;
+    expect(end.code).toBe(143);
+    expect(after.text).toBe(end.before.text);
+    expect(count(run.output(), ENTER)).toBe(1);
+    expect(count(run.output(), LEAVE)).toBe(0);
+  }, TEST_MS);
+
+  it("SIGTERM while every write fails, the leave write too: cooked again, and the signal's exit code", async () => {
+    const run = await ready("fail-wait");
+    run.type("q");
+    await run.until("INPUT 1 71\r");
+    run.signal("SIGTERM");
+    const end = await run.ended;
+    expect(end.code).toBe(143);
+    expect(end.after?.text).toBe(end.before.text);
+    expect(count(run.output(), LEAVE)).toBe(0);
   }, TEST_MS);
 });
 

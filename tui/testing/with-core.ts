@@ -22,9 +22,11 @@
  *
  * `--pty` runs the command on a pseudo-terminal of its own (tui/testing/pty.ts; default 80x24, or
  * `--size`) instead of on the helper's stdio, and answers its DA1 and DECRQM 2026 queries the way a
- * terminal does. What it prints goes to stdout as it comes, or, with `--dump`, only the final cell
- * grid as text, one line a row, once the command ended. `--keys` types a comma-separated list after
- * the first frame (the first `ESC[?2026l`): `enter`, `tab`, `esc`, `space`, `backspace`, `up`,
+ * terminal does: in the order they arrive, a query cut across reads included (the start probe ends
+ * at its DA1 reply, so a reply after it would come too late). What it prints goes to stdout as it
+ * comes, or, with `--dump`, only the final cell grid as text, one line a row, once the command
+ * ended. `--keys` types a comma-separated list after the first frame (the first `ESC[?2026l`), so
+ * after the probe's last reply: `enter`, `tab`, `esc`, `space`, `backspace`, `up`,
  * `down`, `left`, `right` and `ctrl+<letter>` are keys, any other item is typed as written.
  * `--answer y|n` answers the launcher's `[Y/n]` question with that letter and Enter.
  *
@@ -66,9 +68,11 @@ function startPty(choice: PtyChoice, command: string[], env: Record<string, stri
     onData: (text) => {
       if (!choice.dump) process.stdout.write(text);
       const window = tail + text;
+      const asked: [at: number, answer: string][] = [];
       for (const [query, answer] of ANSWERS) {
-        for (let at = window.indexOf(query); at !== -1; at = window.indexOf(query, at + 1)) if (at + query.length > tail.length) run.type(answer);
+        for (let at = window.indexOf(query); at !== -1; at = window.indexOf(query, at + 1)) if (at + query.length > tail.length) asked.push([at, answer]);
       }
+      for (const [, answer] of asked.sort((a, b) => a[0] - b[0])) run.type(answer);
       tail = window.slice(-16);
     },
   });
