@@ -231,6 +231,44 @@ describe("fake herdr-core: size rules (probe c, both versions)", () => {
     expect(s.core.events(t, "size")).toHaveLength(after);
   });
 
+  it("the event for a size an attach set follows that attach's reply: behind its first bytes, or ahead of them on a line whose event stream is still silent", async () => {
+    const s = scene();
+    const t = await s.run();
+    /** what the fake sent from `since` on, in order: attach replies, the bytes of attach streams, size events */
+    const order = (since: number) => s.core.log.slice(since).flatMap((entry) => {
+      if (entry.what === "reply") return entry.method === "terminal.attach" ? ["reply"] : [];
+      if (entry.what === "frame") return entry.from === "core" && entry.kind === FRAME_DATA && entry.terminal !== null ? ["bytes"] : [];
+      if (entry.what !== "event" || entry.type !== "size") return [];
+      const { cols, rows } = entry.data as { cols: number; rows: number };
+      return [`size ${cols}x${rows}`];
+    });
+    let from = s.core.log.length;
+    await s.attach("A", t, 100, 30, { resumed: true });
+    // the reply names the size the attach set; the event that tells of it comes behind the first paint
+    expect([s.reply("A")["terminal"], order(from)]).toMatchObject([{ cols: 100, rows: 30 }, ["reply", "bytes", "size 100x30"]]);
+    from = s.core.log.length;
+    await s.attach("B", t, 120, 40);
+    expect(order(from)).toEqual(["reply", "bytes", "size 120x40"]);
+    // an attach that sets no size is followed by no event, and one that follows another viewer's change has that event ahead of its reply
+    from = s.core.log.length;
+    s.resize("B", 90, 28);
+    await s.attach("C", t, 70, 20, { resumed: true });
+    expect(order(from)).toEqual(["size 90x28", "reply", "bytes"]);
+    // a line that subscribed and has heard no event yet (a screen's first attach): the event comes ahead of the first bytes, once
+    const fresh = new HcConnection(() => s.core.transport());
+    cleanups.push(() => fresh.close());
+    const other = await s.run();
+    await fresh.open("events.subscribe", { terminal: other }, { onData: () => {}, onClose: () => {} });
+    const quiet = { onData: () => {}, onClose: () => {} };
+    from = s.core.log.length;
+    const first = await fresh.open("terminal.attach", { terminal: other, cols: 100, rows: 30, resumed: true }, quiet);
+    expect(order(from)).toEqual(["reply", "size 100x30", "bytes"]);
+    await first.channel.close();
+    from = s.core.log.length;
+    await fresh.open("terminal.attach", { terminal: other, cols: 110, rows: 35, resumed: true }, quiet);
+    expect(order(from)).toEqual(["reply", "bytes", "size 110x35"]);
+  });
+
   it("any RESIZE is a stamp, also at the current size", async () => {
     const s = scene();
     const t = await s.run();

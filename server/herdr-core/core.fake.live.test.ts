@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { IsolatedCore, type StopReport, stoppedCleanly } from "../../scripts/test-hc.ts";
-import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
+import { type Channel, encodeFrame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_DATA, FRAME_RESIZE, HcConnection, type HcTransport, makeFrameReader } from "./connection.ts";
 import { FakeHcCore, type FakeProgram } from "./core.fake.ts";
 import { connectCoreSocket } from "./socket-transport.ts";
 
@@ -12,7 +12,8 @@ import { connectCoreSocket } from "./socket-transport.ts";
  * 3a-3c, and k1: what a lone viewer's close and attach do to the size) runs against an isolated real hc and against the fake configured like it (its
  * version and hello features, so a 0.1.17 has no automatic input), and both must give the same
  * terminal sizes, `size` events per viewer, attach replies, CLOSE payloads and bytes the program
- * saw. Runs only where OVIS_TEST_HC_BIN names an hc.
+ * saw; k2 compares the order in which one line hears its attach's reply, its stream's first bytes
+ * and the `size` events. Runs only where OVIS_TEST_HC_BIN names an hc.
  */
 const bin = process.env["OVIS_TEST_HC_BIN"];
 
@@ -495,6 +496,129 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       viewer.close();
     }
   }
+
+  /**
+   * What one viewer's line hears about a terminal around its own attaches, step by step and in the
+   * order the frames came on that line: `reply COLSxROWS` (the attach reply and the size it names),
+   * `bytes` (the first bytes of that attach's stream), `size COLSxROWS` (a `size` event) and `closed`
+   * (the answer to its own CLOSE). The line is read frame by frame, since `HcConnection` hands a
+   * reply over a turn later than the frames behind it.
+   */
+  async function attachOrder(socket: string): Promise<string[][]> {
+    const other = (await line(socket)).hc;
+    const raw = await connectCoreSocket(socket);
+    const heard: string[] = [];
+    const calls = new Map<number, string>();
+    let greeted = false;
+    let events = -1;
+    let stream = -1;
+    let fresh = false;
+    let terminal = "";
+    let pending = "";
+    const read = makeFrameReader((frame) => {
+      const text = Buffer.from(frame.payload).toString();
+      if (frame.channel === 0) {
+        const message = JSON.parse(text) as { id: number; result?: { channel?: number; terminal?: { cols: number; rows: number } } };
+        const method = calls.get(message.id);
+        if (method === "events.subscribe") events = message.result!.channel!;
+        if (method === "terminal.attach") {
+          stream = message.result!.channel!;
+          fresh = true;
+          heard.push(`reply ${message.result!.terminal!.cols}x${message.result!.terminal!.rows}`);
+        }
+      } else if (frame.channel === events && frame.kind === FRAME_DATA) {
+        pending += text;
+        for (let at = pending.indexOf("\n"); at !== -1; at = pending.indexOf("\n")) {
+          const note = JSON.parse(pending.slice(0, at)) as { method: string; params: { type?: string; terminal?: string; data?: Record<string, unknown> } };
+          pending = pending.slice(at + 1);
+          if (note.method === "event" && note.params.type === "size" && note.params.terminal === terminal) heard.push(`size ${String(note.params.data?.["cols"])}x${String(note.params.data?.["rows"])}`);
+        }
+      } else if (frame.channel === stream && frame.kind === FRAME_DATA && fresh) {
+        fresh = false;
+        heard.push("bytes");
+      } else if (frame.channel === stream && frame.kind === FRAME_CLOSE) heard.push("closed");
+      wake();
+    }, () => {});
+    void (async () => {
+      for await (const chunk of raw.readable) {
+        let bytes = chunk;
+        if (!greeted) {
+          const at = bytes.indexOf(0x0a);
+          if (at === -1) continue;
+          greeted = true;
+          bytes = bytes.subarray(at + 1);
+          wake();
+        }
+        read(bytes);
+      }
+    })();
+    let id = 0;
+    const call = (method: string, params: Record<string, unknown>) => {
+      calls.set(++id, method);
+      raw.write(encodeFrame(0, FRAME_DATA, JSON.stringify({ jsonrpc: "2.0", id, method, params })));
+    };
+    const steps: string[][] = [];
+    const step = async (label: string, act: () => void | Promise<void>, done: (seen: string[]) => boolean) => {
+      const from = heard.length;
+      await act();
+      await until(label, () => done(heard.slice(from)));
+      steps.push(heard.slice(from));
+    };
+    const attach = (cols: number, rows: number) => call("terminal.attach", { terminal, cols, rows, resumed: true });
+    const close = () => raw.write(encodeFrame(stream, FRAME_CLOSE, new Uint8Array(0)));
+    try {
+      raw.write(new TextEncoder().encode(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "hello", params: { generation: 1, framed: true } })}\n`));
+      await until("the hello answer", () => greeted);
+      terminal = (await other.call("terminal.run", { argv: ["sleep", "1000"] })).address;
+      call("events.subscribe", {});
+      await until("the event stream", () => events !== -1);
+      // alone, the attach sets the size: its reply names it, and the event follows the reply
+      await step("a lone attach and its size event", () => attach(100, 30), (seen) => seen.includes("bytes") && seen.includes("size 100x30"));
+      let theirs: Channel | null = null;
+      await step("another idle viewer's size", async () => { theirs = (await other.open("terminal.attach", { terminal, cols: 120, rows: 40, resumed: true }, { onData: () => {}, onClose: () => {} })).channel; }, (seen) => seen.includes("size 120x40"));
+      // beside that viewer the newest attach leads: again the reply first, then the event
+      await step("the answer to the viewer's CLOSE", close, (seen) => seen.includes("closed"));
+      await step("an attach beside an idle viewer and its size event", () => attach(110, 35), (seen) => seen.includes("bytes") && seen.includes("size 110x35"));
+      // its CLOSE hands the terminal to the viewer that stays; an attach at that size sets nothing and has no event of its own,
+      // which the next real change (the other viewer's RESIZE) shows
+      await step("the size after the viewer's CLOSE", close, (seen) => seen.includes("closed") && seen.includes("size 120x40"));
+      await step("an attach that sets no size", () => attach(120, 40), (seen) => seen.includes("bytes"));
+      await step("the other viewer's RESIZE", () => theirs!.resize(90, 28), (seen) => seen.includes("size 90x28"));
+      await other.call("terminal.kill", { terminal });
+      return steps;
+    } finally {
+      raw.kill();
+      other.close();
+    }
+  }
+
+  it("k2 the size event of a viewer's own attach follows its reply, on either side of its stream's first bytes", async () => {
+    // on a real core the side of the first bytes is a matter of timing in about one attach of a hundred: five lines, and what most of them heard
+    const runs: string[] = [];
+    for (let run = 0; run < 5; run++) runs.push(JSON.stringify(await attachOrder(real.socket)));
+    const count = (seen: string) => runs.filter((other) => other === seen).length;
+    const onReal = JSON.parse(runs.reduce((most, seen) => count(seen) > count(most) ? seen : most)) as string[][];
+    const onFake = await attachOrder(faked.socket);
+    expect(onReal).toEqual([
+      // the line's event stream had carried nothing yet: the event is ahead of the first bytes
+      ["reply 100x30", "size 100x30", "bytes"],
+      ["size 120x40"],
+      ["closed"],
+      ["reply 110x35", "bytes", "size 110x35"],
+      ["closed", "size 120x40"],
+      ["reply 120x40", "bytes"],
+      ["size 90x28"],
+    ]);
+    expect(onFake).toEqual(onReal);
+    // what no run may show: the event for the size an attach set ahead of that attach's reply
+    for (const seen of runs) {
+      for (const step of JSON.parse(seen) as string[][]) {
+        const reply = step.findIndex((entry) => entry.startsWith("reply "));
+        const own = reply === -1 ? -1 : step.indexOf(step[reply]!.replace("reply", "size"));
+        expect(own === -1 || own > reply).toBe(true);
+      }
+    }
+  }, TEST_MS);
 
   it("a core that is stopped closes each attach with its reason before the line ends", async () => {
     const stopped = new IsolatedCore(bin!);

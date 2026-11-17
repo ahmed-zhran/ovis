@@ -9,7 +9,12 @@
  *   no viewer it runs at 200x120. A stamp is an attach without `resumed`, DATA, any RESIZE (also to
  *   the size already advertised or the current one) and FOCUS 1; never a `resumed` attach,
  *   AUTOMATIC_INPUT, FOCUS 0, FACTS or `display`. A detach works the size out again. Only a change
- *   sends one `size` event, and no viewer ever gets a RESIZE frame.
+ *   sends one `size` event, and no viewer ever gets a RESIZE frame. The event for a size an attach
+ *   itself set goes out after that attach's reply, never before it: behind the first bytes of its
+ *   stream, or ahead of them when the attaching line's event stream has carried nothing yet (a
+ *   screen's first attach on a new line), as both real cores send it (core.fake.live.test.ts, "k2").
+ *   The event for an earlier change is out before that reply here; a real core lets the reply
+ *   overtake it once in a few hundred races, and it then comes before the attach's own event.
  * - Focus: FOCUS 1 and 0 hand a program that turned mode 1004 on `ESC[I` and `ESC[O` (FOCUS 0 also
  *   from a viewer that never sent FOCUS 1); kind 6 bytes reach the program as they are when the
  *   core names `automatic_input` in hello (1004 or not), and are dropped when it does not.
@@ -154,6 +159,8 @@ class Stream {
   readonly queue: Out[] = [];
   viewer: Viewer | null = null;
   filter: EventsSubscribeParams | null = null;
+  /** an event stream that has sent something */
+  carried = false;
 
   constructor(readonly line: Line, readonly id: number) {}
 
@@ -680,8 +687,12 @@ export class FakeHcCore {
     const viewer: Viewer = { viewer: this.nextViewer++, line, stream, terminal: params.terminal, cols: params.cols, rows: params.rows, stamp: null, attached: ++this.clock, observe };
     stream.viewer = viewer;
     held.viewers.push(viewer);
-    if (!params.resumed && !observe) this.stamp(held, viewer);
-    else this.settle(held);
+    // the size this attach sets is in its reply at once; the event that tells of it follows the reply, on either side of the first bytes
+    const ahead = [...line.channels.values()].some((other) => other.filter !== null && !other.carried);
+    let told: (() => void) | null = null;
+    const later = (tell: () => void) => { told = tell; };
+    if (!params.resumed && !observe) this.stamp(held, viewer, later);
+    else this.settle(held, later);
     const automatic = this.features.includes(AUTOMATIC_INPUT_FEATURE) ? { automatic_input: true } : {};
     const result = { ...automatic, channel: stream.id, resize_notifications: false, terminal: structuredClone(held.terminal) };
     const { body, mark, after, split } = held.paint;
@@ -689,8 +700,10 @@ export class FakeHcCore {
     return {
       result,
       after: () => {
+        if (ahead) told?.();
         stream.push(Buffer.from(split ? paint : paint + after, "latin1"));
         if (split) stream.push(Buffer.from(after, "latin1"));
+        if (!ahead) told?.();
       },
     };
   }
@@ -704,13 +717,16 @@ export class FakeHcCore {
     this.settle(held);
   }
 
-  private stamp(held: Held, viewer: Viewer): void {
+  private stamp(held: Held, viewer: Viewer, announce?: (tell: () => void) => void): void {
     viewer.stamp = ++this.clock;
-    this.settle(held);
+    this.settle(held, announce);
   }
 
-  /** The size rule: the latest stamp leads, else the newest attach; nobody (or only observers) means HEADLESS. */
-  private settle(held: Held): void {
+  /**
+   * The size rule: the latest stamp leads, else the newest attach; nobody (or only observers) means HEADLESS.
+   * A change is told in a `size` event: at once, or when `announce` (an attach) says so.
+   */
+  private settle(held: Held, announce: (tell: () => void) => void = (tell) => tell()): void {
     if (held.lost || held.terminal.state !== "live") return;
     const rank = (viewer: Viewer) => [viewer.stamp ?? -1, viewer.attached] as const;
     const voters = held.viewers.filter((viewer) => !viewer.observe);
@@ -725,7 +741,7 @@ export class FakeHcCore {
     held.terminal.cols = cols;
     held.terminal.rows = rows;
     held.program.resized(cols, rows);
-    this.emit("size", held.terminal.address, { cols, rows });
+    announce(() => this.emit("size", held.terminal.address, { cols, rows }));
   }
 
   /** A terminal ends: the `finished` event, then its streams' CLOSE; a stopping core (`closeFirst`) closes the streams first. */
@@ -777,7 +793,11 @@ export class FakeHcCore {
   }
 
   private notify(heard: (filter: EventsSubscribeParams) => boolean, message: unknown): void {
-    for (const stream of this.subscriptions()) if (heard(stream.filter!)) stream.push(lineOf(message));
+    for (const stream of this.subscriptions()) {
+      if (!heard(stream.filter!)) continue;
+      stream.carried = true;
+      stream.push(lineOf(message));
+    }
   }
 
   private held(terminal: string, asCall = false): Held {
