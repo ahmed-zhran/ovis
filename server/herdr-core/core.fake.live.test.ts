@@ -8,8 +8,8 @@ import { FakeHcCore, type FakeProgram } from "./core.fake.ts";
 import { connectCoreSocket } from "./socket-transport.ts";
 
 /**
- * Keeps the fake honest: one script of viewer actions (probe c's c2, c4-c8 and its verifier's
- * steps 3a-3c) runs against an isolated real hc and against the fake configured like it (its
+ * Keeps the fake honest: one script of viewer actions (probe c's c2, c4-c8, its verifier's steps
+ * 3a-3c, and k1: what a lone viewer's close and attach do to the size) runs against an isolated real hc and against the fake configured like it (its
  * version and hello features, so a 0.1.17 has no automatic input), and both must give the same
  * terminal sizes, `size` events per viewer, attach replies, CLOSE payloads and bytes the program
  * saw. Runs only where OVIS_TEST_HC_BIN names an hc.
@@ -95,6 +95,19 @@ const SCENARIOS: Scenario[] = [
     // B's only stamp is a RESIZE to the size the terminal already has: once the driver leaves, B leads, not the newer C
     name: "v10 a RESIZE to the current size is a viewer's only stamp",
     steps: [["attach", "A", 120, 40], ["data", "A", "a"], ["attach", "B", 80, 24, R], ["resize", "B", 120, 40], ["attach", "C", 70, 20, R], ["detach", "A"], ["detach", "C"], ["detach", "B"]],
+  },
+  {
+    // A repainted beside a driver and is left alone at the size it advertised. From there its close leaves the terminal with
+    // nobody, and its attach, resumed and alone, gets whatever it advertises: the size it had, another, the size of a terminal nobody views
+    name: "k1 a lone viewer's close and attach",
+    steps: [
+      ["attach", "A", 100, 30, R], ["attach", "B", 120, 40], ["reattach", "A", 120, 40], ["resize", "B", 100, 30], ["detach", "B"],
+      ["reattach", "A", 120, 40], ["data", "A", "a"], ["reattach", "A", 100, 30], ["data", "A", "a"], ["reattach", "A", 200, 120], ["data", "A", "a"], ["detach", "A"],
+    ],
+  },
+  {
+    name: "k1 the other viewer leaves between a viewer's close and its attach",
+    steps: [["attach", "A", 100, 30, R], ["attach", "B", 120, 40], ["data", "B", "x"], ["detach", "A"], ["detach", "B"], ["attach", "A", 120, 40, R], ["data", "A", "a"], ["detach", "A"]],
   },
 ];
 
