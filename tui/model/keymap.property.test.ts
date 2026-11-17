@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { type HerdrChord, parseHerdrBinding, resolveAllHerdrKeys } from "../../shared/herdr-keys.ts";
 import { decodeControl, decodeCsi, decodeSs3, type InputEvent, type Mods, typedKey } from "../input/decode.ts";
+import { Framer } from "../input/framer.ts";
+import type { Effect } from "./effects.ts";
 import type { World } from "./focus.ts";
 import { helpRows, modeBar } from "./hints.ts";
-import { buildKeymap, chordId, type KeyAction, type Keymap, type Mode } from "./keymap.ts";
+import { buildKeymap, charChords, chordId, type KeyAction, type Keymap, keyChords, type Mode } from "./keymap.ts";
 import { initialState, type ModelState, reduce } from "./reduce.ts";
 
 // The key table over random configs: what the help and the mode bar show fires, what fires is shown, and every binding
@@ -50,6 +52,35 @@ function eventsFor(chord: HerdrChord): InputEvent[] {
   return DELIVERED.has(name) ? [{ type: "key", key: name, mods, action: "press", at: AT }] : [];
 }
 
+/** The chords the matching reads from an event (a text run: its one character). */
+function matched(event: InputEvent): HerdrChord[] {
+  if (event.type === "key") return event.action === "press" ? keyChords(event) : [];
+  return event.type === "text" && [...event.text].length === 1 ? charChords(event.text, false) : [];
+}
+
+const bytesOf = (read: string) => Uint8Array.from(read, (c) => c.charCodeAt(0));
+
+// One host read per chord the matching can see, found by feeding byte sequences through the framer and decoder: every
+// single byte and ESC with it (legacy, preferred), then the kitty flag's CSI u forms and the CSI letter and ~ forms with
+// every modifier of shift, alt, ctrl and super.
+const BYTES = new Map<string, string>();
+for (const read of [
+  ...Array.from({ length: 0x80 }, (_, b) => String.fromCharCode(b)),
+  ...Array.from({ length: 0x80 }, (_, b) => `\x1b${String.fromCharCode(b)}`),
+  ...[9, 13, 27, 127, ...Array.from({ length: 0x5f }, (_, i) => 0x20 + i), ...Array.from({ length: 120 }, (_, i) => 57344 + i)]
+    .flatMap((code) => Array.from({ length: 16 }, (_, m) => `\x1b[${code};${m + 1}u`)),
+  ...[..."ABCDEFHPQRS"].flatMap((final) => Array.from({ length: 16 }, (_, m) => `\x1b[1;${m + 1}${final}`)),
+  ...Array.from({ length: 40 }, (_, n) => Array.from({ length: 16 }, (_, m) => `\x1b[${n + 1};${m + 1}~`)).flat(),
+]) {
+  const framer = new Framer();
+  const events = [...framer.feed(bytesOf(read), 0), ...framer.tick(10_000)];
+  if (events.length !== 1) continue;
+  for (const chord of matched(events[0]!)) if (!BYTES.has(chordId(chord))) BYTES.set(chordId(chord), read);
+}
+
+/** The ids the matching looks up for what a host sends for `chord`. */
+const matchIds = (chord: HerdrChord) => eventsFor(chord).flatMap((event) => matched(event).map(chordId));
+
 const INDEXED = new Set(["switch_tab", "switch_workspace", "focus_agent", "navigate_index"]);
 
 /** The chords a shown key text stands for, each with its index. */
@@ -90,6 +121,8 @@ function config(rnd: () => number): Record<string, unknown> {
   const keys: Record<string, unknown> = {};
   for (const action of ACTIONS) if (rnd() < 0.3) keys[action] = value(0.65);
   for (const name of NAVIGATE) if (rnd() < 0.3) keys[name] = value(0.05);
+  // the arrows the screen fixes in navigate mode, written for the same action or another
+  if (rnd() < 0.05) keys[pick(["navigate_pane_left", "navigate_pane_right", "navigate_pane_up"])] = pick(["left", "right"]);
   if (rnd() < 0.3) keys["prefix"] = binding(0);
   if (rnd() < 0.1) keys["extra_prefixes"] = [binding(0)];
   if (rnd() < 0.1) keys["command"] = [{ key: binding(0.5), command: "x" }];
@@ -133,7 +166,7 @@ function checkConfig(keys: Record<string, unknown>): void {
     for (const text of row.keys) {
       for (const { chord, index, prefixed } of chordsOf(text, row.action)) {
         const level = row.mode === "terminal" ? (row.action === "lock" ? "direct" : prefixed ? "after" : "direct") : row.mode;
-        shown.add(`${level}|${row.action}|${chordId(chord)}`);
+        for (const id of matchIds(chord)) shown.add(`${level}|${row.action}|${id}`);
         const state = level === "after" ? at.armed : level === "direct" ? at.idle : at[row.mode as Exclude<Mode, "terminal">];
         check(state !== null, `${row.action} "${text}" is shown in a state the screen cannot reach`);
         check(fires(state, row.action, chord, index), `${row.mode} ${row.action} "${text}" is shown but no input event fires it`);
@@ -144,6 +177,31 @@ function checkConfig(keys: Record<string, unknown>): void {
     for (const { chord } of chordsOf(text, "lock")) check(fires(at.locked, "lock", chord, null), `the unlock chord "${text}" does not unlock`);
   }
   for (const { text, chord } of keymap.prefixes) check(eventsFor(chord).some((event) => reduce(at.idle!, event).state.armed), `the prefix "${text}" is shown but no input event arms it`);
+
+  // (e) some key sequence quits, found in the table (a direct detach key, else a prefix then detach's key after it) and typed as bytes
+  const detachIn = (lookup: Readonly<Record<string, { action: KeyAction }>>) => Object.entries(lookup).find(([, bound]) => bound.action === "detach")?.[0];
+  const direct = detachIn(keymap.direct);
+  const after = detachIn(keymap.afterPrefix);
+  const prefixId = Object.keys(keymap.prefixIds)[0];
+  const route = direct !== undefined ? [direct] : after !== undefined && prefixId !== undefined ? [prefixId, after] : null;
+  check(route !== null, "no key sequence quits");
+  const reads = route.map((id) => BYTES.get(id));
+  check(reads.every((read) => read !== undefined), `no host bytes for ${route.join(" then ")}`);
+  const framer = new Framer();
+  let typing = at.idle!;
+  const effects: Effect[] = [];
+  reads.forEach((read, i) => {
+    for (const event of [...framer.feed(bytesOf(read!), AT + i * 1_000), ...framer.tick(AT + i * 1_000 + 999)]) {
+      const step = reduce(typing, event);
+      typing = step.state;
+      effects.push(...step.effects);
+    }
+  });
+  check(effects.some((effect) => effect.type === "quit"), `the bytes ${JSON.stringify(reads)} of ${route.join(" then ")} do not quit`);
+
+  // (f) a binding that fires carries no note: every key shown (each fires, by (a)) and every prefix
+  for (const row of helpRows(keymap)) for (const text of row.keys) check(notesFor(row.action, text).length === 0, `${row.mode} ${row.action} "${text}" fires and has a note`);
+  for (const { text } of keymap.prefixes) check(notesFor("prefix", text).length === 0, `the prefix "${text}" arms and has a note`);
   // Escape and ctrl+[ end an armed prefix and run nothing, whatever the config binds, unless the key is a prefix itself
   if (at.armed !== null) {
     for (const text of ["esc", "ctrl+["]) {
@@ -166,20 +224,39 @@ function checkConfig(keys: Record<string, unknown>): void {
   for (const mode of ["navigate", "resize", "copy"] as const) check(Bun.deepEquals(modeBar(at[mode]!).hints, helpKeys((m) => m === mode, false)), `the ${mode} mode bar differs from the help`);
   check(Bun.deepEquals(modeBar(at.idle!).hints[0]!.keys, keymap.prefixes.map((prefix) => prefix.text)), "the idle mode bar's prefixes differ from the table's");
 
-  // (b) and (d): the table is the resolver's minus the bindings it drops, and each drop has exactly one note
-  check(Bun.deepEquals(keymap.prefixes, resolved.prefixes.filter(({ text }) => notesFor("prefix", text).length === 0)), "the prefixes are the resolver's minus the noted ones");
+  // (b) and (d): the table is the resolver's minus the bindings it drops, and each drop has exactly one note; with no
+  // prefix left, the one fallback its note names
+  const typable = resolved.prefixes.filter(({ text }) => notesFor("prefix", text).length === 0);
+  const fallbacks = notes.filter((note) => note.code === "prefix_fallback") as unknown as { action: string; binding: string; fallback: string }[];
+  check(fallbacks.length === (typable.length === 0 ? 1 : 0) && fallbacks.every((note) => note.binding === resolved.prefixes[0]!.text), "one fallback note, on the configured prefix, exactly when no prefix can be typed");
+  check(Bun.deepEquals(keymap.prefixes.map(({ text }) => text), typable.length > 0 ? typable.map(({ text }) => text) : fallbacks.map((note) => note.fallback)), "the prefixes are the resolver's minus the noted ones, else the fallback");
   for (const { text } of resolved.prefixes) check(notesFor("prefix", text).length <= 1, `prefix "${text}" has more than one note`);
+  // a chord dropped for shift in the text is one shift does not change: it arrives as its key alone (shift+space as space)
+  for (const note of notes.filter((n) => n.code === "shift_in_text")) {
+    for (const { chord } of chordsOf(note.binding!, note.action!)) {
+      check(matchIds(chord).every((id) => id === chordId({ ...chord, shift: false })), `${note.action} "${note.binding}" is dropped for shift, but shift changes what it types`);
+    }
+  }
+  const detachFallback = notes.find((note) => note.code === "detach_fallback") as unknown as { fallback: string } | undefined;
   for (const { action, bindings } of resolved.actions) {
     const row = keymap.rows.find((r) => r.action === action && r.mode === "terminal")!;
-    check(Bun.deepEquals(row.bindings, bindings.filter((binding) => notesFor(action, binding.text).length === 0)), `${action}: the table is the resolver's minus the noted bindings`);
+    // a binding noted whole is gone; a range keeps the digits not noted one by one
+    const expected = bindings.flatMap((binding) => {
+      if (notesFor(action, binding.text).length > 0) return [];
+      const chords = binding.chords.filter(({ chord }) => !binding.range || notesFor(action, binding.text.replace("1..9", chord.key)).length === 0);
+      return chords.length === 0 ? [] : [{ ...binding, chords }];
+    });
+    if (action === "detach" && detachFallback !== undefined) expected.push({ text: detachFallback.fallback, prefixed: true, range: false, chords: [{ chord: parseHerdrBinding(detachFallback.fallback)!.chord, index: null }] });
+    check(Bun.deepEquals(row.bindings, expected), `${action}: the table is the resolver's minus the noted bindings`);
     for (const binding of bindings) check(notesFor(action, binding.text).length <= 1, `${action} "${binding.text}" has more than one note`);
   }
+  check((detachFallback !== undefined) === resolved.actions.find((a) => a.action === "detach")!.bindings.every((binding) => notesFor("detach", binding.text).length > 0), "detach falls back exactly when none of its bindings is kept");
   for (const { name, text, chord } of resolved.navigate) {
     if (chord === null) continue;
     const row = keymap.rows.find((r) => r.action === name && r.mode === "navigate")!;
     const noted = notesFor(name, text).length;
     check(noted <= 1, `${name} "${text}" has more than one note`);
-    check(noted === 1 || row.bindings.some((binding) => binding.text === text && binding.chords.some((c) => chordId(c.chord) === chordId(chord))), `${name} "${text}" is kept by the resolver, not shown and has no note`);
+    check(noted === 1 || row.bindings.some((binding) => binding.chords.some((c) => chordId(c.chord) === chordId(chord))), `${name} "${text}" is kept by the resolver, not shown and has no note`);
   }
 
   // (c) nothing fires that is not shown: every chord the matching looks up is a shown key of that level
@@ -187,7 +264,7 @@ function checkConfig(keys: Record<string, unknown>): void {
   for (const [level, lookup] of lookups) {
     for (const [id, bound] of Object.entries(lookup)) check(shown.has(`${level}|${bound.action}|${id}`), `${level} ${bound.action} on ${id} fires but is not shown`);
   }
-  const shownPrefixes = new Set(keymap.prefixes.map(({ chord }) => chordId(chord)));
+  const shownPrefixes = new Set(keymap.prefixes.flatMap(({ chord }) => matchIds(chord)));
   for (const id of Object.keys(keymap.prefixIds)) check(shownPrefixes.has(id), `the prefix ${id} arms but is not shown`);
 }
 

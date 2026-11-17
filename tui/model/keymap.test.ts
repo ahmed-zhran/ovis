@@ -1,16 +1,37 @@
 import { describe, expect, it } from "bun:test";
 import { type Mods, typedKey } from "../input/decode.ts";
+import { Framer } from "../input/framer.ts";
 import { resolveAllHerdrKeys } from "../../shared/herdr-keys.ts";
 import type { World } from "./focus.ts";
 import { cleanConfigText, helpRows, modeBar, shownRefusals } from "./hints.ts";
-import { buildKeymap } from "./keymap.ts";
-import { initialState, type ModelEvent, type ModelState, reduce } from "./reduce.ts";
+import { buildKeymap, type DropCode } from "./keymap.ts";
+import { initialState, type ModelEvent, type ModelState, reduce, type Step } from "./reduce.ts";
 
 const AT = 1_000;
 const WORLD: World = { workspaces: [{ id: "w1", name: "one", tabs: [{ id: "t1", name: "a", panes: [{ id: "p1", name: "" }] }] }] };
 const key = (char: string, mods: Mods = {}): ModelEvent => ({ ...typedKey(char, mods), at: AT });
 const start = (keys?: unknown): ModelState => reduce(initialState(keys), { type: "world", world: WORLD, at: 0 }).state;
 const sentToPane = (state: ModelState, event: ModelEvent) => reduce(state, event).effects.filter((effect) => effect.type === "pane").length;
+
+/** `reads` typed by a host, each read waited out (so a lone ESC is Escape), through the framer and decoder into the reducer. */
+function typed(state: ModelState, ...reads: string[]): Pick<Step, "state" | "effects"> {
+  const framer = new Framer();
+  const effects: Step["effects"][number][] = [];
+  reads.forEach((read, i) => {
+    for (const event of [...framer.feed(Uint8Array.from(read, (c) => c.charCodeAt(0)), AT + i * 1_000), ...framer.tick(AT + i * 1_000 + 999)]) {
+      const step = reduce(state, event);
+      state = step.state;
+      effects.push(...step.effects);
+    }
+  });
+  return { state, effects };
+}
+/** What running `action` itself does in `state`. */
+const asAction = (state: ModelState, action: string, index?: number) => {
+  const step = reduce(state, { type: "action", action, index, at: AT } as ModelEvent);
+  return { state: step.state, effects: step.effects };
+};
+const noteFor = (state: ModelState | ReturnType<typeof buildKeymap>, action: string) => ("keymap" in state ? state.keymap : state).notes.filter((note) => "action" in note && note.action === action);
 
 describe("the keymap table", () => {
   it("has one row per herdr action, with the resolver's default and bindings, in Terminal mode", () => {
@@ -103,11 +124,10 @@ describe("the keymap table", () => {
       { keys: { split_vertical: "prefix+hyper+v" }, action: "split_vertical", note: { code: "no_such_modifier", action: "split_vertical", binding: "prefix+hyper+v" } },
       { keys: { navigate_pane_down: "left" }, action: "navigate_pane_down", note: { code: "fixed_key", action: "navigate_pane_down", binding: "left" } },
       { keys: { navigate_pane_up: "shift+tab" }, action: "navigate_pane_up", note: { code: "fixed_key", action: "navigate_pane_up", binding: "shift+tab" } },
-      { keys: { zoom: "prefix+shift+1" }, action: "zoom", note: { code: "shift_in_text", action: "zoom", binding: "prefix+shift+1" } },
+      { keys: { zoom: "prefix+shift+space" }, action: "zoom", note: { code: "shift_in_text", action: "zoom", binding: "prefix+shift+space" } },
       { keys: { zoom: "ctrl+!" }, action: "zoom", note: { code: "shifted_character", action: "zoom", binding: "ctrl+!" } },
       { keys: { zoom: "prefix+f30" }, action: "zoom", note: { code: "not_typable", action: "zoom", binding: "prefix+f30" } },
       { keys: { zoom: "prefix+esc" }, action: "zoom", note: { code: "cancel_key", action: "zoom", binding: "prefix+esc" } },
-      { keys: { prefix: "hyper+b", zoom: "prefix+z" }, action: "zoom", note: { code: "no_prefix", action: "zoom", binding: "prefix+z" } },
     ];
     for (const row of rows) {
       const keymap = buildKeymap(row.keys);
@@ -118,11 +138,6 @@ describe("the keymap table", () => {
       expect({ label, keys: shown.flatMap((help) => help.keys).filter((text) => text === row.note.binding) }).toEqual({ label, keys: [] });
       expect({ label, notice: reduce(start(), { type: "keys", keys: row.keys, at: AT }).state.notices.map((notice) => notice.code) }).toEqual({ label, notice: ["keys_refused"] });
     }
-    // an unusable prefix is noted too, and then nothing after the prefix is shown
-    const noPrefix = buildKeymap({ prefix: "hyper+b" });
-    expect(noPrefix.prefixes).toEqual([]);
-    expect(noPrefix.notes).toContainEqual({ code: "no_such_modifier", action: "prefix", binding: "hyper+b" });
-    expect(helpRows(noPrefix).filter((help) => help.keys.some((text) => text.startsWith("prefix+")))).toEqual([]);
     // the verifier's two repros: nothing shown for those keys, and the action has no key
     const repro = buildKeymap({ new_tab: "prefix+\u314a", split_vertical: "prefix+hyper+v" });
     const armed = reduce(reduce(initialState({ new_tab: "prefix+\u314a", split_vertical: "prefix+hyper+v" }), { type: "world", world: WORLD, at: 0 }).state, key("b", { ctrl: true })).state;
@@ -143,6 +158,99 @@ describe("the keymap table", () => {
     expect(helpRows(keymap).find((row) => row.action === "switch_tab")!.keys).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((digit) => `prefix+${digit}`));
     const armed = reduce(start({ copy_mode: "prefix+9" }), key("b", { ctrl: true })).state;
     expect(modeBar(armed).hints.find((hint) => hint.action === "switch_tab")!.keys).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
+  });
+
+  it("shifted digit binding by bytes", () => {
+    const twoWorkspaces: World = { workspaces: [WORLD.workspaces[0]!, { id: "w2", name: "two", tabs: [{ id: "t2", name: "b", panes: [{ id: "p2", name: "" }] }] }] };
+    const keys = { switch_workspace: "prefix+shift+1..9" };
+    const state = reduce(initialState(keys), { type: "world", world: twoWorkspaces, at: 0 }).state;
+    // shift+2 is "@" in legacy bytes and CSI 50;2u with the kitty flag
+    for (const shift2 of ["@", "\x1b[50;2u"]) {
+      expect({ shift2, workspace: typed(state, "\x02", shift2).state.focus.workspace }).toEqual({ shift2, workspace: "w2" });
+    }
+    expect(noteFor(state, "switch_workspace")).toEqual([]);
+    expect(helpRows(state.keymap).find((row) => row.action === "switch_workspace")!.keys).toEqual(["prefix+shift+1..9"]);
+    expect(modeBar(typed(state, "\x02").state).hints.find((hint) => hint.action === "switch_workspace")!.keys).toEqual(["shift+1..9"]);
+
+    // one shifted punctuation after the prefix, and alt with a shifted digit as a direct binding
+    const single = start({ toggle_sidebar: "prefix+shift+;", zoom: "alt+shift+1" });
+    expect(single.keymap.notes).toEqual([]);
+    const armed = typed(single, "\x02").state;
+    for (const colon of [":", "\x1b[59;2u"]) expect({ colon, step: typed(armed, colon) }).toEqual({ colon, step: asAction(armed, "toggle_sidebar") });
+    for (const bang of ["\x1b!", "\x1b[49;4u"]) expect({ bang, step: typed(single, bang) }).toEqual({ bang, step: asAction(single, "zoom") });
+    expect(["toggle_sidebar", "zoom"].map((action) => helpRows(single.keymap).find((row) => row.action === action)!.keys)).toEqual([["prefix+shift+;"], ["alt+shift+1"]]);
+
+    // "@" and shift+2 are one key here: herdr's duplicate rule picks (the earlier field), the other is noted
+    const both = start({ new_tab: "prefix+@", split_vertical: "prefix+shift+2" });
+    expect(both.keymap.notes).toEqual([{ code: "taken", action: "split_vertical", binding: "prefix+shift+2", holder: "new_tab" }]);
+    expect(typed(both, "\x02", "@").state.overlays).toEqual([expect.objectContaining({ kind: "text", purpose: "new_tab" })]);
+    expect(helpRows(both.keymap).find((row) => row.action === "split_vertical")!.keys).toEqual([]);
+    // a binding the config writes beats a default on that key
+    const over = start({ zoom: "prefix+shift+/" });
+    expect(over.keymap.notes).toEqual([{ code: "taken", action: "help", binding: "prefix+?", holder: "zoom" }]);
+    expect(typed(over, "\x02", "?")).toEqual(asAction(typed(over, "\x02").state, "zoom"));
+    // a range that loses one digit keeps the other eight
+    const range = buildKeymap({ switch_workspace: "prefix+shift+1..9", new_tab: "prefix+#" });
+    expect(range.notes).toEqual([{ code: "taken", action: "switch_workspace", binding: "prefix+shift+3", holder: "new_tab" }]);
+    expect(helpRows(range).find((row) => row.action === "switch_workspace")!.keys).toEqual([1, 2, 4, 5, 6, 7, 8, 9].map((digit) => `prefix+shift+${digit}`));
+  });
+
+  it("untypable prefix falls back by bytes", () => {
+    const reasons: Record<string, DropCode> = { "hyper+b": "no_such_modifier", f30: "not_typable", "ctrl+!": "shifted_character", "\u314a": "not_typable" };
+    for (const [prefix, reason] of Object.entries(reasons)) {
+      const state = start({ prefix });
+      // ctrl+b as a legacy byte and as the kitty report, then q: herdr's detach
+      for (const ctrlB of ["\x02", "\x1b[98;5u"]) {
+        expect({ prefix, ctrlB, effects: typed(state, ctrlB, "q").effects }).toEqual({ prefix, ctrlB, effects: [{ type: "quit" }] });
+      }
+      expect({ prefix, notes: state.keymap.notes }).toEqual({ prefix, notes: [{ code: "prefix_fallback", action: "prefix", binding: prefix, reason, fallback: "ctrl+b", skipped: [] }] });
+      expect(modeBar(state).hints[0]!.keys).toEqual(["ctrl+b"]);
+    }
+    // ctrl+b held by a direct binding of the config: the next free key of the list
+    const held = start({ prefix: "hyper+b", zoom: "ctrl+b" });
+    expect(noteFor(held, "prefix")).toEqual([{ code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+a", skipped: [{ key: "ctrl+b", holder: "zoom" }] }]);
+    expect(typed(held, "\x01", "q").effects).toEqual([{ type: "quit" }]);
+    expect(typed(held, "\x02")).toEqual(asAction(held, "zoom"));
+    // every key of the list held: herdr's default takes its key back, and the direct binding is noted
+    const allHeld = start({ prefix: "hyper+b", zoom: "ctrl+b", new_tab: "ctrl+a", split_vertical: "ctrl+]", split_horizontal: "ctrl+\\" });
+    expect(noteFor(allHeld, "prefix")).toEqual([{
+      code: "prefix_fallback", action: "prefix", binding: "hyper+b", reason: "no_such_modifier", fallback: "ctrl+b",
+      skipped: [{ key: "ctrl+b", holder: "zoom" }, { key: "ctrl+a", holder: "new_tab" }, { key: "ctrl+]", holder: "split_vertical" }, { key: "ctrl+\\", holder: "split_horizontal" }],
+    }]);
+    expect(noteFor(allHeld, "zoom")).toEqual([{ code: "taken", action: "zoom", binding: "ctrl+b", holder: "prefix" }]);
+    expect(typed(allHeld, "\x02", "q").effects).toEqual([{ type: "quit" }]);
+
+    // a reload to a typable prefix and back: the fallback and its note come and go, an armed prefix returns to Idle
+    const armed = typed(start({ prefix: "hyper+b" }), "\x02").state;
+    expect(armed.armed).toBe(true);
+    const typable = reduce(armed, { type: "keys", keys: { prefix: "ctrl+a" }, at: AT }).state;
+    expect({ armed: typable.armed, notes: typable.keymap.notes, prefixes: typable.keymap.prefixes.map((p) => p.text) }).toEqual({ armed: false, notes: [], prefixes: ["ctrl+a"] });
+    expect(typed(typable, "\x02").effects.map((effect) => effect.type)).toEqual(["pane"]);
+    const back = reduce(typed(typable, "\x01").state, { type: "keys", keys: { prefix: "hyper+b" }, at: AT }).state;
+    expect({ armed: back.armed, notes: back.keymap.notes.map((note) => note.code), prefixes: back.keymap.prefixes.map((p) => p.text) }).toEqual({ armed: false, notes: ["prefix_fallback"], prefixes: ["ctrl+b"] });
+
+    // no key of detach can fire: herdr's prefix+q quits, or the next free key after the prefix
+    for (const detach of ["", "prefix+hyper+q", "ctrl+!"]) {
+      const state = start({ detach });
+      expect({ detach, effects: typed(state, "\x02", "q").effects }).toEqual({ detach, effects: [{ type: "quit" }] });
+      expect({ detach, note: state.keymap.notes.filter((note) => note.code === "detach_fallback") }).toEqual({ detach, note: [{ code: "detach_fallback", fallback: "prefix+q", skipped: [] }] });
+    }
+    const qHeld = start({ detach: "", zoom: "prefix+q" });
+    expect(qHeld.keymap.notes).toEqual([{ code: "detach_fallback", fallback: "prefix+ctrl+q", skipped: [{ key: "prefix+q", holder: "zoom" }] }]);
+    expect(typed(qHeld, "\x02", "\x11").effects).toEqual([{ type: "quit" }]);
+    // the prefix on herdr's detach key: herdr refuses the detach binding, the fallback quits
+    const same = start({ prefix: "ctrl+q", detach: "ctrl+q" });
+    expect(typed(same, "\x11", "q").effects).toEqual([{ type: "quit" }]);
+  });
+
+  it("working navigate key has no note", () => {
+    const keys = { navigate_pane_right: "right" };
+    expect(buildKeymap(keys).notes).toEqual([]);
+    expect(reduce(start(), { type: "keys", keys, at: AT }).state.notices).toEqual([]);
+    const navigating = typed(start(keys), "\x02", "w").state;
+    expect(navigating.mode.name).toBe("navigate");
+    for (const right of ["\x1b[C", "\x1b[1;1C"]) expect({ right, step: typed(navigating, right) }).toEqual({ right, step: asAction(navigating, "navigate_pane_right") });
+    expect(helpRows(buildKeymap(keys)).find((row) => row.action === "navigate_pane_right" && row.mode === "navigate")!.keys).toEqual(["right"]);
   });
 
   it("cleans, clamps and caps the config text it shows", () => {
