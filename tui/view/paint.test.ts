@@ -926,6 +926,20 @@ describe("selection", () => {
     expect(frame.bytes.length).toBeGreaterThan(0);
   });
 
+  test("selecting a cell that is already inverse flips it back on the host", async () => {
+    const painter = new Painter({ sync: false });
+    const host = await hostOf(3, 1);
+    const shown = await shownPane(painter, 3, 1, "a\x1b[7mbc\x1b[0m");
+    const rect = { x: 0, y: 0, width: 3, height: 1 };
+    const drawn = () => hostCells(host, 3, 1).map(({ text, flags }) => [text, Boolean(flags & STYLE_INVERSE)]);
+
+    step(painter, host, scene(3, 1, { focus: "p", panes: [paneScene("p", shown, rect)] }));
+    expect(drawn()).toEqual([["a", false], ["b", true], ["c", true]]);
+    const selection = { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } };
+    step(painter, host, scene(3, 1, { focus: "p", panes: [paneScene("p", shown, rect, { selection })] }));
+    expect(drawn()).toEqual([["a", true], ["b", false], ["c", true]]);
+  });
+
   test("a wide cell is drawn selected when either of its columns is in the selection", async () => {
     const painter = new Painter({ sync: false });
     const [W, H] = [12, 3];
