@@ -30,7 +30,7 @@ chmodSync(silent, 0o755);
 const withSocket = (name: string) => {
   const env = isolatedHcEnv(join(root, name));
   mkdirSync(join(root, name, "run"), { recursive: true });
-  writeFileSync(env["HC_SOCKET"]!, "");
+  writeFileSync(env["HC_SOCKET"], "");
   return env;
 };
 // a pid is proven to be a core's only through /proc: where there is none, nothing is killed
@@ -88,8 +88,8 @@ it("kills no pid that no status named, even one started in the core's own enviro
 it.skipIf(!proc)("proves a core started without HC_SOCKET by the socket its session and runtime folder name", async () => {
   const { HC_SOCKET: _named, ...unnamed } = isolatedHcEnv(join(root, "unnamed"));
   // where hc puts the socket of a core started without HC_SOCKET, and that socket's file, as a running core's is there
-  const socket = join(unnamed["XDG_RUNTIME_DIR"]!, "herdr-core", `${unnamed["HC_SESSION"]}.sock`);
-  mkdirSync(join(unnamed["XDG_RUNTIME_DIR"]!, "herdr-core"), { recursive: true });
+  const socket = join(unnamed["XDG_RUNTIME_DIR"], "herdr-core", `${unnamed["HC_SESSION"]}.sock`);
+  mkdirSync(join(unnamed["XDG_RUNTIME_DIR"], "herdr-core"), { recursive: true });
   writeFileSync(socket, "");
   // a core started so, and a process of the same session in another runtime folder
   const core = Bun.spawn(["sleep", "30"], { env: unnamed });
@@ -106,7 +106,7 @@ it.skipIf(!proc)("proves a core started without HC_SOCKET by the socket its sess
 it("kills no recorded pid whose start time is not the one recorded with it", async () => {
   const env = withSocket("restarted");
   // a sleep whose environment names the core's socket, as the core's own does: only its start time tells it apart
-  const other = Bun.spawn(["sleep", "30"], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"]! } });
+  const other = Bun.spawn(["sleep", "30"], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"] } });
   try {
     expect(await corePids(naming("hc-restarted", [other.pid]), env)).toEqual([other.pid]);
     // what a pid recorded for a process that has since ended and whose number came back would carry
@@ -224,8 +224,8 @@ it("waits for the socket of a core it has no pid for, and names one that stays",
   writeFileSync(stays, "#!/bin/sh\nexit 0\n");
   for (const stand of [late, stays]) chmodSync(stand, 0o755);
   expect(await stopTestCores(late, [{ env, pids: [] }])).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [] });
-  expect(existsSync(env["HC_SOCKET"]!)).toBe(false);
-  writeFileSync(env["HC_SOCKET"]!, "");
+  expect(existsSync(env["HC_SOCKET"])).toBe(false);
+  writeFileSync(env["HC_SOCKET"], "");
   expect(await stopTestCores(stays, [{ env, pids: [] }], 200)).toEqual({ stopped: [0], killed: [], unproven: [], socketsLeft: [env["HC_SOCKET"]] });
 });
 
@@ -234,7 +234,7 @@ it("waits for the core's pids after its socket went, and kills nothing that ends
   // a stand-in core that ends by itself once its stop writes to this fifo: nothing signals it
   const fifo = join(root, "early-stop");
   expect(Bun.spawnSync(["mkfifo", fifo], { env: { PATH: "/usr/bin:/bin" } }).exitCode).toBe(0);
-  const core = Bun.spawn(["sh", "-c", 'read _ < "$0"', fifo], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"]! } });
+  const core = Bun.spawn(["sh", "-c", 'read _ < "$0"', fifo], { env: { PATH: "/usr/bin:/bin", HC_SOCKET: env["HC_SOCKET"] } });
   // its stop removes the socket at once and lets the core go a moment after the stop returned, as hc's own stop does:
   // that delay is the behaviour under test (the helper must wait for the pid, not only for the socket)
   const early = join(root, "hc-early");
