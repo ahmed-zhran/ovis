@@ -31,9 +31,9 @@ function random(seed: number): () => number {
 const DELIVERED = new Set<string>();
 const keep = (event: ReturnType<typeof decodeSs3>) => { if (event?.type === "key") DELIVERED.add(event.key); };
 for (const byte of [...Array.from({ length: 0x20 }, (_, i) => i), 0x7f]) if (byte !== 0x1b) keep(decodeControl(byte, false));
-for (let n = 1; n <= 40; n++) keep(decodeCsi(String(n), "~", false));
-for (const n of [9, 13, 27, 127, ...Array.from({ length: 120 }, (_, i) => 57344 + i)]) keep(decodeCsi(String(n), "u", false));
-for (const final of "ABCDEFGHPQRSZ") keep(decodeCsi("", final, false));
+for (let n = 1; n <= 40; n++) keep(decodeCsi(String(n), "~", false, false));
+for (const n of [9, 13, 27, 127, ...Array.from({ length: 120 }, (_, i) => 57344 + i)]) keep(decodeCsi(String(n), "u", false, true));
+for (const final of "ABCDEFGHPQRSZ") keep(decodeCsi("", final, false, false));
 for (let c = 0x40; c < 0x7f; c++) keep(decodeSs3(String.fromCharCode(c)));
 const NAME_OF: Readonly<Record<string, string>> = {
   Enter: "ENTER", Tab: "TAB", Escape: "ESCAPE", Backspace: "BACKSPACE", ArrowLeft: "ARROW_LEFT", ArrowRight: "ARROW_RIGHT", ArrowUp: "ARROW_UP", ArrowDown: "ARROW_DOWN",

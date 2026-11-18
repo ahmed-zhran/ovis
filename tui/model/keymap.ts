@@ -409,9 +409,9 @@ export function boundIn(lookup: Lookup, chords: readonly HerdrChord[]): Bound | 
 /** The named keys the decoder can deliver, asked of the decoder: control bytes, the CSI ~, u and letter forms, SS3. */
 const NAMED_KEYS: ReadonlySet<string> = new Set([
   ...[...Array.from({ length: 0x20 }, (_, i) => i), 0x7f].filter((byte) => byte !== 0x1b).map((byte) => decodeControl(byte, false)),
-  ...Array.from({ length: 40 }, (_, i) => decodeCsi(String(i + 1), "~", false)),
-  ...[9, 13, 27, 127, ...Array.from({ length: 120 }, (_, i) => 57344 + i)].map((code) => decodeCsi(String(code), "u", false)),
-  ...[..."ABCDEFGHPQRSZ"].map((final) => decodeCsi("", final, false)),
+  ...Array.from({ length: 40 }, (_, i) => decodeCsi(String(i + 1), "~", false, false)),
+  ...[9, 13, 27, 127, ...Array.from({ length: 120 }, (_, i) => 57344 + i)].map((code) => decodeCsi(String(code), "u", false, true)),
+  ...[..."ABCDEFGHPQRSZ"].map((final) => decodeCsi("", final, false, false)),
   ...Array.from({ length: 0x3f }, (_, i) => decodeSs3(String.fromCharCode(0x40 + i))),
 ].flatMap((event) => event?.type === "key" ? keyChords({ ...event, at: 0 }).map((chord) => chord.key) : []).filter((key) => key.length > 1));
 

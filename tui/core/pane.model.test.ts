@@ -193,6 +193,8 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
       closedAt.set(attach, { core: stage.core, at: stage.core.log.length });
       return;
     }
+    // Display facts belong to an open attach, independent of the input and visibility gates.
+    if (op === "facts") return;
     if (shown.get(terminal)?.covered) broken.push(`I6 ${where} while the pane is covered`);
     if (op === "credit") return;
     if (op === "focus" && text === "FOCUS 0") {
@@ -240,8 +242,8 @@ async function sequence(seed: number, totals: Totals, deep: boolean): Promise<vo
     // I1: sent only when the test's own account allows it; a refusal sends nothing
     if (result.sent && !allowed) broken.push(`I1 input ${event.type} read at ${event.at} was sent to ${terminal} (${terminal === null ? "none" : screen.state(terminal)}, live since ${attach ? liveAt.get(attach) : "never"})`);
     if (!result.sent && made.length > 0) broken.push(`I1 a refused input (${result.code}) made ${made.map((call) => call.text).join(", ")}`);
-    // I2, I6: one DATA, last, with at most RESIZE, FOCUS 1 and FACTS ahead of it in that order
-    if (result.sent && !/^(resize )?(focus )?(facts )?write $/.test(made.map((call) => `${call.op} `).join(""))) broken.push(`I2 an accepted input made ${made.map((call) => call.text).join(", ")}`);
+    // I2, I6: one DATA, last, with at most RESIZE and FOCUS 1 ahead of it in that order
+    if (result.sent && !/^(resize )?(focus )?write $/.test(made.map((call) => `${call.op} `).join(""))) broken.push(`I2 an accepted input made ${made.map((call) => call.text).join(", ")}`);
     if (event.type === "paste" && !event.complete && result.sent) broken.push("I1 a cut paste was sent");
   };
   const stamp = () => (chance(0.15) ? stage.clock.now - Math.floor(random() * 400) : screen.stamp());
@@ -929,10 +931,10 @@ async function pair(seed: number, totals: PairTotals): Promise<void> {
       totals.attaches++;
       if (repaint) totals.repaints++;
     };
-    // I-c: outside the user's input a screen sends nothing but CLOSE and credit, and FOCUS 0 as its pane leaves the tab on a channel that got FOCUS 1
+    // I-c: outside the user's input a screen may update display facts, credit, close, or let go of focus, but never take the size.
     screen.hooks.call = (call: ChannelCall) => {
       if (call.op === "close") Object.assign(own.get(screen)!, { between: true, mayCarry: own.get(screen)!.changed });
-      if (call.op === "close" || call.op === "credit") return;
+      if (call.op === "close" || call.op === "credit" || call.op === "facts") return;
       if (call.text === "FOCUS 0" && own.get(screen)!.rect === null) return;
       if (call.input === null && call.op !== "writeAutomatic") broken.push(`I-c ${name(screen)} sent ${call.text} without the user's input`);
       if (call.op === "resize") {

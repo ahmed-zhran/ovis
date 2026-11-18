@@ -437,7 +437,21 @@ describe("the size rules of a pane", () => {
     expect([old.screen.sent(old.t), old.core.size(old.t)]).toEqual([[], "120x40"]);
   });
 
-  it("no FACTS beside an active viewer", async () => {
+  it("sends changed FACTS without another key or a size take on both cores", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t } = await scene(options);
+      screen.panes.setDisplay({ fg: "#123456", bg: "#abcdef", cell: [9, 20] });
+      await stage.live(screen, [t, 80, 24]);
+      screen.panes.setDisplay({ fg: "#123456", bg: "#234567", cell: [9, 20] });
+      screen.panes.setDisplay({ fg: "#123456", bg: "#234567", cell: [9, 20] });
+      await stage.settle();
+      expect(screen.sent(t)).toEqual(['FACTS {"fg":"#123456","bg":"#234567","cell":[9,20]}']);
+      expect(core.size(t)).toBe("80x24");
+      expect(screen.attaches).toHaveLength(1);
+    }
+  });
+
+  it("FACTS beside an active viewer leaves its size alone", async () => {
     const { core, stage, screen, t } = await scene();
     screen.panes.setDisplay({ fg: "#ffffff", bg: "#000000" });
     await stage.live(screen, [t, 80, 24]);
@@ -451,10 +465,11 @@ describe("the size rules of a pane", () => {
     screen.panes.setDisplay({ fg: "#000000", bg: "#ffffff" });
     await stage.advance(10_000);
     await stage.pass();
-    expect([screen.sent(t), core.size(t)]).toEqual([[], "120x40"]);
-    // the user's own input makes this screen the active viewer: its facts go with the take, once
+    const update = `FACTS ${JSON.stringify({ fg: "#000000", bg: "#ffffff" })}`;
+    expect([screen.sent(t), core.size(t)]).toEqual([[update], "120x40"]);
+    // the user's own input makes this screen the active viewer; it need not repeat the facts
     screen.type("ab");
-    expect(screen.sent(t)).toEqual(["RESIZE 80x24", `FACTS ${JSON.stringify({ fg: "#000000", bg: "#ffffff" })}`, "DATA 61", "DATA 62"]);
+    expect(screen.sent(t)).toEqual([update, "RESIZE 80x24", "DATA 61", "DATA 62"]);
   });
 });
 

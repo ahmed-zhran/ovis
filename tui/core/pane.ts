@@ -48,6 +48,8 @@ import type { InputEvent } from "../input/decode.ts";
 import { type Deadlines, NO_DEADLINES, PAINT_QUIET_MS, PANE_REOPEN_LIMIT, setDeadline } from "../model/deadlines.ts";
 import type { CoreLink, LinkNotice } from "./link.ts";
 import { attachSent, attachSize, detached, newPaneSize, overtaken, type PaneSize, reattachDue, reattaching, rectangleChanged, replied, sameSize, type Size, sizedBy, sizeHeard, sizeTold, took } from "./size.ts";
+import type { ProbeResult } from "../host/index.ts";
+import { displayAfter, displayFacts, type Reply } from "../host/probe.ts";
 
 /** Why a pane is Failed: the stable code beside its `reason`, which is for people. */
 export type FailedCode = "attach" | "bad_reply" | "emulator" | "size" | "closed" | "record";
@@ -146,8 +148,10 @@ export interface Panes {
   focus(terminal: string | null): void;
   /** The host terminal's own focus report. */
   hostFocus(focused: boolean): void;
-  /** What the host terminal looks like: sent with every attach, and to a core that has other facts only together with the user's input. */
+  /** What the host terminal looks like: sent with every attach and refreshed by FACTS. */
   setDisplay(display: Display | undefined): void;
+  displayProbe(probe: ProbeResult): void;
+  displayReply(reply: Reply): void;
   /** Input for the focused pane: sent now, or refused; never kept. */
   input(event: PaneInput): InputResult;
   /** Credits the core up to `budget` bytes of what this pane consumed, at a frame pass; answers how many. */
@@ -419,6 +423,7 @@ class Pane {
     attempt.quietFrom = this.set.now();
     this.size = replied(this.size, actual);
     this.become({ kind: "Painting" });
+    this.displayChanged();
     // what came while the reply was on its way, in its order: a `size` event after the stream's first bytes is newer than the reply
     for (const item of attempt.early.splice(0)) {
       if (this.attempt !== attempt) {
@@ -811,6 +816,16 @@ class Pane {
     return sameSize(this.size.wanted, this.size.advertised);
   }
 
+  /** Both core releases understand FACTS, which updates this viewer without taking the terminal's size. */
+  displayChanged(): void {
+    const attempt = this.attempt;
+    if (!attempt?.channel || attempt.closed) return;
+    const display = JSON.stringify(this.set.display ?? {});
+    if (display === attempt.toldDisplay) return;
+    attempt.channel.facts({ ...this.set.display });
+    attempt.toldDisplay = display;
+  }
+
   /** The input gate, and behind it the take. */
   input(event: PaneInput): InputResult {
     const press = event.type === "text" || event.type === "paste" || event.action === "press" || event.action === "repeat";
@@ -852,11 +867,6 @@ class Pane {
     if (!channel.automaticInput && !attempt.focusSent) {
       channel.focus(true);
       attempt.focusSent = true;
-    }
-    const display = JSON.stringify(this.set.display ?? {});
-    if (display !== attempt.toldDisplay) {
-      channel.facts({ ...this.set.display });
-      attempt.toldDisplay = display;
     }
     channel.write(encoded.value);
     if (event.type === "key") attempt.keyDown = true;
@@ -1026,7 +1036,21 @@ class PaneSet implements Panes {
   }
 
   setDisplay(display: Display | undefined): void {
-    this.display = display;
+    if (display === this.display) return;
+    this.enter(() => {
+      this.display = display;
+      for (const pane of this.panes.values()) pane.displayChanged();
+    });
+  }
+
+  displayProbe(probe: ProbeResult): void {
+    const initial = displayFacts(probe);
+    // A reply following DA1 in the same read can arrive before the probe's promise settles here.
+    if (initial) this.setDisplay({ ...initial, ...this.display });
+  }
+
+  displayReply(reply: Reply): void {
+    this.setDisplay(displayAfter(this.display, reply));
   }
 
   input(event: PaneInput): InputResult {

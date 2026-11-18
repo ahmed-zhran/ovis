@@ -102,7 +102,7 @@ export interface Loop {
 
 export function startLoop(options: LoopOptions): Loop {
   const { host, clock } = options;
-  const framer = new Framer();
+  const framer = new Framer(true);
   const world = new CoreWorld();
   const actions: string[] = [];
   const act = (code: string) => {
@@ -308,7 +308,7 @@ export function startLoop(options: LoopOptions): Loop {
     shape = layOut(size.cols, size.rows, tab ? view.tabs.get(tab.id) ?? null : null, { sidebarCollapsed: state.sidebarCollapsed });
     const shown = shape.spots.map(({ pane, cells, covered }) => ({ terminal: pane, cols: cells.cols, rows: cells.rows, covered }));
     const key = JSON.stringify(shown);
-    if (key !== shownKey) {
+    if (painter && key !== shownKey) {
       shownKey = key;
       panes.show(shown);
     }
@@ -330,6 +330,10 @@ export function startLoop(options: LoopOptions): Loop {
     else if (pasteAt !== null) pasteAt = events.length > 0 ? null : clock.now() + PASTE_ABANDON_MS;
     for (const event of events) {
       act(`read:${event.type}`);
+      if (event.type === "reply") {
+        if (event.kind === "scheme") host.refreshDisplay();
+        else panes.displayReply(event);
+      }
       if (event.type === "focus") {
         panes.hostFocus(event.focused);
         // the host lost its screen meanwhile, or redrew it: the next frame writes every cell
@@ -570,6 +574,8 @@ export function startLoop(options: LoopOptions): Loop {
       framer.setModes({ kitty: (probe.kittyFlags ?? 0) > 0 });
       sync = probe.syncOutput === true;
       if (probe.theme === "light" || probe.theme === "dark") theme = probe.theme;
+      panes.displayProbe(probe);
+      host.watchDisplay();
       painter = new Painter({ sync, colors: host.colorDepth });
       reshow();
       owePass();
