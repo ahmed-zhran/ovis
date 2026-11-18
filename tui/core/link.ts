@@ -136,6 +136,8 @@ export interface CoreLink {
   deadlines(): Deadlines;
   call<M extends HcMethod>(method: M, params: HcMethods[M]["params"], timeoutMs?: number): Promise<HcMethods[M]["result"]>;
   hello(): Promise<HelloInfo>;
+  /** Publish the current Ovis layout before settling its write; false if the line ended. */
+  refreshLayout(): Promise<boolean>;
   /** Attaches on the current line; the channel hears `connection_lost` when that line ends, and is never reopened here. */
   attach(params: TerminalAttachParams, handlers: ChannelHandlers): Promise<{ result: HcMethods["terminal.attach"]["result"]; channel: Channel }>;
   /** Closes the event stream, then the line, and opens none again. */
@@ -160,6 +162,8 @@ interface Line {
   early: ({ event: HcEvent; seq: number | null } | { missed: MissedSnapshot })[] | null;
   /** the newest resync on this line: an older one that settles later is dropped */
   round: number;
+  /** The snapshot publication in progress, if a document refresh has to wait for it. */
+  resyncing: Promise<void> | null;
   /** notices made while a resync reads its documents, told once it is published */
   held: ((epoch: number) => LinkNotice)[] | null;
   docs: Map<string, DocGetResult>;
@@ -261,6 +265,20 @@ class Link implements CoreLink {
     return this.online().hello!;
   }
 
+  async refreshLayout(): Promise<boolean> {
+    const line = this.line;
+    if (line === null || this.current.kind !== "Online") return false;
+    // A missed-event snapshot must finish publishing before we confirm a document to its writer.
+    do {
+      while (!line.over && line.resyncing) await line.resyncing;
+      if (line.over) return false;
+      const round = line.round;
+      await this.readDoc(line, OVIS_LAYOUT_DOC);
+      if (line.round === round) break;
+    } while (!line.over);
+    return !line.over;
+  }
+
   async attach(params: TerminalAttachParams, handlers: ChannelHandlers): Promise<{ result: HcMethods["terminal.attach"]["result"]; channel: Channel }> {
     return this.online().hc.open("terminal.attach", params, handlers);
   }
@@ -350,7 +368,7 @@ class Link implements CoreLink {
         });
       },
     });
-    const line: Line = { hc, over: false, ending: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, held: null, docs: new Map(), heardAt: this.options.now(), onlineAt: null };
+    const line: Line = { hc, over: false, ending: false, hello: null, events: null, epoch: 0, model: null, floor: 0, early: [], round: 0, resyncing: null, held: null, docs: new Map(), heardAt: this.options.now(), onlineAt: null };
     this.line = line;
 
     let hello: HelloInfo;
@@ -407,7 +425,15 @@ class Link implements CoreLink {
    * snapshot, then both documents read; what was learned meanwhile is told after them. The first
    * on a line makes the link Online in a new epoch.
    */
-  private async resync(line: Line, snapshot: MissedSnapshot): Promise<void> {
+  private resync(line: Line, snapshot: MissedSnapshot): Promise<void> {
+    const reading = this.readSnapshot(line, snapshot).finally(() => {
+      if (line.resyncing === reading) line.resyncing = null;
+    });
+    line.resyncing = reading;
+    return reading;
+  }
+
+  private async readSnapshot(line: Line, snapshot: MissedSnapshot): Promise<void> {
     const round = ++line.round;
     line.floor = snapshot.seq;
     line.model = coreModel(this.options.model);
