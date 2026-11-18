@@ -1489,7 +1489,10 @@ try {
   const long = page.getByRole("dialog", { name: "long.md", exact: true });
   await long.locator(".file-viewer-markdown .markdown-h1").first().waitFor();
   assert.match(await long.locator(".file-viewer-meta .file-viewer-notice").getAttribute("title") ?? "", /^Showing the first 256 KB of /);
-  await long.locator(".file-viewer-markdown .markdown-h1").nth(longPreviewHeadings - 1).waitFor();
+  // the preview renders its headings in chunks, one timer each, and nothing here scrolls to the last one:
+  // its being in the preview is the signal, not its being on screen (#4185)
+  await long.locator(".file-viewer-markdown .markdown-h1").nth(longPreviewHeadings - 1).waitFor({ state: "attached" });
+  assert.equal(await long.locator(".file-viewer-markdown .markdown-h1").count(), longPreviewHeadings, "the preview holds every heading of its first 256 KB");
   // The preview can contain thousands of file-link buttons. Query its toolbar, not every
   // accessible name in the document: the check itself must not monopolize the page.
   const longHeader = long.locator(".file-viewer-header");
