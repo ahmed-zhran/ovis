@@ -56,6 +56,8 @@ export type ScreenEvent =
   | { readonly type: "action"; readonly action: KeyAction; readonly index?: number; readonly at: number }
   /** focus a workspace, tab or pane (a click, or the neighbour a directional focus found) */
   | { readonly type: "select"; readonly target: Target; readonly at: number }
+  /** the top overlay's close control was clicked: it closes as its close keys close it */
+  | { readonly type: "close_overlay"; readonly at: number }
   /** a notice from elsewhere (a failed layout write) */
   | { readonly type: "notice"; readonly code: string; readonly data?: Readonly<Record<string, string | number>>; readonly at: number };
 
@@ -131,6 +133,9 @@ export function reduce(state: ModelState, event: ModelEvent): Step {
       break;
     case "select":
       select(acc, event.target, event.at);
+      break;
+    case "close_overlay":
+      if (acc.s.overlays.length > 0) acc.s = { ...acc.s, overlays: acc.s.overlays.slice(0, -1) };
       break;
     case "notice":
       notice(acc, event.code, event.data ?? {}, event.at);

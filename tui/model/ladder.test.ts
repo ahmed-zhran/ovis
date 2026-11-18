@@ -245,6 +245,17 @@ describe("overlay close keys", () => {
     // a key that is not declared does not close help
     expect(reduce(open.help, key("x")).state.overlays.length).toBe(1);
   });
+
+  it("a click on an overlay's close control closes it as its first close key does; with none open it changes nothing", () => {
+    const close: ModelEvent = { type: "close_overlay", at: AT };
+    for (const state of [after(idle, prefix(), text("?")), after(idle, prefix(), key("P")), after(idle, prefix(), key("D")), after(idle, prefix(), text("g"))]) {
+      const kind = state.overlays.at(-1)!.kind;
+      const [clicked, escaped] = [reduce(state, close), reduce(state, named("ESCAPE"))];
+      expect({ kind, state: clicked.state, effects: clicked.effects }).toEqual({ kind, state: escaped.state, effects: escaped.effects });
+      expect({ kind, open: reduce(state, close).state.overlays.length }).toEqual({ kind, open: 0 });
+    }
+    expect(reduce(idle, close).state).toBe(idle);
+  });
 });
 
 describe("focus moves by key stay local", () => {
