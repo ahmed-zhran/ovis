@@ -43,7 +43,7 @@ import { constants } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { coreFolder, IsolatedCore, signalChildGroup, stoppedCleanly } from "../../scripts/test-hc.ts";
 import { keyBytes } from "./keys.ts";
-import { gridText, runOnPty, type PtyRun } from "./pty.ts";
+import { answerQueries, gridText, runOnPty, screenOutput, type PtyRun } from "./pty.ts";
 
 /** the longest delay a timer holds (a signed 32-bit count of ms) */
 const TIMER_MAX_MS = 2 ** 31 - 1;
@@ -61,18 +61,12 @@ class Refused extends Error {}
 
 /** The command on a pseudo-terminal: its output passed on (or kept for the dump), queries answered, keys typed. */
 function startPty(choice: PtyChoice, command: string[], env: Record<string, string>, limitSeconds: number): PtyRun {
-  let tail = "";
+  const answerProbe = answerQueries((answer) => run.type(answer), ANSWERS);
   const run: PtyRun = runOnPty({
     command, env, cols: choice.cols, rows: choice.rows, deadlineMs: limitSeconds * 1000 + COMMAND_GRACE_MS,
     onData: (text) => {
       if (!choice.dump) process.stdout.write(text);
-      const window = tail + text;
-      const asked: [at: number, answer: string][] = [];
-      for (const [query, answer] of ANSWERS) {
-        for (let at = window.indexOf(query); at !== -1; at = window.indexOf(query, at + 1)) if (at + query.length > tail.length) asked.push([at, answer]);
-      }
-      for (const [, answer] of asked.sort((a, b) => a[0] - b[0])) run.type(answer);
-      tail = window.slice(-16);
+      answerProbe(text);
     },
   });
   const keys = choice.keys;
@@ -295,7 +289,7 @@ async function main(): Promise<number> {
     }
     if (ptyRun) {
       const code = await ptyRun.exited;
-      if (options.pty.dump) process.stdout.write(await gridText(ptyRun.output(), options.pty.cols, options.pty.rows));
+      if (options.pty.dump) process.stdout.write(await gridText(screenOutput(ptyRun.output()), options.pty.cols, options.pty.rows));
       forced ??= code ?? EXIT_FAILED;
     }
   } else if (!finishing && forced === null) {
