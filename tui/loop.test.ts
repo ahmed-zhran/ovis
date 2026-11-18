@@ -244,6 +244,23 @@ describe("the loop", () => {
     expect(run.host.log().at(-1)).toBe("raw off");
   }, TEST_MS);
 
+  it("a refused clipboard write ends the screen as gone without recording or drawing a copied notice", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.keys("press@27:2,drag@30:2");
+    await run.advance(FRAME_PASS_MS);
+    const writes = run.host.writeAttempts();
+    const drawn = run.host.output();
+    run.host.failWrites("EIO");
+    await run.keys("release@30:2");
+    await run.advance(QUIT_BOUND_MS);
+
+    expect(await run.loop.done).toEqual({ kind: "gone", why: "write-failed" });
+    expect(run.host.writeAttempts()).toBe(writes + 1);
+    expect(run.host.output()).toBe(drawn);
+    expect(run.loop.model().notices.map(({ code }) => code)).not.toContain("copied");
+  }, TEST_MS);
+
   it("quit detaches when giving the terminal back fails: done settles within the bound, a quit with the write's code", async () => {
     const run = await start({ fixture: demo });
     await run.live();
