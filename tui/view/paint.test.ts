@@ -925,6 +925,29 @@ describe("selection", () => {
     expect(mismatch(host, painter)).toBeNull();
     expect(frame.bytes.length).toBeGreaterThan(0);
   });
+
+  test("a wide cell is drawn selected when either of its columns is in the selection", async () => {
+    const painter = new Painter({ sync: false });
+    const [W, H] = [12, 3];
+    const host = await hostOf(W, H);
+    // grid columns 0-1 hold 안, 2-3 녕, 4-5 하
+    const shown = await shownPane(painter, 10, 1, "안녕하세요");
+    const rect = { x: 1, y: 1, width: 10, height: 1 };
+    const inverted = () => {
+      const out: string[] = [];
+      for (let col = 0; col < W; col++) {
+        const at = W + col;
+        if (painter.screen.width[at] !== 0 && painter.styles.get(painter.screen.style[at]!).flags & STYLE_INVERSE) out.push(painter.screen.text[at]!);
+      }
+      return out.join("");
+    };
+    const cases: [start: number, end: number, drawn: string][] = [[1, 3, "안녕"], [3, 1, "안녕"], [1, 2, "안녕"], [2, 2, "녕"], [3, 3, "녕"], [0, 0, "안"], [4, 5, "하"]];
+    for (const [start, end, drawn] of cases) {
+      step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, rect, { selection: { start: { x: start, y: 0 }, end: { x: end, y: 0 } } })] }));
+      expect({ start, end, drawn: inverted() }).toEqual({ start, end, drawn });
+      expect(mismatch(host, painter)).toBeNull();
+    }
+  });
 });
 
 describe("edges", () => {

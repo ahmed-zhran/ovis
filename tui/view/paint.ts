@@ -367,7 +367,8 @@ export class Painter {
       const width = grid.width[i]!;
       const rawStyle = grid.style[i]!;
       const baseStyle = this.styles.get(rawStyle);
-      const selected = selection !== null && inside(selection, gx, gy);
+      // a wide cell is selected when either of its columns is, as the copy takes it whole
+      const selected = selection !== null && (inside(selection, width === 0 ? gx - 1 : gx, gy) || inside(selection, width === 2 ? gx + 1 : gx, gy));
       const flags = (pane.dim ? baseStyle.flags | STYLE_FAINT : baseStyle.flags) ^ (selected ? STYLE_INVERSE : 0);
       const style = flags === baseStyle.flags ? rawStyle : this.styles.id(baseStyle.fg, baseStyle.bg, flags);
       if (width === 0) {
@@ -503,7 +504,7 @@ export class Painter {
 }
 
 /** a selection with its first cell first, row by row */
-function ordered({ start, end }: { start: GridCell; end: GridCell }): { start: GridCell; end: GridCell } {
+export function ordered<P extends { readonly x: number; readonly y: number }>({ start, end }: { readonly start: P; readonly end: P }): { start: P; end: P } {
   return start.y < end.y || (start.y === end.y && start.x <= end.x) ? { start, end } : { start: end, end: start };
 }
 
