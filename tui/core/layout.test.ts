@@ -255,6 +255,9 @@ describe("the screen's layout writes", () => {
     for (const [action, target, more] of arranging) await ours.run(action, target, more ?? {});
     expect({ notices: ours.notices().map((notice) => notice.code), sets: docSets(core).length, labels: calls(core, "terminal.label", "terminal.run").length })
       .toEqual({ notices: arranging.map(() => "app_owned"), sets: 0, labels: 0 });
+    await ours.run("close_pane", pane("t2"), { seen: [{ id: "t2", created: created(core, "t2") }] });
+    expect([calls(core, "terminal.kill", "terminal.rm").map((call) => `${call.method} ${String(call.params["terminal"])}`), ours.notices().length, docSets(core).length])
+      .toEqual([["terminal.kill t2", "terminal.rm t2"], arranging.length, 0]);
   }, TEST_MS);
 
   it("one write in flight; an answer that never came is not sent again; a precondition gone is calm", async () => {
@@ -313,5 +316,91 @@ describe("the screen's layout writes", () => {
     await run.advance(20);
     expect(tabs()).toEqual(["main", "side", "build"]);
     expect(run.grid()[0]!.includes("3:build")).toBe(true);
+  }, TEST_MS);
+});
+
+describe("the screen's closes and steps, pinned", () => {
+  const ended = (core: FakeHcCore, address: string) => core.program(address).exit(0);
+  const ends = (core: FakeHcCore) => calls(core, "terminal.kill", "terminal.rm").map((call) => `${call.method} ${String(call.params["terminal"])}`).sort();
+  const seenOf = (core: FakeHcCore, ...ids: string[]) => ids.map((id) => ({ id, created: created(core, id) }));
+
+  it("an ended pane closes: its record is removed, and its tab and workspace close with it", async () => {
+    const pane2 = twoWorkspaces();
+    ended(pane2, "t2");
+    const one = screen(pane2);
+    await one.run("close_pane", pane("t2"), { seen: seenOf(pane2, "t2") });
+    const tab = twoWorkspaces();
+    ended(tab, "t2");
+    const two = screen(tab);
+    await two.run("close_tab", { kind: "tab", id: "t" }, { seen: seenOf(tab, "t1", "t2") });
+    const workspace = twoWorkspaces();
+    ended(workspace, "t2");
+    const three = screen(workspace);
+    await three.run("close_workspace", { kind: "workspace", id: "w" }, { seen: seenOf(workspace, "t1", "t2", "t3") });
+    const left = async (core: FakeHcCore) => (await new HcConnection(() => core.transport()).call("terminal.list", { all: true })).terminals.map((terminal) => terminal.address);
+    expect([ends(pane2), ends(tab), ends(workspace), one.notices(), two.notices(), three.notices()]).toEqual([
+      ["terminal.rm t2"],
+      ["terminal.kill t1", "terminal.rm t1", "terminal.rm t2"],
+      ["terminal.kill t1", "terminal.kill t3", "terminal.rm t1", "terminal.rm t2", "terminal.rm t3"],
+      [], [], [],
+    ]);
+    expect([await left(pane2), await left(tab), await left(workspace)]).toEqual([["t1", "t3", "t4"], ["t3", "t4"], ["t4"]]);
+  }, TEST_MS);
+
+  it("a close ends exactly what it checked: a terminal that joins after the check is left running", async () => {
+    const core = twoWorkspaces();
+    const line = new HcConnection(() => core.transport());
+    let lists = 0;
+    const joining: Pick<HcConnection, "call" | "hello"> = {
+      hello: () => line.hello() as Promise<HelloInfo>,
+      call: (async (method: string, params: Record<string, unknown>) => {
+        const answer = await line.call(method as "terminal.list", params as never);
+        // the terminal joins workspace w right after the close's own read of the core
+        if (method === "terminal.list" && ++lists === 1) place(core, { space: "w", spaceName: "work", tab: "s", tabName: "side" }, "late\r\n");
+        return answer;
+      }) as HcConnection["call"],
+    };
+    const ours = screen(core, undefined, joining);
+    await ours.run("close_workspace", { kind: "workspace", id: "w" }, { seen: seenOf(core, "t1", "t2", "t3") });
+    expect([calls(core, "terminal.kill").map((call) => call.params["terminal"]).sort(), core.terminal("t5").state, ours.notices()]).toEqual([["t1", "t2", "t3"], "live", []]);
+  }, TEST_MS);
+
+  it("one step down moves a tab or a workspace past the next one", async () => {
+    const core = twoWorkspaces();
+    const ours = screen(core);
+    await ours.run("move_tab_next", { kind: "tab", id: "t" });
+    await ours.run("navigate_move_down", { kind: "workspace", id: "w" });
+    await ours.run("move_tab_next", { kind: "tab", id: "t" });
+    const shown = await snapshotOf(core);
+    expect([shown.workspaces.map((workspace) => workspace.workspace_id), shown.tabs.filter((tab) => tab.workspace_id === "w").map((tab) => tab.tab_id), ours.notices()])
+      .toEqual([["v", "w"], ["s", "t"], [{ code: "layout_unchanged", action: "move_tab_next", reason: "last", calm: true }]]);
+  }, TEST_MS);
+
+  it("resize by keys moves the border by the browser's step, 0.05 of its split", async () => {
+    const core = twoWorkspaces();
+    const ours = screen(core);
+    await ours.run("resize_pane_right", pane("t1"));
+    const root = tabOf(core, "t").root as { ratio: number };
+    expect(root.ratio).toBe(0.55);
+  }, TEST_MS);
+
+  it("the dialog keeps the created_ms the world showed for each terminal", async () => {
+    const core = twoWorkspaces();
+    const run = await start(core);
+    await run.keys("ctrl+b,D");
+    const overlay = run.loop.model().overlays[0];
+    expect(overlay?.kind === "confirm" ? overlay.seen : null).toEqual(seenOf(core, "t1", "t2", "t3"));
+  }, TEST_MS);
+
+  it("the screen closes an ended pane with its key", async () => {
+    const core = twoWorkspaces();
+    const run = await start(core);
+    ended(core, "t2");
+    await run.advance(20);
+    expect(run.loop.panes.view("t2")?.state.kind).toBe("Ended");
+    run.loop.dispatch({ type: "select", target: pane("t2"), at: run.clock.current });
+    await run.keys("ctrl+b,x");
+    await run.advance(20);
+    expect([ends(core), run.loop.model().world.workspaces[0]!.tabs[0]!.panes.map((one) => one.id), run.loop.model().notices.map((notice) => notice.code)]).toEqual([["terminal.rm t2"], ["t1"], []]);
   }, TEST_MS);
 });

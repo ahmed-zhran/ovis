@@ -13,18 +13,19 @@ import type { HcConnection } from "../../server/herdr-core/connection.ts";
 import { HcError } from "../../server/herdr-core/connection.ts";
 import { AdapterError } from "../../server/herdr-core/errors.ts";
 import { foreignLayout, OVIS_LAYOUT_DOC, type PaneDirection, type SplitDirection } from "../../server/herdr-core/layout-doc.ts";
-import { type CloseTarget, closeTargets, layoutCalls, LayoutStore, type LayoutView, newLayoutId, ownsLayout, RESIZE_STEP, resizeEdit, swapEdit, TERMINAL_COLOUR, zoomEdit } from "../../server/herdr-core/layout-ops.ts";
-import { buildSnapshot, type CoreHost, type FirstTurn, LAYOUT_DOC, OTHER_WORKSPACE_ID } from "../../server/herdr-core/snapshot.ts";
+import { type CloseTarget, layoutCalls, LayoutStore, type LayoutView, newLayoutId, ownsLayout, readCore, RESIZE_STEP, resizeEdit, swapEdit, TERMINAL_COLOUR, zoomEdit } from "../../server/herdr-core/layout-ops.ts";
+import { type CoreHost, type FirstTurn, LAYOUT_DOC, OTHER_WORKSPACE_ID } from "../../server/herdr-core/snapshot.ts";
 import { errorCode } from "../crash.ts";
 import type { RunEffect, Seen } from "../model/effects.ts";
 import type { Target } from "../model/focus.ts";
+import { keepsPlace } from "./world.ts";
 
 /** What a layout write tells the screen: a notice (`calm` when it reports how things are, not a failure), or a pane to focus once shown. */
 export type LayoutAnswer =
   | { readonly type: "notice"; readonly code: string; readonly data: Readonly<Record<string, string>>; readonly calm?: true }
   | { readonly type: "follow"; readonly target: Target; readonly away: string | null };
 
-export interface LayoutWritesOptions {
+interface LayoutWritesOptions {
   /** the core's line (the screen's link) */
   hc: Pick<HcConnection, "call" | "hello">;
   /** how the screen reads terminals into the snapshot, the same as its world (world.ts `CoreWorld.model`) */
@@ -38,8 +39,8 @@ const SPLITS: Readonly<Record<string, SplitDirection>> = { split_vertical: "righ
 const SWAPS: Readonly<Record<string, PaneDirection>> = { swap_pane_left: "left", swap_pane_down: "down", swap_pane_up: "up", swap_pane_right: "right" };
 const RESIZES: Readonly<Record<string, PaneDirection>> = { resize_pane_left: "left", resize_pane_down: "down", resize_pane_up: "up", resize_pane_right: "right" };
 
-/** The core read afresh: the snapshot as the screen shows it, and when the core made each live terminal. */
-interface Fresh { readonly view: LayoutView; readonly created: ReadonlyMap<string, number> }
+/** The core read afresh: the snapshot as the screen shows it, when the core made each terminal, and those whose program already ended. */
+interface Fresh { readonly view: LayoutView; readonly created: ReadonlyMap<string, number>; readonly finished: ReadonlySet<string> }
 
 /** Whether the terminals a close ends now are exactly the ones the user saw, each made at the time it was shown. */
 function sameTerminals(ends: readonly string[], seen: readonly Seen[], created: ReadonlyMap<string, number>): boolean {
@@ -134,24 +135,25 @@ export class LayoutWrites {
     return null;
   }
 
-  /** The core as the screen shows it, read now, with whether Ovis keeps its layout and each terminal's created_ms. */
+  /** The core as the screen shows it, read now (the same terminals its world shows: world.ts `keepsPlace`), with each terminal's created_ms and state. */
   private async fresh(): Promise<Fresh> {
-    const { hc, model } = this.options;
-    // the document before the terminals, as layout-ops.ts reads them
-    const ovis = await hc.call("doc.get", { name: OVIS_LAYOUT_DOC });
-    const [list, app, hello] = await Promise.all([hc.call("terminal.list", {}), hc.call("doc.get", { name: LAYOUT_DOC }), hc.hello()]);
-    const shown = buildSnapshot(list.terminals, app.value, hello.version, model.firstTurn, ovis.value, undefined, model.host);
-    return { view: { shown, own: ownsLayout(app.value) }, created: new Map(list.terminals.map((terminal) => [terminal.address, terminal.created_ms])) };
+    const { terminals, ...view } = await readCore(this.options.hc, { ...this.options.model, all: true, shown: (listed) => listed.map(keepsPlace) });
+    return {
+      view,
+      created: new Map(terminals.map((terminal) => [terminal.address, terminal.created_ms])),
+      finished: new Set(terminals.filter((terminal) => terminal.state !== "live").map((terminal) => terminal.address)),
+    };
   }
 
-  /** A close, once the core still holds exactly the terminals the user saw; anything else ends nothing. */
+  /** A close, once the core still holds exactly the terminals the user saw: it ends those and no other; anything else ends nothing. */
   private async close(action: string, target: CloseTarget, seen: readonly Seen[]): Promise<void> {
-    const { view, created } = await this.fresh();
-    if (!sameTerminals(closeTargets(view.shown, target), seen, created)) {
+    const { view, created, finished } = await this.fresh();
+    const ends = this.store.endsOf(view.shown, target);
+    if (!sameTerminals(ends, seen, created)) {
       this.notice("target_changed", { action });
       return;
     }
-    await this.store.close(target);
+    await this.store.end(ends, finished);
   }
 
   private follow(pane: string, away: string | null): void {
