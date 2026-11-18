@@ -468,11 +468,18 @@ export class FakeHcCore {
     this.notify((filter) => this.hears(filter, terminal), { jsonrpc: "2.0", method: "event", params }, type === "size");
   }
 
-  /** A status written by a pane is also present in the next snapshot. */
+  /**
+   * A status written by a pane is also present in the next snapshot. A report that leaves `working` ends a turn, as hc
+   * 0.1.17 and 0.1.18 count them: the record's turn rises and a `turn` event with the new state follows the `status`.
+   */
   reportStatus(terminal: string, status: Status): void {
     const { terminal: record } = this.held(terminal);
+    const ends = record.status?.state === "working" && status.state !== "working";
     record.status = structuredClone(status);
     this.emit("status", terminal, { status: record.status });
+    if (!ends) return;
+    record.turn = (record.turn ?? 0) + 1;
+    this.emit("turn", terminal, { state: status.state, turn: record.turn });
   }
 
   /** How many `size` events are held back on their way (`late`): none once the event loop has turned. */
