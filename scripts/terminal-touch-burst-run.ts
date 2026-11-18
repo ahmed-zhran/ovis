@@ -530,19 +530,19 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
     const top = box.y + 4;
     const shellBefore = (await paneScrollInfo(shellPane))!.offset_from_bottom;
     const logAtStart = readFileSync(log, "latin1");
-    const logBefore = logAtStart.length;
     const start = await page.evaluate(() => { window.__burst.events.length = 0; window.__frames.hold = true; return performance.now(); });
-    // Subscribe before the swipe and keep later frames held until the app has read the batch.
-    const receipt = boundary === "disconnect"
-      ? once(receipts, String(reported(logAtStart).length + TOUCH_WHEEL_REPORTS_PER_FRAME), { signal: AbortSignal.timeout(15_000) })
-        .catch((cause: unknown) => { throw new Error("disconnect: application did not acknowledge the first frame's wheel reports", { cause }); })
-      : undefined;
-    await Promise.all([receipt, (async () => {
-      await touch("touchStart", x, top);
-      await touch("touchMove", x, top + stepPixels * 10.75);
-      await page.evaluate(() => window.__frames.step());
-    })()]);
-    const firstFrame = await page.evaluate(() => window.__burst.events.filter((event) => event.k === "wheel").length);
+    // Keep later frames held and confirm delivery before a boundary can cut off the first batch.
+    const receiptDeadline = AbortSignal.timeout(15_000);
+    await touch("touchStart", x, top);
+    await touch("touchMove", x, top + stepPixels * 10.75);
+    await page.evaluate(() => window.__frames.step());
+    const firstFrameEvents = await page.evaluate(() => window.__burst.events);
+    const firstFrame = firstFrameEvents.filter((event) => event.k === "wheel").length;
+    const firstFrameSent = wheelsSent(firstFrameEvents);
+    if (boundary === "disconnect") assert.equal(firstFrameSent, TOUCH_WHEEL_REPORTS_PER_FRAME, "disconnect: the first frame sends a full batch");
+    const targetReceipts = reported(logAtStart).length + firstFrameSent;
+    if (receivedReports < targetReceipts) await once(receipts, String(targetReceipts), { signal: receiptDeadline })
+      .catch((cause: unknown) => { throw new Error(`${boundary}: application did not acknowledge the first frame's wheel reports`, { cause }); });
     let established: ProbeEvent;
     if (boundary === "new-touch") {
       await touch("touchEnd");
@@ -594,7 +594,7 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
     for (let n = 0; n < 4; n++) await nextFrame(page);
     await mark();
     const events = await page.evaluate(() => window.__burst.events);
-    const bytes = readFileSync(log, "latin1").slice(logBefore);
+    const bytes = readFileSync(log, "latin1").slice(logAtStart.length);
     const beforeBoundary = events.filter((event) => event.k === "send" && event.t <= established.t);
     const stale = events.filter((event) => event.k === "send" && (event.wheels ?? 0) > 0 && event.t > established.t);
     const record = {
