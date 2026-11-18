@@ -2,7 +2,7 @@ import type { PaneInfo, SessionSnapshot } from "../../shared/herdr-api.generated
 import { type HcConnection, HcError } from "./connection.ts";
 import { AdapterError } from "./errors.ts";
 import { foreignLayout, leaves, neighbour, OVIS_LAYOUT_DOC, type OvisLayout, type PaneDirection, resizeLeaf, setRatio, type SplitDirection, splitLeaf, swapLeaves, type TabLayout } from "./layout-doc.ts";
-import { type HcTerminal, keptLayout, LAYOUT_DOC, OTHER_WORKSPACE_ID, PANE_NAME_LABEL, SEEN_LABEL, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
+import { buildSnapshot, type CoreHost, type FirstTurn, type HcTerminal, keptLayout, LAYOUT_DOC, OTHER_WORKSPACE_ID, PANE_NAME_LABEL, SEEN_LABEL, type SessionOf, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
 import { labeledWorktree, WORKTREE_LABEL } from "./worktrees.ts";
 
 /**
@@ -245,6 +245,32 @@ export function moveLabels(place: NewTab | null, tabName: string): Record<string
 /** The core as a caller shows it, and whether Ovis keeps its layout (ownsLayout), from one read of the app's document. */
 export interface LayoutView { shown: SessionSnapshot; own: boolean }
 
+/** How a caller reads the core into a snapshot. */
+export interface CoreRead {
+  firstTurn?: FirstTurn;
+  sessionOf?: SessionOf;
+  host: CoreHost;
+  /** finished terminals too (`terminal.list` with `all`), each through `shown` before the snapshot groups it */
+  all?: boolean;
+  /** the terminals as the caller shows them; unset, as listed */
+  shown?: (terminals: HcTerminal[]) => HcTerminal[];
+}
+
+/**
+ * The core read once into the snapshot a caller shows, with whether Ovis keeps its layout (ownsLayout) from the
+ * same read of the app's document, and the terminals as hc listed them.
+ */
+export async function readCore(hc: Pick<HcConnection, "call" | "hello">, read: CoreRead): Promise<LayoutView & { terminals: HcTerminal[] }> {
+  const [list, app, ovis, hello] = await Promise.all([
+    hc.call("terminal.list", read.all ? { all: true } : {}),
+    hc.call("doc.get", { name: LAYOUT_DOC }),
+    hc.call("doc.get", { name: OVIS_LAYOUT_DOC }),
+    hc.hello(),
+  ]);
+  const shown = buildSnapshot(read.shown ? read.shown(list.terminals) : list.terminals, app.value, hello.version, read.firstTurn, ovis.value, read.sessionOf, read.host);
+  return { shown, own: ownsLayout(app.value), terminals: list.terminals };
+}
+
 /** What differs between the callers of a layout store. */
 export interface LayoutStoreOptions {
   /** the core as the caller shows it, read afresh */
@@ -284,11 +310,12 @@ export class LayoutStore {
 
   /**
    * Ends each terminal and removes its record, as closing a herdr pane does: all at once (a program
-   * can take seconds to end), every one tried before the first failure is answered.
+   * can take seconds to end), every one tried before the first failure is answered. A terminal in
+   * `finished` (its program already ended) only has its record removed.
    */
-  async end(addresses: string[]): Promise<void> {
+  async end(addresses: string[], finished: ReadonlySet<string> = new Set()): Promise<void> {
     const ended = await Promise.allSettled(addresses.map(async (address) => {
-      await this.hc.call("terminal.kill", { terminal: address });
+      if (!finished.has(address)) await this.hc.call("terminal.kill", { terminal: address });
       await this.hc.call("terminal.rm", { terminal: address });
     }));
     const failed = ended.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
@@ -352,10 +379,15 @@ export class LayoutStore {
     return this.startShell({ ...newShellLabels(place), ...labels }, { cwd: folder, env });
   }
 
-  /** Ends what a close names (closeTargets). Other terminals holds terminals no workspace made: they close one by one. */
-  async close(target: CloseTarget): Promise<void> {
+  /** The terminals a close ends in `shown` (closeTargets). Other terminals holds terminals no workspace made: they close one by one. */
+  endsOf(shown: SessionSnapshot, target: CloseTarget): string[] {
     if ("workspace" in target && target.workspace === OTHER_WORKSPACE_ID) throw new AdapterError("unsupported", "Other terminals holds terminals no workspace made: close them one by one");
-    await this.end(closeTargets((await this.options.snapshot()).shown, target));
+    return closeTargets(shown, target);
+  }
+
+  /** Ends what a close names in the snapshot read now (endsOf). */
+  async close(target: CloseTarget): Promise<void> {
+    await this.end(this.endsOf((await this.options.snapshot()).shown, target));
   }
 
   /** Labels a name (renamePlan). Other terminals holds terminals no workspace made: it has no name to change. */

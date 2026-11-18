@@ -12,11 +12,11 @@ import { jobProcessesBelow } from "../foreground-job.ts";
 import { type HcConnection, HcError } from "./connection.ts";
 import { foreignLayout, OVIS_LAYOUT_DOC, type PaneDirection } from "./layout-doc.ts";
 import { paneSession } from "../agent-identity.ts";
-import { agentInfoOf, agentOfStatus, type CoreHost, coreHost, buildSnapshot, type FirstTurn, opencodeRecords, type SessionOf, type HcStatus, type HcTerminal, hcKeyName, HERDR_PROTOCOL, isRecord, keyBytes, LAYOUT_DOC, onOtherMachine, OTHER_WORKSPACE_ID, processInfoOf, runsCommandString, SPACE_LABEL, TAB_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
+import { agentInfoOf, agentOfStatus, type CoreHost, coreHost, type FirstTurn, opencodeRecords, type SessionOf, type HcStatus, type HcTerminal, hcKeyName, HERDR_PROTOCOL, isRecord, keyBytes, LAYOUT_DOC, onOtherMachine, OTHER_WORKSPACE_ID, processInfoOf, runsCommandString, SPACE_LABEL, TAB_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
 import { type CoreChange, coreModel, type SessionNote } from "./core-model.ts";
 import { EVENT_LINE_BYTES, openEventStream } from "./event-stream.ts";
 import { AdapterError } from "./errors.ts";
-import { layoutCalls, LayoutStore, moveBesideEdit, newLayoutId, ownsLayout, ratioEdit, RESIZE_STEP, resizeEdit, swapEdit, zoomEdit } from "./layout-ops.ts";
+import { layoutCalls, LayoutStore, moveBesideEdit, newLayoutId, ownsLayout, ratioEdit, readCore, RESIZE_STEP, resizeEdit, swapEdit, zoomEdit } from "./layout-ops.ts";
 import { checkoutHolding, defaultCheckoutPath, factsOf, git, gitDirIdentity, labeledWorktree, realPath, type Checkout, type Repository, repositoryOf, WORKTREE_LABEL, WorktreeError, worktreeFolder, worktreeLabel } from "./worktrees.ts";
 import type { SessionSnapshot, WorkspaceWorktreeInfo } from "../../shared/herdr-api.generated.ts";
 import type { WorktreeInfo } from "../herdr/worktree-info.ts";
@@ -505,16 +505,15 @@ function createAnswers(hc: HcConnection, firstTurn: FirstTurn, forgetTurns: (liv
    */
   const read = async (): Promise<{ shown: SessionSnapshot; own: boolean; gitIds: Map<string, string | null>; started: Map<string, string> }> => {
     const began = Date.now();
-    const [list, doc, ovis, hello] = await Promise.all([
-      hc.call("terminal.list", {}),
-      hc.call("doc.get", { name: LAYOUT_DOC }),
-      hc.call("doc.get", { name: OVIS_LAYOUT_DOC }),
-      hc.hello(),
-    ]);
-    forgetTurns(new Set(list.terminals.map((terminal) => terminal.address)));
-    const shown = buildSnapshot(list.terminals, doc.value, hello.version, firstTurn, ovis.value, sessionOf, coreHost(options.otherMachine, platform));
+    const { shown, own, terminals: listed } = await readCore(hc, {
+      firstTurn, sessionOf, host: coreHost(options.otherMachine, platform),
+      shown: (terminals) => {
+        forgetTurns(new Set(terminals.map((terminal) => terminal.address)));
+        return terminals;
+      },
+    });
     const gitIds = new Map<string, string | null>();
-    const started = new Map(list.terminals.map((terminal) => [terminal.address, terminal.cwd]));
+    const started = new Map(listed.map((terminal) => [terminal.address, terminal.cwd]));
     const homes = new Map<string, string>();
     homesOf.set(shown, homes);
     // herdr reports every workspace's checkout from git; hc has none, so a workspace no label claims (one
@@ -551,7 +550,7 @@ function createAnswers(hc: HcConnection, firstTurn: FirstTurn, forgetTurns: (liv
         gitIds.set(workspace.workspace_id, pin.folder === folder ? pin.gitId ?? answer.gitId : answer.gitId);
       }));
     }
-    return { shown, own: ownsLayout(doc.value), gitIds, started };
+    return { shown, own, gitIds, started };
   };
   const snapshot = async (): Promise<SessionSnapshot> => (await read()).shown;
   /** The read, for a call that changes the layout Ovis keeps in labels: refused where the Herdr app arranges this core. */

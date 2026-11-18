@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { HcError, type HcConnection } from "./connection.ts";
 import { AdapterError } from "./errors.ts";
 import type { OvisLayout } from "./layout-doc.ts";
-import { type Edited, editLayout, LayoutStore, moveBesideEdit, ownsLayout, ratioEdit, resizeEdit, splitEdit, swapEdit, tabOrderEdit, workspaceOrderEdit, zoomEdit } from "./layout-ops.ts";
-import { buildSnapshot, type HcTerminal } from "./snapshot.ts";
+import { type Edited, editLayout, LayoutStore, readCore, moveBesideEdit, ownsLayout, ratioEdit, resizeEdit, splitEdit, swapEdit, tabOrderEdit, workspaceOrderEdit, zoomEdit } from "./layout-ops.ts";
+import { buildSnapshot, type HcTerminal, OTHER_WORKSPACE_ID } from "./snapshot.ts";
 
 type Handler = (params: Record<string, unknown>) => unknown;
 
@@ -296,5 +296,29 @@ describe("layout operations", () => {
     expect(writes.map((call) => call.params["version"])).toEqual([1, 2]);
     const stored = core.docs.get("ovis-layout")!.value as OvisLayout;
     expect(stored.workspaces.map((workspace) => [workspace.id, workspace.tabs.map((tab) => tab.id)])).toEqual([["B", ["B1"]], ["A", ["A2", "A1"]]]);
+  });
+});
+
+describe("closing and reading the core, shared with the screen", () => {
+  it("a close ends live terminals and only removes the record of one whose program already finished", async () => {
+    const core = fakeCore();
+    await core.store.end(["t1", "t2"], new Set(["t2"]));
+    expect(core.calls.map((call) => `${call.method} ${String(call.params["terminal"])}`).sort()).toEqual(["terminal.kill t1", "terminal.rm t1", "terminal.rm t2"]);
+  });
+
+  it("endsOf names what closeTargets names and refuses Other terminals as a whole", async () => {
+    const core = fakeCore();
+    const { shown } = await readCore(core.hc as unknown as Pick<HcConnection, "call" | "hello">, { host: null });
+    expect(core.store.endsOf(shown, { workspace: "A", group: false })).toEqual(["t1", "t2", "t3"]);
+    expect(() => core.store.endsOf(shown, { workspace: OTHER_WORKSPACE_ID, group: false })).toThrow(expect.objectContaining({ code: "unsupported" }));
+  });
+
+  it("readCore asks for finished terminals only when told, and groups them as the caller shows them", async () => {
+    const core = fakeCore();
+    const finished: HcTerminal = { ...labeled("t9", "B", "B1"), state: "finished" };
+    core.terminals.push(finished);
+    const read = await readCore(core.hc as unknown as Pick<HcConnection, "call" | "hello">, { host: null, all: true, shown: (terminals) => terminals.map((terminal) => (terminal.address === "t9" ? { ...terminal, state: "live" } : terminal)) });
+    expect([core.calls[0], read.terminals.find((terminal) => terminal.address === "t9")?.state, read.shown.panes.some((pane) => pane.pane_id === "t9"), read.own])
+      .toEqual([{ method: "terminal.list", params: { all: true } }, "finished", true, true]);
   });
 });
