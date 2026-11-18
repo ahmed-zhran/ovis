@@ -7,6 +7,7 @@ import type { MouseInput } from "../model/effects.ts";
 import { createEmulator } from "../emulator/ghostty.ts";
 import { STYLE_INVERSE } from "../emulator/index.ts";
 import { demo } from "../testing/fixtures/demo.ts";
+import { keyBytes } from "../testing/keys.ts";
 import { Run } from "../testing/run.ts";
 import { type PaneLook, Pointer, type PointerAct, type PointerScene } from "./mouse.ts";
 import { HitMap } from "./paint.ts";
@@ -57,6 +58,16 @@ const RULES: [name: string, focus: string, programMouse: boolean, events: Ev[], 
     [{ kind: "forward", pane: "a", event: ev(["press", "left", 3, 3]) }],
     [{ kind: "forward", pane: "a", event: ev(["motion", "left", 8, 6]) }],
   ]],
+  ["a forwarded release ends the grab, so a later drag without a new press goes nowhere",
+    "a", true, [["press", "left", 3, 2], ["release", "left", 4, 2], ["motion", "left", 5, 2]], [
+      [{ kind: "forward", pane: "a", event: ev(["press", "left", 3, 3]) }],
+      [{ kind: "forward", pane: "a", event: ev(["release", "left", 4, 3]) }],
+      [],
+    ]],
+  ["a new press on empty chrome replaces the old forward grab",
+    "a", true, [["press", "left", 3, 2], ["press", "left", 16, 0], ["motion", "left", 4, 2], ["release", "left", 4, 2]], [
+      [{ kind: "forward", pane: "a", event: ev(["press", "left", 3, 3]) }], [], [], [],
+    ]],
   ["a press on a pane that is not focused only focuses it: its drag and release go nowhere", "b", true,
     [["press", "left", 3, 2], ["motion", "left", 4, 2], ["release", "left", 4, 2]], [[{ kind: "select", target: { kind: "pane", id: "a" } }], [], []]],
   ["with shift held a drag selects, and the release copies the range from its first cell", "a", true,
@@ -127,6 +138,40 @@ describe("the pointer", () => {
     expect([ev(["press", "left", 16, 0]), ev(["motion", "left", 3, 2]), ev(["release", "left", 3, 2])].map((event) => pointer.mouse("screen", event, sceneOf("a", lookA(true))))).toEqual([[], [], []]);
     // a move with no button held still goes to a, once the drag is over
     expect(pointer.mouse("screen", ev(["motion", null, 3, 2]), sceneOf("a", lookA(true)))).toEqual([{ kind: "forward", pane: "a", event: ev(["motion", null, 3, 3]) }]);
+  });
+
+  it("a drag report with a new focus drops the old forward grab even without a focus notification", () => {
+    const pointer = new Pointer();
+    const look = lookA(true);
+    expect(pointer.mouse("screen", ev(["press", "left", 3, 2]), sceneOf("a", look))).toEqual([
+      { kind: "forward", pane: "a", event: ev(["press", "left", 3, 3]) },
+    ]);
+    expect(pointer.mouse("screen", ev(["motion", "left", 4, 2]), sceneOf("b", look))).toEqual([]);
+    // With focus back on a, the original release still belongs to the canceled gesture.
+    expect(pointer.mouse("screen", ev(["release", "left", 4, 2]), sceneOf("a", look))).toEqual([]);
+  });
+
+  it("moving focus away and back mid-selection keeps the drag's original anchor", () => {
+    const pointer = new Pointer();
+    const scene = sceneOf("a", lookA(false));
+    pointer.mouse("screen", ev(["press", "left", 1, 1]), scene);
+    pointer.focusChanged("b");
+    pointer.focusChanged("a");
+    expect(pointer.mouse("screen", ev(["release", "left", 4, 2]), scene)).toEqual([
+      { kind: "redraw" },
+      { kind: "copy", pane: "a", range: { start: { x: 1, y: 22 }, end: { x: 4, y: 23 } } },
+    ]);
+  });
+
+  it("changing pane focus does not end a divider drag in the same tab", () => {
+    const pointer = new Pointer();
+    const look = lookA(false);
+    pointer.mouse("screen", ev(["press", "left", 10, 3]), sceneOf("a", look));
+    pointer.focusChanged("b");
+    const scene = sceneOf("b", look);
+    const move = { kind: "divider", grab: 1, tab: "T1", name: { first: "a", second: "b", direction: "right" }, ratio: 0.2 } as const;
+    expect(pointer.mouse("screen", ev(["motion", "left", 4, 3]), scene)).toEqual([{ ...move, done: false }]);
+    expect(pointer.mouse("screen", ev(["release", "left", 4, 3]), scene)).toEqual([{ ...move, done: true }]);
   });
 
   it("the wheel stops at the oldest kept row and at the newest; a key brings a scrolled pane back to the newest", () => {
@@ -259,7 +304,7 @@ describe("mouse on the whole screen", () => {
       const oldBefore = old.receivedHex();
       const newBefore = next.receivedHex();
       await run.keys("drag@31:5");
-      // Program output forces the next frame without another key to resync the pane focus.
+      // Repaint without sending another key that could change the loop's focus.
       next.output("\x1b[?1002h\x1b[?1006h\x1b[4;3H@");
       await run.advance(20);
       expect({ old: old.receivedHex(), next: next.receivedHex(), focus: focusedPane(run), cursor: (await hostScreen(run)).cursor }).toMatchObject({
@@ -284,6 +329,39 @@ describe("mouse on the whole screen", () => {
     await run.keys("drag@31:5,release@31:5");
     expect(program.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
   }, TEST_MS);
+
+  for (const [binding, keys, typed] of [
+    ["next pane on prefix+a", { cycle_pane_next: "prefix+a" }, "ax"],
+    ["last pane on prefix+;", { last_pane: "prefix+;" }, ";x"],
+  ] as const) {
+    it(`the ${binding} routes text and cancels the held drag in one read`, async () => {
+      const run = await demo120();
+      run.loop.dispatch({ type: "keys", keys, at: run.clock.current });
+      if (typed === ";x") await run.keys("ctrl+b,l,ctrl+b,h"); // make t2 the last pane
+      const [t1, t2] = [run.core.program("t1"), run.core.program("t2")];
+      t1.output("\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+      t2.output("\x1b[?1004h");
+      await run.advance(20);
+      await run.keys("press@30:5,ctrl+b");
+      expect(t1.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
+
+      // The bound key and x form one text event; the mouse reports follow it in the same host read.
+      run.type(typed + keyBytes("drag@31:5") + keyBytes("release@31:5"));
+      t2.output("\x1b[4;3H@");
+      await run.advance(20);
+      expect({
+        t1: t1.receivedHex(),
+        t2: t2.receivedHex(),
+        focus: focusedPane(run),
+        cursor: (await hostScreen(run)).cursor,
+      }).toMatchObject({
+        t1: hexOf("\x1b[<0;6;4M\x1b[O"),
+        t2: hexOf("\x1b[Ix"),
+        focus: "t2",
+        cursor: { x: 76, y: 5, visible: true },
+      });
+    }, TEST_MS);
+  }
 
   it("mouse: a press over a pane with 1002 and 1006 arrives in pane-local cells; over chrome nothing is forwarded; with shift, or with no mouse mode, nothing is forwarded and a selection starts", async () => {
     const run = await demo120();

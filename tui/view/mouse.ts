@@ -4,7 +4,7 @@
  * sidebar toggle, or grabs a divider. Over a pane that is not focused a press only focuses it. Over the focused
  * pane the event goes to its program, in its own grid's cells, when the program asked for a mouse mode and shift
  * is not held; otherwise the wheel scrolls the pane's history here and a drag selects, and the release copies.
- * A program gets a drag and its release only if its press went there and its pane has kept the focus.
+ * A program gets a drag and its release only if its press went there, it is focused, and the grab is still active.
  * Over an open overlay only its close control acts.
  * The answer is a list of acts for the loop to perform; nothing here writes, sends or draws.
  */
@@ -83,7 +83,7 @@ export class Pointer {
   private selection: Selection | null = null;
   private grabs = 0;
 
-  /** A forwarded drag ends as soon as focus leaves its pane, even if focus returns before the next mouse report. */
+  /** On a reported focus change, cancel a forward grab on any other pane. Selection and divider grabs keep their anchors. */
   focusChanged(pane: string | null): void {
     if (this.grab.kind === "forward" && this.grab.pane !== pane) this.grab = NONE;
   }
@@ -102,6 +102,10 @@ export class Pointer {
     if (event.action === "release") this.grab = NONE;
     switch (grab.kind) {
       case "forward": {
+        if (grab.pane !== scene.focus) {
+          this.grab = NONE;
+          return [];
+        }
         const look = scene.look(grab.pane);
         return look ? [{ kind: "forward", pane: grab.pane, event: inGrid(event, look) }] : [];
       }
