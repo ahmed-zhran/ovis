@@ -15,10 +15,13 @@
  *   screen's first attach on a new line), as both real cores send it (core.fake.live.test.ts, "k2").
  *   The event for an earlier change is out before that reply here, unless `late` holds it back. A
  *   real core lets the reply of a line's attach overtake the event of a change another viewer made
- *   just before it: with the two attaches written in one turn, in a fifth to more than half of the
- *   races over runs of about 1,200, and much less evenly over short runs (docs/tui/parity.md has
- *   the measured rates). That event then comes behind the reply and the first bytes, and before the
- *   attach's own event (core.fake.live.test.ts, "k3").
+ *   just before it. How often is the core's timing and depends on who else listens to its events:
+ *   with the two attaches written in one turn, runs of 1,200 races gave 17 to 41 percent with
+ *   nobody else viewing and 35 to 51 percent beside an idle viewer that stays where every line
+ *   listened, and 10 to 20 and 18 to 36 percent where only this line did. Those are ranges of the
+ *   runs of one verification, not bounds (docs/tui/parity.md has these and the other runs). That
+ *   event then comes behind the reply and the first bytes, and before the attach's own event
+ *   (core.fake.live.test.ts, "k3").
  * - Focus: FOCUS 1 and 0 hand a program that turned mode 1004 on `ESC[I` and `ESC[O` (FOCUS 0 also
  *   from a viewer that never sent FOCUS 1); kind 6 bytes reach the program as they are when the
  *   core names `automatic_input` in hello (1004 or not), and are dropped when it does not.
