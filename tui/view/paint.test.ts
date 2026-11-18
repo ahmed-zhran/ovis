@@ -947,6 +947,11 @@ describe("selection", () => {
       expect({ start, end, drawn: inverted() }).toEqual({ start, end, drawn });
       expect(mismatch(host, painter)).toBeNull();
     }
+    // drawn from the grid's column 1: 안's second column is the first cell, a blank, selected with 안
+    const view = { col: 1, row: 0 };
+    step(painter, host, scene(W, H, { focus: "p", panes: [paneScene("p", shown, { x: 1, y: 1, width: 9, height: 1 }, { view, selection: { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } } })] }));
+    expect(inverted()).toBe(" ");
+    expect(mismatch(host, painter)).toBeNull();
   });
 });
 
