@@ -76,10 +76,9 @@ export function preferencesChange(base: Baseline, local: Local): PreferencesChan
 }
 
 /**
- * `base` once `sent` may have been stored (it went, and no answer says whether it landed), for each value changed here
- * since it went: that value is this tab's edit whatever the server holds, as it is once the save's answer lands. A
- * setting's baseline is then unknown, so whatever this tab holds goes; a list's is the one sent. A value still as it
- * went keeps `base`, so a refusal's rules for it hold.
+ * What goes as the page leaves while `sent` is on its way, which may land after this: each value changed here since it
+ * went is this tab's edit, as it is once that save's answer lands. A setting's baseline is then unknown, so whatever
+ * this tab holds goes; a list's is the one sent. A value still as it went keeps `base`.
  */
 export function unconfirmed(base: Baseline, sent: PreferencesChange, local: Local): Baseline {
   const now = sharedSettings(local.settings);
@@ -90,6 +89,27 @@ export function unconfirmed(base: Baseline, sent: PreferencesChange, local: Loca
     settings,
     pins: base.pins !== null && sent.pins !== undefined && !same(local.pins, sent.pins) ? [...sent.pins] : base.pins,
     muted: base.muted !== null && local.muted !== null && sent.muted_panes !== undefined && !same(local.muted, sent.muted_panes) ? [...sent.muted_panes] : base.muted,
+  };
+}
+
+/**
+ * `base` to judge `remote` by after `lost` went and no answer came (the server may have stored it). Where `remote` holds
+ * exactly what `lost` sent and this tab has changed it since (taken back included), that is the lost save's own echo,
+ * and this tab's value is the newer edit, as it is once that save's answer lands. Anything else is judged as without
+ * the lost save: another browser's later value still wins over a value this tab only took back.
+ */
+export function echoed(base: Baseline, lost: PreferencesChange, remote: SharedPreferences, local: Local): Baseline {
+  const now = sharedSettings(local.settings);
+  const settings = { ...base.settings };
+  for (const [key, value] of Object.entries(lost.settings)) {
+    if (key in remote.settings && same(remote.settings[key as SharedSettingKey], value) && !same(now[key as SharedSettingKey], value)) settings[key as SharedSettingKey] = value;
+  }
+  const echo = <T>(sent: T | undefined, there: T | undefined, here: T | null): boolean => sent !== undefined && same(there, sent) && here !== null && !same(here, sent);
+  return {
+    ...base,
+    settings,
+    pins: base.pins !== null && echo(lost.pins, remote.pins, local.pins) ? [...lost.pins!] : base.pins,
+    muted: base.muted !== null && echo(lost.muted_panes, remote.muted_panes, local.muted) ? [...lost.muted_panes!] : base.muted,
   };
 }
 
@@ -211,6 +231,8 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
   // a watching device: it takes what the others share and sends nothing; a change of its own lasts until the next shared one
   const readOnly = useRef(false);
   const inFlight = useRef<PreferencesChange | null>(null);
+  // the last save that went and got no answer at all, until a save is answered: its echo may still come (`echoed`)
+  const lost = useRef<PreferencesChange | null>(null);
   // a request that went beside the save on its way as the page was hidden: once that save settles, this is the save
   // on its way, so its answer is read and its values are not sent a third time
   const beside = useRef<{ body: PreferencesChange; request: Promise<SharedPreferences> } | null>(null);
@@ -292,7 +314,8 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     const kept = stored.current;
     const startedOver = kept !== null && (remote.revision < kept.revision || (kept.stateId !== undefined && remote.state_id !== undefined && remote.state_id !== kept.stateId));
     if (!loadedRef.current && startedOver) base.current = { ...base.current, pins: null };
-    const taken = takePreferences(base.current, local, remote, inFlight.current, readOnly.current, refused.current);
+    const judged = lost.current === null ? base.current : echoed(base.current, lost.current, remote, local);
+    const taken = takePreferences(judged, local, remote, inFlight.current, readOnly.current, refused.current);
     base.current = !loadedRef.current && remote.pins === undefined ? { ...taken.base, pins: null } : taken.base;
     saveSharedPins(base.current.pins === null ? null : { pins: [...base.current.pins], revision: remote.revision, ...(remote.state_id === undefined ? {} : { stateId: remote.state_id }) });
     // Taken at once, as the stores below are: the next document, answer or edit is judged against it before React draws it.
@@ -366,6 +389,8 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     setStreamLost(false);
     window.clearTimeout(retryTimer.current);
     if (refused.current !== null && !userRetry.current) window.clearTimeout(sendTimer.current);
+    // nothing refused: what is unsent no longer waits for the stream, and a wait a loss just before ended is set up again
+    else setAttempt((count) => count + 1);
   }, []);
 
   // `request` is called once `body` is on its way: a document the request brings about is held behind it. A save on
@@ -375,14 +400,16 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     inFlight.current = body;
     // this save is over: a request that went beside it is now the one on its way, and a document held so far stays
     // held behind that one, judged once it is answered
+    // (left untracked, as it went, where this tab no longer sends or is gone)
     const over = (): void => {
       const next = beside.current;
       beside.current = null;
-      if (next === null) settled();
+      if (next === null || off.current || readOnly.current || gone.current) settled();
       else track(next.body, () => next.request);
     };
     request().then((saved) => {
       refused.current = null;
+      lost.current = null;
       // An older server silently drops new names. Acknowledge exactly what was sent, not
       // today's local value: an edit made while the request was in flight still goes next.
       for (const key of SHARED_SETTING_KEYS) {
@@ -405,9 +432,8 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
       // refused value gives way to a newer one saved elsewhere
       if (status === 403) readOnly.current = true;
       else if (status !== 404) refused.current = body;
-      // no answer at all: the server may have stored it, and a value changed here since it went (taken back
-      // included) is not to give way to it
-      if (status === null) base.current = unconfirmed(base.current, body, here());
+      // no answer at all: the server may have stored it, and its echo is not to replace a value changed here since
+      if (status === null) lost.current = body;
       over();
       if (status === 403) {
         standDown();

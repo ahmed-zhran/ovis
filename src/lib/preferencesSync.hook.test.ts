@@ -1749,6 +1749,52 @@ describe("preferences sync real send path", () => {
     expect([store.get().settings.darkTheme, client.settings.darkTheme, client.saveError]).toEqual(["tokyo-night", "tokyo-night", null]);
   });
 
+  it.each([
+    ["stored, another browser's save held behind it", true, true],
+    ["stored, another browser's save brought by the reopened stream", true, false],
+    ["never stored, another browser's save held behind it", false, true],
+    ["never stored, another browser's save brought by the reopened stream", false, false],
+  ] as const)("a pick taken back while its save is on its way gives way to another browser's later save when that save's answer was lost (%s)", async (_name, stored, held) => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const client = await open();
+    if (!held) clients.splice(clients.indexOf(client), 1);
+    const gate = Promise.withResolvers<void>();
+    refusing = () => {
+      if (stored) store.set(bodies.at(-1)!);
+      refusing = null;
+      return gate.promise.then(() => { throw new TypeError("Failed to fetch"); });
+    };
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    await act(async () => { client.update({ darkTheme: "tokyo-night" }); });
+    await act(async () => { store.set({ settings: { darkTheme: "catppuccin" } }); });
+    await act(async () => { gate.resolve(); });
+    await act(async () => {});
+    if (!held) {
+      await act(async () => { client.disconnected(); });
+      clients.push(client);
+      await act(async () => { client.resubscribed(); client.receive(store.get()); });
+    }
+    await longWait();
+    expect([bodies.length, store.get().settings.darkTheme, client.settings.darkTheme]).toEqual([1, "catppuccin", "catppuccin"]);
+  });
+
+  it("a pin taken back while its save is on its way and pinned again goes when that save never reached the server", async () => {
+    const client = await open();
+    await act(async () => { client.update({ showThinking: !DEFAULT_SETTINGS.showThinking }); });
+    await send();
+    const gate = Promise.withResolvers<void>();
+    refusing = () => { refusing = null; return gate.promise.then(() => { throw new TypeError("Failed to fetch"); }); };
+    await act(async () => { setSidebarPins(["pane-a"]); });
+    await windows();
+    await act(async () => { setSidebarPins([]); });
+    await act(async () => { gate.resolve(); });
+    await act(async () => {});
+    await act(async () => { setSidebarPins(["pane-a"]); });
+    await longWait();
+    expect([store.get().pins, currentSidebarPins()]).toEqual([["pane-a"], ["pane-a"]]);
+  });
+
   it.each([["drawn", true], ["not drawn yet", false]] as const)("a pick taken back while its save is on its way, %s, goes beside that save and is carried when the page goes before the answer", async (_name, drawn) => {
     store.set({ settings: { darkTheme: "tokyo-night" } });
     const gate = Promise.withResolvers<void>();
@@ -1794,6 +1840,51 @@ describe("preferences sync real send path", () => {
     expect([keepalives, store.get().settings.darkTheme, client.settings.darkTheme]).toEqual([[false, true], "tokyo-night", "tokyo-night"]);
   });
 
+  it("a pick made again after the page was hidden beside a save on its way stays when the request beside it is answered", async () => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const first = Promise.withResolvers<void>();
+    releaseAnswer = () => first.promise;
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    // the request beside it lands on the server, and its echo is held, before the save's answer
+    const beside = Promise.withResolvers<void>();
+    refusing = () => { const saved = store.set(bodies.at(-1)!); return beside.promise.then(() => Response.json(saved)); };
+    await act(async () => { client.update({ darkTheme: "tokyo-night" }); });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await act(async () => { pageEvents.dispatchEvent(new Event("visibilitychange")); });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    await act(async () => { pageEvents.dispatchEvent(new Event("visibilitychange")); });
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    const answered = nextAnswer();
+    await act(async () => { first.resolve(); await answered; });
+    releaseAnswer = undefined;
+    refusing = null;
+    await act(async () => { beside.resolve(); });
+    await windows(3);
+    expect([client.settings.darkTheme, store.get().settings.darkTheme]).toEqual(["gruvbox", "gruvbox"]);
+  });
+
+  it("a request beside a save that is then refused as read-only is left as it went: its failure sets no error and nothing goes again", async () => {
+    const first = Promise.withResolvers<void>();
+    refusing = () => first.promise.then(() => Response.json({ error: { code: "forbidden", message: "no" } }, { status: 403 }));
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    const beside = Promise.withResolvers<void>();
+    refusing = () => beside.promise.then(() => Response.json({ error: { code: "internal", message: "boom" } }, { status: 500 }));
+    await act(async () => { client.update({ darkTheme: "catppuccin" }); });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await act(async () => { pageEvents.dispatchEvent(new Event("visibilitychange")); });
+    refusing = () => first.promise.then(() => Response.json({ error: { code: "forbidden", message: "no" } }, { status: 403 }));
+    await act(async () => { first.resolve(); });
+    await act(async () => { beside.resolve(); });
+    await act(async () => {});
+    await longWait();
+    await act(async () => { pageEvents.dispatchEvent(new Event("pagehide")); });
+    expect([bodies.length, client.saveError]).toEqual([2, null]);
+  });
+
   it("a pick made as a pending pick is taken back, neither drawn yet, waits a send wait of its own", async () => {
     store.set({ settings: { darkTheme: "tokyo-night" } });
     const client = await open();
@@ -1807,6 +1898,14 @@ describe("preferences sync real send path", () => {
     expect(bodies).toEqual([]);
     await windows();
     expect(bodies.map((body) => body.settings)).toEqual([{ showThinking: !DEFAULT_SETTINGS.showThinking }]);
+  });
+
+  it("a change nobody refused goes when the event stream is lost and then closed before a render", async () => {
+    const client = await open();
+    await act(async () => { client.update({ showThinking: !DEFAULT_SETTINGS.showThinking }); });
+    await act(async () => { client.disconnected(); client.closed(); });
+    await windows(3);
+    expect([bodies.length, store.get().settings.showThinking]).toEqual([1, !DEFAULT_SETTINGS.showThinking]);
   });
 
   it.each([["is lost", false], ["is closed with a refused change waiting", true]] as const)("a send wait that ends as the event stream %s sends nothing until the stream reopens", async (_name, refusedFirst) => {
