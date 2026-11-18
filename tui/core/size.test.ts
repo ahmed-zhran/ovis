@@ -1040,10 +1040,11 @@ describe("a repaint advertises the size the last viewer chose", () => {
   });
 
   it("the one order left open: a choice overtaken by the reply of a repaint that left beside another viewer is not seen", async () => {
-    // herdr-core lets an attach's reply overtake the event of a change made just before it: beside an idle viewer that stays, in more
-    // than half of the races where two attaches were written in one turn and the other was applied first (683 of 1,197 on hc 0.1.18,
-    // 695 of 1,195 on hc 0.1.17; docs/tui/parity.md has the other rates). Such an event behind the reply reads like that viewer coming
-    // and going (the case above), so the repaint is not made again: the terminal keeps the older size until the next input
+    // herdr-core lets an attach's reply overtake the event of a change made just before it: beside an idle viewer that stays, in 683
+    // of 1,197 (hc 0.1.18) and 695 of 1,195 (hc 0.1.17) races where two attaches were written in one turn and the other was applied
+    // first, and in 245 of 1,197 and 594 of 1,199 in an independent run (docs/tui/parity.md has the other rates). Such an event
+    // behind the reply reads like that viewer coming and going (the case above), so the repaint is not made again: the terminal
+    // keeps the older size until the next input
     const { core, stage, screen, t } = await scene();
     await stage.live(screen, [t, 80, 24]);
     const rival = stage.rival();
