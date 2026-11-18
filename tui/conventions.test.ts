@@ -39,6 +39,19 @@ describe("import closure of tui/main.ts", () => {
     fail(offenders, "tui/main.ts reaches these files outside tui/, shared/ and OUTSIDE_ALLOWED (tui/conventions.test.ts): move what the screen needs into shared/ or a listed server/herdr-core/ file that carries no server state, and import it from there. Do not add a file to OUTSIDE_ALLOWED unless the plan names it.");
   });
 
+  it("refuses a reachable import that TypeScript cannot parse", () => {
+    const graph: Record<string, string> = {
+      "tui/main.ts": 'import "./sneak62.mjs";',
+      "tui/sneak62.mjs": [
+        "import",
+        "--> type",
+        '{ conversationDir } from "../server/conversation.ts";',
+        "export const probe62 = typeof conversationDir;",
+      ].join("\n"),
+    };
+    expect(() => closure("tui/main.ts", (path) => graph[path])).toThrow(/^tui\/sneak62\.mjs:\d+: /);
+  });
+
   it("follows listed server files and reports what they reach", () => {
     const graph: Record<string, string> = {
       "tui/main.ts": "import { a } from \"./model/a.ts\";\nimport { version } from \"../package.json\";",
@@ -78,6 +91,24 @@ describe("import closure of tui/main.ts", () => {
     expect(types.reached).not.toContain("server/foreground-job.ts");
     expect(types.offenders).toEqual([]);
     expect(scanSnapshot('import { jobProcessesBelow } from "../foreground-job.ts";').offenders).toEqual([
+      "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
+    ]);
+  });
+
+  it("rejects a value re-export from foreground-job", () => {
+    expect(scanSnapshot('export { jobProcessesBelow } from "../foreground-job.ts";').offenders).toEqual([
+      "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
+    ]);
+  });
+
+  it("rejects a dynamic import from foreground-job", () => {
+    expect(scanSnapshot('const job = () => import("../foreground-job.ts");').offenders).toEqual([
+      "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
+    ]);
+  });
+
+  it("rejects an import type expression naming foreground-job", () => {
+    expect(scanSnapshot('type Job = import("../foreground-job.ts").JobProcess;').offenders).toEqual([
       "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
     ]);
   });

@@ -47,6 +47,12 @@ export const lineOf = (text: string, index: number): number => text.slice(0, ind
 /** Each literal relative import or re-export, as the repository path it names and its line. */
 export function relativeImports(file: string, code: string): { target: string; line: number; specifier: string; typeOnly: boolean }[] {
   const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest);
+  // SourceFile carries parser diagnostics at runtime, but its public type omits them.
+  const diagnostic = (source as ts.SourceFile & { readonly parseDiagnostics: readonly ts.DiagnosticWithLocation[] }).parseDiagnostics[0];
+  if (diagnostic) {
+    const line = source.getLineAndCharacterOfPosition(diagnostic.start).line + 1;
+    throw new Error(`${file}:${line}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`);
+  }
   const imports: { target: string; line: number; specifier: string; typeOnly: boolean }[] = [];
   function visit(node: ts.Node): void {
     let module: ts.Node | undefined;
