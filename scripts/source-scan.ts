@@ -51,13 +51,14 @@ export const lineOf = (text: string, index: number): number => text.slice(0, ind
 const SPECIFIER = /(?:^|[\s;])(?:import|export)\s(?:(?!\bimport\b)[^;])*?\sfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/gm;
 
 /** Each relative import of `code` (comments removed), as the repository path it names and its line. */
-export function relativeImports(file: string, code: string): { target: string; line: number; specifier: string }[] {
+export function relativeImports(file: string, code: string): { target: string; line: number; specifier: string; typeOnly: boolean }[] {
   return [...code.matchAll(SPECIFIER)].flatMap((match) => {
     const specifier = match[1] ?? match[2] ?? match[3]!;
     if (!specifier.startsWith(".")) return [];
     // the match may start with the newline before the import
     const at = match.index + match[0].search(/\S/);
-    return [{ target: posix.normalize(posix.join(posix.dirname(file), specifier.replace(/\?.*$/, ""))), line: lineOf(code, at), specifier }];
+    const typeOnly = /^(?:import|export)\s+type\s*(?:\{|\*)/.test(match[0].slice(at - match.index));
+    return [{ target: posix.normalize(posix.join(posix.dirname(file), specifier.replace(/\?.*$/, ""))), line: lineOf(code, at), specifier, typeOnly }];
   });
 }
 
@@ -65,15 +66,22 @@ export function relativeImports(file: string, code: string): { target: string; l
  * The repository files `entry` reaches through relative imports, followed transitively through
  * every code file `follow` accepts, and each import of a file it does not accept. A file that
  * `source` cannot read is not followed: a listed file its row has not written yet is simply not reached.
+ * `ignoreTypeOnly` can omit specific declaration-level type edges from this walk.
  */
-export function importClosure(entry: string, source: (path: string) => string | undefined, follow: (path: string) => boolean = () => true): { reached: string[]; offenders: string[] } {
+export function importClosure(
+  entry: string,
+  source: (path: string) => string | undefined,
+  follow: (path: string) => boolean = () => true,
+  ignoreTypeOnly?: (from: string, to: string) => boolean,
+): { reached: string[]; offenders: string[] } {
   const reached = new Set([entry]);
   const offenders: string[] = [];
   for (const queue = [entry]; queue.length;) {
     const file = queue.shift()!;
     const text = /\.(?:ts|tsx|mjs|js)$/.test(file) ? source(file) : undefined;
     if (text === undefined) continue;
-    for (const { target, line, specifier } of relativeImports(file, stripComments(text))) {
+    for (const { target, line, specifier, typeOnly } of relativeImports(file, stripComments(text))) {
+      if (typeOnly && ignoreTypeOnly?.(file, target)) continue;
       if (!follow(target)) offenders.push(`${file}:${line}: ${specifier} (${target})`);
       else if (!reached.has(target)) {
         reached.add(target);

@@ -30,7 +30,8 @@ describe("import closure of tui/main.ts", () => {
   ]);
   const allowed = (path: string) => path.startsWith("tui/") || path.startsWith("shared/") || OUTSIDE_ALLOWED.has(path);
 
-  const closure = (entry: string, source: (path: string) => string | undefined) => importClosure(entry, source, allowed);
+  const closure = (entry: string, source: (path: string) => string | undefined) =>
+    importClosure(entry, source, allowed, (from, to) => from === "server/herdr-core/snapshot.ts" && to === "server/foreground-job.ts");
 
   it("stays inside tui/, shared/ and the listed server files", () => {
     const { reached, offenders } = closure("tui/main.ts", (path) => existsSync(join(repo, path)) ? read(path) : undefined);
@@ -64,6 +65,23 @@ describe("import closure of tui/main.ts", () => {
     expect(closure("tui/main.ts", (path) => sources[path]).offenders).toEqual([
       "tui/main.ts:1: ../server/index.ts (server/index.ts)",
       "tui/model/b.ts:2: ../../server/main.ts (server/main.ts)",
+    ]);
+  });
+
+  it("allows snapshot's foreground-job type without allowing a runtime import", () => {
+    const snapshot = "server/herdr-core/snapshot.ts";
+    const graph: Record<string, string> = {
+      "tui/main.ts": 'import "../server/herdr-core/snapshot.ts";',
+      "server/foreground-job.ts": 'import "./darwin-process.ts";',
+    };
+    const scan = (declaration: string) => closure("tui/main.ts", (path) =>
+      path === snapshot ? declaration : graph[path]);
+    const types = scan('import type { JobProcess } from "../foreground-job.ts";');
+    expect(types.reached).toContain(snapshot);
+    expect(types.reached).not.toContain("server/foreground-job.ts");
+    expect(types.offenders).toEqual([]);
+    expect(scan('import { jobProcessesBelow } from "../foreground-job.ts";').offenders).toEqual([
+      "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
     ]);
   });
 });
