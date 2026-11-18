@@ -984,6 +984,10 @@ interface SettingsContextValue {
   watch: (changed: () => void) => () => void;
   /** a function is handed what is stored now (another tab's saved change included) */
   update: (patch: Partial<Settings> | ((current: Settings) => Partial<Settings>)) => void;
+  /** what a document from the server sets here: `update`, except that a value another tab stored since this tab last
+   *  stored or read it stays stored, and is what this tab's next function-form `update` is handed. That tab holds
+   *  something newer than this document (its own unsent change, or a later document it judges itself). */
+  take: (patch: Partial<Settings>) => void;
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -1043,7 +1047,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     applyToDocument(settings, resolvedEntry, resolvedLanguage);
   }, [settings, resolvedEntry, resolvedLanguage]);
 
-  const update = useCallback((patch: Partial<Settings> | ((current: Settings) => Partial<Settings>)) => {
+  const write = useCallback((patch: Partial<Settings> | ((current: Settings) => Partial<Settings>), taken: boolean) => {
     const current = held.current;
     const differs = (key: string, value: unknown, from: Settings): boolean => JSON.stringify(value) !== JSON.stringify(from[key as keyof Settings]);
     const readable = (): boolean => {
@@ -1057,17 +1061,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const latest = (): Settings => !readable() ? current
       : sanitizeSettings({ ...loadSettings(), ...Object.fromEntries(Object.entries(current).filter(([key, value]) => differs(key, value, stored.current))) });
     const next = sanitizeSettings({ ...current, ...(typeof patch === "function" ? patch(latest()) : patch) });
-    const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) => differs(key, value, current) || differs(key, value, stored.current)));
-    if (saveSettings(sanitizeSettings({ ...loadSettings(), ...changed }))) stored.current = next;
+    const changed = Object.entries(next).filter(([key, value]) => differs(key, value, current) || differs(key, value, stored.current));
+    const there = loadSettings();
+    const written = taken ? changed.filter(([key, value]) => !differs(key, there[key as keyof Settings], stored.current) || !differs(key, value, there)) : changed;
+    if (saveSettings(sanitizeSettings({ ...there, ...Object.fromEntries(written) }))) stored.current = next;
     advance(next);
   }, [advance]);
+  const update = useCallback((patch: Partial<Settings> | ((current: Settings) => Partial<Settings>)) => write(patch, false), [write]);
+  const take = useCallback((patch: Partial<Settings>) => write(patch, true), [write]);
   const own = useCallback((): Settings => held.current, []);
   const watch = useCallback((changed: () => void): (() => void) => {
     watchers.current.add(changed);
     return () => { watchers.current.delete(changed); };
   }, []);
 
-  const value = useMemo(() => ({ settings, resolvedTheme, resolvedEntry, resolvedLanguage, own, watch, update }), [settings, resolvedTheme, resolvedEntry, resolvedLanguage, own, watch, update]);
+  const value = useMemo(() => ({ settings, resolvedTheme, resolvedEntry, resolvedLanguage, own, watch, update, take }), [settings, resolvedTheme, resolvedEntry, resolvedLanguage, own, watch, update, take]);
   return createElement(SettingsContext.Provider, { value }, children);
 }
 

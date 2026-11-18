@@ -11,6 +11,7 @@ import { DEFAULT_SETTINGS, SettingsProvider, sanitizeSettings, useSettings, type
 import { currentSidebarPins, setSidebarPins } from "./sidebarPins.ts";
 import { currentPaneMutes, setPaneMutes } from "./paneMutes.ts";
 import { usePreferencesSync } from "./preferencesSync.ts";
+import { readThemeFile, withImported, type CustomTheme, type CustomThemes } from "./customThemes.ts";
 import type { UserError } from "./userError.ts";
 
 describe("preferences sync real send path", () => {
@@ -41,7 +42,7 @@ describe("preferences sync real send path", () => {
   interface Client {
     settings: Settings;
     rendered: { id: string; mode: string };
-    update: (patch: Partial<Settings>) => void;
+    update: ReturnType<typeof useSettings>["update"];
     receive: (doc: SharedPreferences) => void;
     saveError: UserError | null;
     paused: boolean;
@@ -1726,5 +1727,133 @@ describe("preferences sync real send path", () => {
     expect([client.settings.darkTheme, client.saveError !== null]).toEqual(["kanagawa", true]);
     await send();
     expect([bodies.length, store.get().settings.darkTheme, client.settings.darkTheme, client.saveError]).toEqual([2, "kanagawa", "kanagawa", null]);
+  });
+
+  it.each([["held behind the save", true], ["brought by the reopened stream", false]] as const)("a pick taken back while its save is on its way stays, and goes, when the server stored that save but its answer was lost and its value comes %s", async (_name, held) => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const client = await open();
+    if (!held) clients.splice(clients.indexOf(client), 1);
+    const gate = Promise.withResolvers<void>();
+    refusing = () => { store.set(bodies.at(-1)!); refusing = null; return gate.promise.then(() => { throw new TypeError("Failed to fetch"); }); };
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    await act(async () => { client.update({ darkTheme: "tokyo-night" }); });
+    await act(async () => { gate.resolve(); });
+    await act(async () => {});
+    if (!held) {
+      await act(async () => { client.disconnected(); });
+      clients.push(client);
+      await act(async () => { client.resubscribed(); client.receive(store.get()); });
+    }
+    expect(client.settings.darkTheme).toBe("tokyo-night");
+    await longWait();
+    expect([store.get().settings.darkTheme, client.settings.darkTheme, client.saveError]).toEqual(["tokyo-night", "tokyo-night", null]);
+  });
+
+  it.each([["drawn", true], ["not drawn yet", false]] as const)("a pick taken back while its save is on its way, %s, goes beside that save and is carried when the page goes before the answer", async (_name, drawn) => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const gate = Promise.withResolvers<void>();
+    releaseAnswer = () => gate.promise;
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    if (drawn) await act(async () => { client.update({ darkTheme: "tokyo-night" }); });
+    await act(async () => {
+      if (!drawn) client.update({ darkTheme: "tokyo-night" });
+      pageEvents.dispatchEvent(new Event("pagehide"));
+    });
+    expect([keepalives, bodies.map((body) => body.settings.darkTheme)]).toEqual([[false, true], ["gruvbox", "tokyo-night"]]);
+    expect(JSON.parse(window.sessionStorage.getItem("ovis:preferences-unsent")!).settings).toMatchObject({ darkTheme: "tokyo-night" });
+    expect(store.get().settings.darkTheme).toBe("tokyo-night");
+    await act(async () => { gate.resolve(); });
+    releaseAnswer = undefined;
+  });
+
+  it("a pick sent beside a save on its way as the page is hidden goes once: the save's answer leaves it on its way, and another browser's save after it stays", async () => {
+    const first = Promise.withResolvers<void>();
+    releaseAnswer = () => first.promise;
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "charcoal" }); });
+    await windows();
+    // the request beside it reaches the server only after the save's answer
+    const beside = Promise.withResolvers<void>();
+    refusing = () => { const body = bodies.at(-1)!; return beside.promise.then(() => Response.json(store.set(body))); };
+    await act(async () => { client.update({ darkTheme: "catppuccin" }); });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await act(async () => { pageEvents.dispatchEvent(new Event("visibilitychange")); });
+    const answered = nextAnswer();
+    await act(async () => { first.resolve(); await answered; });
+    releaseAnswer = undefined;
+    await windows(3);
+    expect(keepalives).toEqual([false, true]);
+
+    refusing = null;
+    const absorbed = nextAbsorbed();
+    await act(async () => { beside.resolve(); await absorbed; });
+    await act(async () => { store.set({ settings: { darkTheme: "tokyo-night" } }); });
+    await windows(3);
+    expect([keepalives, store.get().settings.darkTheme, client.settings.darkTheme]).toEqual([[false, true], "tokyo-night", "tokyo-night"]);
+  });
+
+  it("a pick made as a pending pick is taken back, neither drawn yet, waits a send wait of its own", async () => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await act(async () => { jest.advanceTimersByTime(599); });
+    await act(async () => {
+      client.update({ darkTheme: "tokyo-night" });
+      client.update({ showThinking: !DEFAULT_SETTINGS.showThinking });
+      jest.advanceTimersByTime(1);
+    });
+    expect(bodies).toEqual([]);
+    await windows();
+    expect(bodies.map((body) => body.settings)).toEqual([{ showThinking: !DEFAULT_SETTINGS.showThinking }]);
+  });
+
+  it.each([["is lost", false], ["is closed with a refused change waiting", true]] as const)("a send wait that ends as the event stream %s sends nothing until the stream reopens", async (_name, refusedFirst) => {
+    const client = await open();
+    if (refusedFirst) refuse = Response.json({ error: { code: "internal", message: "boom" } }, { status: 500 });
+    await act(async () => { client.update({ showThinking: !DEFAULT_SETTINGS.showThinking }); });
+    if (refusedFirst) {
+      await windows();
+      // the retry wait ends and the send wait after it begins
+      await act(async () => { jest.advanceTimersByTime(5_000); });
+    }
+    const before = bodies.length;
+    await act(async () => { jest.advanceTimersByTime(599); });
+    await act(async () => {
+      if (refusedFirst) client.closed();
+      else client.disconnected();
+      jest.advanceTimersByTime(1);
+    });
+    await windows(3);
+    expect(bodies.length).toBe(before);
+    await act(async () => { client.resubscribed(); });
+    await send();
+    expect([bodies.length, store.get().settings.showThinking]).toEqual([before + 1, !DEFAULT_SETTINGS.showThinking]);
+  });
+
+  it("a tab that takes a late document leaves another tab's unsent theme import stored, and that tab's next import keeps it", async () => {
+    const theme = (name: string, base00: string): CustomTheme => {
+      const result = readThemeFile(`base00: "${base00}"\nbase05: "e0e0e0"\n`, name);
+      if ("error" in result) throw new Error(result.error);
+      return result.theme;
+    };
+    const importing = (client: Client, imported: CustomTheme): void => client.update((current) => ({ customThemes: withImported(current.customThemes, imported)! }));
+    const names = (themes: unknown): string[] => (themes as CustomThemes).themes.map((entry) => entry.name);
+    const a = await open();
+    const b = await open();
+    // a's event stream brings b's first import late
+    clients.splice(clients.indexOf(a), 1);
+    await act(async () => { importing(b, theme("Alpha", "101010")); });
+    await send();
+    await act(async () => { importing(b, theme("Bravo", "202020")); });
+    await act(async () => { a.receive(store.get()); });
+    clients.push(a);
+
+    await act(async () => { importing(b, theme("Charlie", "303030")); });
+    await windows(3);
+
+    expect([names(b.settings.customThemes), names(store.get().settings.customThemes), names(a.settings.customThemes)]).toEqual([["Alpha", "Bravo", "Charlie"], ["Alpha", "Bravo", "Charlie"], ["Alpha", "Bravo", "Charlie"]]);
   });
 });
