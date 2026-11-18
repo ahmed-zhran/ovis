@@ -11,8 +11,8 @@ import type { HerdrAction } from "../../shared/herdr-keys.ts";
 import type { InputEvent } from "../input/decode.ts";
 import { CATALOGUE_BY_ID } from "./catalogue.ts";
 import { clearDeadline, type Deadlines, NO_DEADLINES, NOTICE_SHOW_MS, NOTICES_KEPT, setDeadline } from "./deadlines.ts";
-import type { Effect, KeyInput, MouseInput, PaneInput, PasteInput, TextInput } from "./effects.ts";
-import { EMPTY_WORLD, exists, type Focus, focused, focusOn, NO_FOCUS, nextFocus, type Target, type World } from "./focus.ts";
+import type { Effect, KeyInput, MouseInput, PaneInput, PasteInput, Seen, TextInput } from "./effects.ts";
+import { EMPTY_WORLD, exists, type Focus, focused, focusOn, NO_FOCUS, nextFocus, type PaneNode, type Target, type World } from "./focus.ts";
 import { boundIn, buildKeymap, charChords, isPrefix, type KeyAction, type Keymap, keyChords, unlockChords } from "./keymap.ts";
 import { field, type Overlay, overlayInput, type OverlayInput, overlayTarget } from "./overlays.ts";
 
@@ -23,8 +23,14 @@ export type ModeState =
   | { readonly name: "resize" }
   | { readonly name: "copy" };
 
-/** A notice on screen: `code` is the stable value tests and code read; `data` its details; it leaves at `until`. */
-export interface Notice { readonly id: number; readonly code: string; readonly data: Readonly<Record<string, string | number>>; readonly until: number }
+/**
+ * A notice on screen: `code` is the stable value tests and code read; `data` its details; it leaves at `until`.
+ * `calm`: it reports how things are (nothing changed, someone else changed it first), not a failure.
+ */
+export interface Notice { readonly id: number; readonly code: string; readonly data: Readonly<Record<string, string | number>>; readonly until: number; readonly calm?: true }
+
+/** What focus waits to move to once the world shows it: a new pane, or a moved one once it is no longer in tab `away`. */
+export interface Following { readonly target: Target; readonly away: string | null }
 
 export interface ModelState {
   readonly mode: ModeState;
@@ -41,6 +47,7 @@ export interface ModelState {
   readonly deadlines: Deadlines;
   readonly host: { readonly cols: number; readonly rows: number; readonly focused: boolean | null };
   readonly sidebarCollapsed: boolean;
+  readonly following: Following | null;
 }
 
 /** Events that do not come from host input: the loop and the other modules send them. */
@@ -58,8 +65,10 @@ export type ScreenEvent =
   | { readonly type: "select"; readonly target: Target; readonly at: number }
   /** the top overlay's close control was clicked: it closes as its close keys close it */
   | { readonly type: "close_overlay"; readonly at: number }
-  /** a notice from elsewhere (a failed layout write) */
-  | { readonly type: "notice"; readonly code: string; readonly data?: Readonly<Record<string, string | number>>; readonly at: number };
+  /** a notice from elsewhere (a failed layout write); `calm` for one that reports no failure */
+  | { readonly type: "notice"; readonly code: string; readonly data?: Readonly<Record<string, string | number>>; readonly calm?: boolean; readonly at: number }
+  /** focus the target once the world shows it (outside tab `away`): what a layout write made or moved; any other focus move drops it */
+  | { readonly type: "follow"; readonly target: Target; readonly away: string | null; readonly at: number };
 
 export type ModelEvent = InputEvent | ScreenEvent;
 
@@ -71,7 +80,7 @@ export interface Step { readonly state: ModelState; readonly effects: readonly E
 export function initialState(keys: unknown): ModelState {
   return {
     mode: { name: "terminal" }, locked: false, armed: false, overlays: [], world: EMPTY_WORLD, focus: NO_FOCUS, keymap: buildKeymap(keys),
-    notices: [], nextNotice: 0, deadlines: NO_DEADLINES, host: { cols: 0, rows: 0, focused: null }, sidebarCollapsed: false,
+    notices: [], nextNotice: 0, deadlines: NO_DEADLINES, host: { cols: 0, rows: 0, focused: null }, sidebarCollapsed: false, following: null,
   };
 }
 
@@ -138,7 +147,11 @@ export function reduce(state: ModelState, event: ModelEvent): Step {
       if (acc.s.overlays.length > 0) acc.s = { ...acc.s, overlays: acc.s.overlays.slice(0, -1) };
       break;
     case "notice":
-      notice(acc, event.code, event.data ?? {}, event.at);
+      notice(acc, event.code, event.data ?? {}, event.at, event.calm === true);
+      break;
+    case "follow":
+      acc.s = { ...acc.s, following: { target: event.target, away: event.away } };
+      follow(acc);
       break;
     default:
       // an event of a kind the model does not know changes nothing
@@ -314,9 +327,10 @@ function noticeDeadline(deadlines: Deadlines, notices: readonly Notice[]): Deadl
 }
 
 /** Shows a notice; the same code with the same data replaces the older one instead of stacking. */
-function notice(acc: Acc, code: string, data: Readonly<Record<string, string | number>>, at: number): void {
+function notice(acc: Acc, code: string, data: Readonly<Record<string, string | number>>, at: number, calm = false): void {
   const s = acc.s;
-  const notices = [...s.notices.filter((n) => !(n.code === code && sameData(n.data, data))), { id: s.nextNotice, code, data, until: at + NOTICE_SHOW_MS }].slice(-NOTICES_KEPT);
+  const shown: Notice = { id: s.nextNotice, code, data, until: at + NOTICE_SHOW_MS, ...(calm ? { calm: true } : {}) };
+  const notices = [...s.notices.filter((n) => !(n.code === code && sameData(n.data, data))), shown].slice(-NOTICES_KEPT);
   acc.s = { ...s, notices, nextNotice: s.nextNotice + 1, deadlines: noticeDeadline(s.deadlines, notices) };
 }
 
@@ -353,12 +367,28 @@ function applyWorld(acc: Acc, world: World, at: number): void {
     : s.mode;
   acc.s = { ...s, world, focus, mode, overlays: s.overlays.filter((overlay) => !gone.includes(overlay)) };
   for (const overlay of gone) notice(acc, "target_gone", { overlay: overlay.kind }, at);
+  follow(acc);
+}
+
+/** The id of the tab holding pane `id`, or null. */
+function tabOfPane(world: World, id: string): string | null {
+  for (const workspace of world.workspaces) for (const tab of workspace.tabs) if (tab.panes.some((pane) => pane.id === id)) return tab.id;
+  return null;
+}
+
+/** Focus moves to what it follows once the world shows it there. */
+function follow(acc: Acc): void {
+  const { following, world } = acc.s;
+  if (following === null || !exists(world, following.target)) return;
+  if (following.away !== null && following.target.kind === "pane" && tabOfPane(world, following.target.id) === following.away) return;
+  const focus = focusOn(world, acc.s.focus, following.target);
+  acc.s = { ...acc.s, following: null, ...(focus === null ? {} : { focus }) };
 }
 
 function select(acc: Acc, target: Target, at: number): void {
   const focus = focusOn(acc.s.world, acc.s.focus, target);
   if (focus === null) notice(acc, "target_gone", { [target.kind]: target.id }, at);
-  else acc.s = { ...acc.s, focus };
+  else acc.s = { ...acc.s, focus, following: null };
 }
 
 function setMode(acc: Acc, mode: ModeState): void {
@@ -368,7 +398,7 @@ function setMode(acc: Acc, mode: ModeState): void {
 function moveFocus(acc: Acc, target: Target | undefined): void {
   if (target === undefined) return;
   const focus = focusOn(acc.s.world, acc.s.focus, target);
-  if (focus !== null) acc.s = { ...acc.s, focus };
+  if (focus !== null) acc.s = { ...acc.s, focus, following: null };
 }
 
 /** The item `step` places from `id` in `list`, wrapping round. */
@@ -421,6 +451,21 @@ function runLocal(acc: Acc, action: Exclude<KeyAction, HerdrAction>, index: numb
     case "navigate_cycle_previous":
       moveFocus(acc, target(around(shown.tab?.panes ?? [], shown.pane?.id, action === "navigate_cycle_next" ? 1 : -1), "pane"));
       return;
+    case "navigate_move_up":
+    case "navigate_move_down":
+      if (s.mode.name === "navigate" && s.mode.preview !== null) acc.effects.push({ type: "run", action, target: { kind: "workspace", id: s.mode.preview }, index: null, name: null });
+      return;
+    case "navigate_move_pane": {
+      if (s.mode.name !== "navigate" || s.mode.preview === null) return;
+      if (shown.pane === null || shown.tab === null) {
+        notice(acc, "nothing_focused", { action }, at);
+        return;
+      }
+      // the new tab there takes the pane's name, else its tab's
+      acc.effects.push({ type: "run", action, target: { kind: "pane", id: shown.pane.id }, index: null, name: shown.pane.name || shown.tab.name, to: s.mode.preview });
+      setMode(acc, { name: "terminal" });
+      return;
+    }
     case "navigate_cancel":
     case "resize_leave":
     case "copy_leave":
@@ -431,6 +476,11 @@ function runLocal(acc: Acc, action: Exclude<KeyAction, HerdrAction>, index: numb
       return never;
     }
   }
+}
+
+/** The terminals of `panes` as the screen shows them. */
+function seenOf(panes: readonly PaneNode[]): Seen[] {
+  return panes.map((pane) => ({ id: pane.id, created: pane.created ?? null }));
 }
 
 function target<T extends { readonly id: string }>(node: T | undefined | null, kind: Target["kind"]): Target | undefined {
@@ -498,9 +548,21 @@ function runHerdr(acc: Acc, action: HerdrAction, index: number | null, at: numbe
       else pushOverlay({ kind: "text", purpose: "new_tab", target: { kind: "workspace", id: shown.workspace.id }, field: field("") });
       return;
     case "close_workspace":
-      if (shown.workspace === null) notice(acc, "nothing_focused", { action }, at);
-      else pushOverlay({ kind: "confirm", purpose: "close_workspace", target: { kind: "workspace", id: shown.workspace.id } });
+    case "close_tab":
+    case "close_pane": {
+      const workspace = shown.workspace;
+      const node = action === "close_workspace" ? workspace : action === "close_tab" ? shown.tab : shown.pane;
+      if (workspace === null || node === null) {
+        notice(acc, "nothing_focused", { action }, at);
+        return;
+      }
+      const all = workspace.tabs.flatMap((tab) => tab.panes);
+      const ends = action === "close_pane" ? [shown.pane!] : action === "close_tab" ? shown.tab!.panes : all;
+      // as herdr: only a close that ends the whole workspace asks first
+      if (ends.length >= all.length) pushOverlay({ kind: "confirm", purpose: "close_workspace", target: { kind: "workspace", id: workspace.id }, seen: seenOf(all) });
+      else acc.effects.push({ type: "run", action, target: { kind: action === "close_tab" ? "tab" : "pane", id: node.id }, index, name: null, seen: seenOf(ends) });
       return;
+    }
     case "previous_workspace":
     case "next_workspace":
       moveFocus(acc, target(around(s.world.workspaces, shown.workspace?.id, action === "next_workspace" ? 1 : -1), "workspace"));
@@ -529,7 +591,6 @@ function runHerdr(acc: Acc, action: HerdrAction, index: number | null, at: numbe
     case "focus_agent":
       acc.effects.push({ type: "run", action, target: null, index, name: null });
       return;
-    case "close_tab":
     case "move_tab_previous":
     case "move_tab_next":
       runOn(target(shown.tab, "tab"));
@@ -544,7 +605,6 @@ function runHerdr(acc: Acc, action: HerdrAction, index: number | null, at: numbe
     case "swap_pane_right":
     case "split_vertical":
     case "split_horizontal":
-    case "close_pane":
     case "zoom":
     case "resize_pane_left":
     case "resize_pane_down":

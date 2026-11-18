@@ -11,7 +11,9 @@ import { decodeControl, decodeCsi, decodeSs3, type InputEvent, typedKey } from "
 export type Mode = "terminal" | "navigate" | "resize" | "copy";
 
 /** Actions only the screen's modes and its lock know. */
-export type LocalAction = "lock" | "navigate_focus" | "navigate_cancel" | "navigate_index" | "navigate_cycle_next" | "navigate_cycle_previous" | "resize_leave" | "copy_leave";
+/** Navigate mode's moves (herdr has no key for them): the workspace pointed at one place up or down, the focused pane into it. */
+export type MoveAction = "navigate_move_up" | "navigate_move_down" | "navigate_move_pane";
+export type LocalAction = "lock" | "navigate_focus" | "navigate_cancel" | "navigate_index" | "navigate_cycle_next" | "navigate_cycle_previous" | "resize_leave" | "copy_leave" | MoveAction;
 export type KeyAction = HerdrAction | HerdrNavigateKey | LocalAction;
 
 export interface KeyRow {
@@ -123,6 +125,10 @@ const FIXED: readonly { readonly action: KeyAction; readonly mode: Exclude<Mode,
   { action: "navigate_index", mode: "navigate", keys: ["1..9"] },
   { action: "navigate_cycle_next", mode: "navigate", keys: ["tab"] },
   { action: "navigate_cycle_previous", mode: "navigate", keys: ["shift+tab"] },
+  // the screen's own: reorder workspaces and move a pane, which herdr does with the mouse
+  { action: "navigate_move_up", mode: "navigate", keys: ["shift+up"] },
+  { action: "navigate_move_down", mode: "navigate", keys: ["shift+down"] },
+  { action: "navigate_move_pane", mode: "navigate", keys: ["m"] },
   { action: "resize_pane_left", mode: "resize", keys: ["h", "left"] },
   { action: "resize_pane_down", mode: "resize", keys: ["j", "down"] },
   { action: "resize_pane_up", mode: "resize", keys: ["k", "up"] },

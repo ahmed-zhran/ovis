@@ -474,7 +474,7 @@ function modeBarPart(input: ChromeInput, colors: Colors, look: string): Part {
     offline: link.online ? null : STRINGS.offlineDetail(link.code),
     unreachable: state.keymap.notes.filter((note) => note.code === "prefix_unreachable" || note.code === "detach_unreachable").map((note) => note.code),
     hints: bar.hints.map((hint) => ({ keys: hint.keys.join("/"), label: actionLabel(hint.action) })),
-    notice: latest && link.online ? ` ${STRINGS.errorBadge}: ${STRINGS.noticeText(latest.code, latest.data)} ` : null,
+    notice: latest && link.online ? ` ${latest.calm ? "" : `${STRINGS.errorBadge}: `}${STRINGS.noticeText(latest.code, latest.data)} ` : null,
   };
   return part("mode", rect, look, data, (canvas, { mode, offline, unreachable, hints, notice }) => {
     if (rect.width <= 0 || rect.height <= 0) return;
@@ -559,7 +559,7 @@ function fieldOverlay(key: string, rect: Rect, title: string, hint: string, fiel
 
 function toastPart(width: number, height: number, state: ModelState, colors: Colors): Part | null {
   if (state.notices.length === 0 || width < 16 || height < 3) return null;
-  const lines = state.notices.slice(-3).map((notice) => `${STRINGS.glyphBlocked} ${STRINGS.noticeText(notice.code, notice.data)}`);
+  const lines = state.notices.slice(-3).map((notice) => `${notice.calm ? STRINGS.glyphIdle : STRINGS.glyphBlocked} ${STRINGS.noticeText(notice.code, notice.data)}`);
   const toastWidth = Math.min(width, Math.max(20, Math.max(...lines.map((line) => measure(line).width)) + 4));
   const toastHeight = Math.min(height, lines.length + 2);
   const rect: Rect = { x: width - toastWidth, y: Math.min(1, height - toastHeight), width: toastWidth, height: toastHeight };

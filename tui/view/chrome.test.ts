@@ -499,3 +499,15 @@ it("names the hc session from its socket path", () => {
   expect(sessionFromSocket("/run/user/1000/herdr-core/work.2.sock")).toBe("work.2");
   expect(sessionFromSocket("/run/user/1000/herdr-core/hc.sock")).toBe("default");
 });
+
+describe("calm notices", () => {
+  it("a calm notice is drawn without the error badge and with the plain glyph; another keeps both", () => {
+    const calm = draw({ cols: 120, rows: 40, events: [{ type: "notice", code: "layout_unchanged", data: { action: "zoom", reason: "single_pane" }, calm: true, at: 1 }] });
+    const error = draw({ cols: 120, rows: 40, events: [{ type: "notice", code: "layout_refused", data: { action: "zoom", reason: "pane_not_found" }, at: 1 }] });
+    expect(calm.rows[39]!.endsWith(" layout_unchanged: action=zoom reason=single_pane ")).toBe(true);
+    expect(calm.rows[39]!.includes("ERROR")).toBe(false);
+    expect(calm.rows.some((row) => row.includes("- layout_unchanged: action=zoom reason=single_pane"))).toBe(true);
+    expect(error.rows[39]!.endsWith(" ERROR: layout_refused: action=zoom reason=pane_not_found ")).toBe(true);
+    expect(error.rows.some((row) => row.includes("! layout_refused: action=zoom reason=pane_not_found"))).toBe(true);
+  });
+});

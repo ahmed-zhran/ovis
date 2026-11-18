@@ -301,7 +301,10 @@ export class CoreWorld {
           tabs: snapshot.tabs.filter((tab) => tab.workspace_id === workspace.workspace_id).map((tab) => ({
             id: tab.tab_id,
             name: tab.label,
-            panes: (order.get(tab.tab_id) ?? []).map((id) => ({ id, name: panes.get(id)?.label ?? "" })),
+            panes: (order.get(tab.tab_id) ?? []).map((id) => {
+              const created = this.records.get(id)?.["created_ms"];
+              return { id, name: panes.get(id)?.label ?? "", ...(typeof created === "number" ? { created } : {}) };
+            }),
           })),
         })),
       },

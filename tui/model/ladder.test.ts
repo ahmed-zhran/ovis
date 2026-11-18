@@ -266,3 +266,73 @@ describe("focus moves by key stay local", () => {
     expect(focusedPane(after(moved, prefix(), named("TAB", { shift: true })))).toBe("p1");
   });
 });
+
+describe("layout actions as data", () => {
+  // created_ms of each terminal as the world shows it: what a close carries so a terminal made later at the same address is not ended
+  const SEEN_WORLD: World = {
+    workspaces: [
+      { id: "w1", name: "one", tabs: [{ id: "t1", name: "a", panes: [{ id: "p1", name: "", created: 11 }, { id: "p2", name: "", created: 12 }] }, { id: "t2", name: "b", panes: [{ id: "p3", name: "", created: 13 }] }] },
+      { id: "w2", name: "two", tabs: [{ id: "t3", name: "c", panes: [{ id: "p4", name: "", created: 14 }] }] },
+    ],
+  };
+  const seen = reduce(initialState(undefined), { type: "world", world: SEEN_WORLD, at: 0 }).state;
+  const runs = (step: Step) => step.effects.filter((effect) => effect.type === "run");
+  const onW2 = after(seen, { type: "select", target: { kind: "workspace", id: "w2" }, at: AT });
+  const onT2 = after(seen, { type: "select", target: { kind: "tab", id: "t2" }, at: AT });
+
+  it("close pane and close tab end at once with what the screen showed; a close that ends a whole workspace asks first", () => {
+    const rows: [string, ModelState, string, { run: unknown[]; overlays: unknown[] }][] = [
+      ["close pane of a split tab", seen, "close_pane", { run: [{ type: "run", action: "close_pane", target: { kind: "pane", id: "p1" }, index: null, name: null, seen: [{ id: "p1", created: 11 }] }], overlays: [] }],
+      ["close tab of two", seen, "close_tab", { run: [{ type: "run", action: "close_tab", target: { kind: "tab", id: "t1" }, index: null, name: null, seen: [{ id: "p1", created: 11 }, { id: "p2", created: 12 }] }], overlays: [] }],
+      ["close pane of a one-pane workspace", onW2, "close_pane", { run: [], overlays: [{ kind: "confirm", purpose: "close_workspace", target: { kind: "workspace", id: "w2" }, seen: [{ id: "p4", created: 14 }] }] }],
+      ["close tab of a one-tab workspace", onW2, "close_tab", { run: [], overlays: [{ kind: "confirm", purpose: "close_workspace", target: { kind: "workspace", id: "w2" }, seen: [{ id: "p4", created: 14 }] }] }],
+      ["close pane of a one-pane tab beside others", onT2, "close_pane", { run: [{ type: "run", action: "close_pane", target: { kind: "pane", id: "p3" }, index: null, name: null, seen: [{ id: "p3", created: 13 }] }], overlays: [] }],
+      ["close workspace", seen, "close_workspace", { run: [], overlays: [{ kind: "confirm", purpose: "close_workspace", target: { kind: "workspace", id: "w1" }, seen: [{ id: "p1", created: 11 }, { id: "p2", created: 12 }, { id: "p3", created: 13 }] }] }],
+    ];
+    for (const [name, state, action, want] of rows) {
+      const step = reduce(state, { type: "action", action: action as "close_pane", at: AT });
+      expect({ name, run: runs(step), overlays: step.state.overlays } as unknown).toEqual({ name, run: want.run, overlays: want.overlays });
+    }
+  });
+
+  it("the confirm dialog's yes carries the terminals it kept; its no ends nothing", () => {
+    const asking = after(seen, { type: "action", action: "close_workspace", at: AT });
+    const yes = reduce(asking, key("y"));
+    expect(runs(yes)).toEqual([{ type: "run", action: "close_workspace", target: { kind: "workspace", id: "w1" }, index: null, name: null, seen: [{ id: "p1", created: 11 }, { id: "p2", created: 12 }, { id: "p3", created: 13 }] }]);
+    const no = reduce(asking, key("n"));
+    expect([runs(no), no.state.overlays]).toEqual([[], []]);
+  });
+
+  it("follow: focus moves to a new pane once the world shows it, to a moved one once it left its tab, and not after another focus move", () => {
+    const grown: World = { workspaces: [...SEEN_WORLD.workspaces, { id: "w3", name: "new", tabs: [{ id: "t9", name: "n", panes: [{ id: "p9", name: "" }] }] }] };
+    const waiting = after(seen, { type: "follow", target: { kind: "pane", id: "p9" }, away: null, at: AT });
+    expect([waiting.focus.workspace, waiting.following]).toEqual(["w1", { target: { kind: "pane", id: "p9" }, away: null }]);
+    const shown = after(waiting, { type: "world", world: grown, at: AT });
+    expect([shown.focus.workspace, focusedPane(shown), shown.following]).toEqual(["w3", "p9", null]);
+    const dropped = after(waiting, { type: "select", target: { kind: "tab", id: "t2" }, at: AT }, { type: "world", world: grown, at: AT });
+    expect([dropped.focus.workspace, focusedPane(dropped), dropped.following]).toEqual(["w1", "p3", null]);
+    const moving = after(seen, { type: "follow", target: { kind: "pane", id: "p2" }, away: "t1", at: AT });
+    expect([focusedPane(moving), moving.following?.target.id]).toEqual(["p1", "p2"]);
+    const moved: World = { workspaces: [SEEN_WORLD.workspaces[0]!, { ...SEEN_WORLD.workspaces[1]!, tabs: [...SEEN_WORLD.workspaces[1]!.tabs, { id: "t8", name: "x", panes: [{ id: "p2", name: "" }] }] }].map((workspace) => workspace.id === "w1" ? { ...workspace, tabs: [{ ...workspace.tabs[0]!, panes: [workspace.tabs[0]!.panes[0]!] }, workspace.tabs[1]!] } : workspace) };
+    const there = after(moving, { type: "world", world: moved, at: AT });
+    expect([there.focus.workspace, focusedPane(there), there.following]).toEqual(["w2", "p2", null]);
+  });
+
+  it("navigate mode moves the workspace it points at with shift+up and shift+down, and the focused pane into it with m", () => {
+    const pointing = after(seen, prefix(), text("w"), named("ARROW_DOWN"));
+    expect(pointing.mode).toEqual({ name: "navigate", preview: "w2" });
+    const up = reduce(pointing, named("ARROW_UP", { shift: true }));
+    expect([runs(up), up.state.mode.name]).toEqual([[{ type: "run", action: "navigate_move_up", target: { kind: "workspace", id: "w2" }, index: null, name: null }], "navigate"]);
+    const down = reduce(pointing, named("ARROW_DOWN", { shift: true }));
+    expect(runs(down)).toEqual([{ type: "run", action: "navigate_move_down", target: { kind: "workspace", id: "w2" }, index: null, name: null }]);
+    const move = reduce(pointing, text("m"));
+    expect([runs(move), move.state.mode.name]).toEqual([[{ type: "run", action: "navigate_move_pane", target: { kind: "pane", id: "p1" }, index: null, name: "a", to: "w2" }], "terminal"]);
+    expect(modeBar(pointing).hints.filter((hint) => hint.action.startsWith("navigate_move")).map((hint) => hint.keys)).toEqual([["shift+up"], ["shift+down"], ["m"]]);
+  });
+
+  it("a calm notice is marked calm; any other is not", () => {
+    const calm = after(seen, { type: "notice", code: "layout_unchanged", data: { action: "zoom", reason: "single_pane" }, calm: true, at: AT });
+    const plain = after(seen, { type: "notice", code: "layout_refused", data: { action: "zoom", reason: "x" }, at: AT });
+    expect([calm.notices.map((notice) => notice.calm), plain.notices.map((notice) => notice.calm)]).toEqual([[true], [undefined]]);
+  });
+});

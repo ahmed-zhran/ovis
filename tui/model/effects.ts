@@ -4,6 +4,7 @@
 import type { HerdrAction } from "../../shared/herdr-keys.ts";
 import type { InputEvent } from "../input/decode.ts";
 import type { Target } from "./focus.ts";
+import type { MoveAction } from "./keymap.ts";
 
 export type KeyInput = Extract<InputEvent, { type: "key" }>;
 export type TextInput = Extract<InputEvent, { type: "text" }>;
@@ -12,6 +13,9 @@ export type MouseInput = Extract<InputEvent, { type: "mouse" }>;
 /** What reaches a pane: the key, the text run (or what is left of it) or the paste, as read. */
 export type PaneInput = KeyInput | TextInput | PasteInput;
 
+/** A terminal as the screen showed it when an action was chosen: its address and when the core made it (null: not known). */
+export interface Seen { readonly id: string; readonly created: number | null }
+
 /**
  * An action the reducer cannot finish itself, for the caller to perform: a layout write, a jump through the
  * agent list, the goto query, or a directional focus (the caller finds the neighbour on the drawn layout and
@@ -19,11 +23,15 @@ export type PaneInput = KeyInput | TextInput | PasteInput;
  */
 export interface RunEffect {
   readonly type: "run";
-  readonly action: HerdrAction;
+  readonly action: HerdrAction | MoveAction;
   readonly target: Target | null;
   readonly index: number | null;
   /** a name typed into a field (rename, new tab) or the goto query */
   readonly name: string | null;
+  /** a close: every terminal it ends, as the screen showed them; the caller ends nothing when the core holds others */
+  readonly seen?: readonly Seen[];
+  /** a pane moved to another workspace: that workspace */
+  readonly to?: string;
 }
 
 export type Effect =

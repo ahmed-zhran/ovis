@@ -3,7 +3,8 @@
  * Focus is the screen's own: herdr-core has none, and it is never written anywhere shared.
  */
 
-export interface PaneNode { readonly id: string; readonly name: string }
+/** `created`: when the core made the pane's terminal (its `created_ms`), so a later terminal at the same address is told apart */
+export interface PaneNode { readonly id: string; readonly name: string; readonly created?: number }
 export interface TabNode { readonly id: string; readonly name: string; readonly panes: readonly PaneNode[] }
 export interface WorkspaceNode { readonly id: string; readonly name: string; readonly tabs: readonly TabNode[] }
 export interface World { readonly workspaces: readonly WorkspaceNode[] }

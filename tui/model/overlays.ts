@@ -5,7 +5,7 @@
  */
 import { parseHerdrBinding } from "../../shared/herdr-keys.ts";
 import { TEXT_FIELD_MAX_GRAPHEMES } from "./deadlines.ts";
-import type { KeyInput, PasteInput, RunEffect, TextInput } from "./effects.ts";
+import type { KeyInput, PasteInput, RunEffect, Seen, TextInput } from "./effects.ts";
 import type { Target } from "./focus.ts";
 import { charChords, chordId, keyChords } from "./keymap.ts";
 
@@ -17,7 +17,8 @@ export type TextPurpose = "rename_workspace" | "rename_tab" | "rename_pane" | "n
 export type Overlay =
   | { readonly kind: "help" }
   | { readonly kind: "text"; readonly purpose: TextPurpose; readonly target: Target; readonly field: Field }
-  | { readonly kind: "confirm"; readonly purpose: "close_workspace"; readonly target: Target }
+  /** `seen`: the terminals the close ends, as the screen showed them when the dialog opened */
+  | { readonly kind: "confirm"; readonly purpose: "close_workspace"; readonly target: Target; readonly seen: readonly Seen[] }
   | { readonly kind: "goto"; readonly field: Field };
 
 export type OverlayInput = { readonly kind: "key"; readonly event: KeyInput } | { readonly kind: "text"; readonly event: TextInput } | { readonly kind: "paste"; readonly event: PasteInput };
@@ -140,7 +141,7 @@ export const OVERLAYS: { readonly [K in Overlay["kind"]]: OverlayEntry<Extract<O
     target: (overlay) => overlay.target,
     input: (overlay, input) => {
       const yes = isEnter(input) || inputChords(input).some((chord) => chord.key === "y" && !chord.ctrl && !chord.alt && !chord.meta);
-      return yes ? { overlay: null, effects: [run(overlay.purpose, overlay.target, null)] } : { overlay, effects: [] };
+      return yes ? { overlay: null, effects: [{ ...run(overlay.purpose, overlay.target, null), seen: overlay.seen }] } : { overlay, effects: [] };
     },
   },
   goto: {
