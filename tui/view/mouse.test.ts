@@ -318,17 +318,41 @@ describe("mouse on the whole screen", () => {
     }, TEST_MS);
   }
 
-  it("a held drag stays canceled when keyboard focus returns before its next mouse report", async () => {
+  it("a held drag stays canceled when focus returns after a key read together with text", async () => {
     const run = await demo120();
-    const program = run.core.program("t1");
-    program.output("\x1b[?1002h\x1b[?1006h");
+    run.loop.dispatch({ type: "keys", keys: { cycle_pane_next: "prefix+a" }, at: run.clock.current });
+    const [t1, t2] = [run.core.program("t1"), run.core.program("t2")];
+    t1.output("\x1b[?1002h\x1b[?1006h");
     await run.advance(20);
-    await run.keys("press@30:5,ctrl+b,l,ctrl+b,h");
+
+    await run.keys("press@30:5,ctrl+b,ax"); // The binding and x are one host read.
+    expect([focusedPane(run), t1.receivedHex(), t2.receivedHex()]).toEqual([
+      "t2", hexOf("\x1b[<0;6;4M"), hexOf("x"),
+    ]);
+    await run.keys("ctrl+b,h");
     expect(focusedPane(run)).toBe("t1");
-    expect(program.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
     await run.keys("drag@31:5,release@31:5");
-    expect(program.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
+    expect(t1.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
   }, TEST_MS);
+
+  for (const [move, movesWith] of [
+    ["ctrl+b,ax", "a key read together with text"],
+    ["ctrl+b,l", "a directional key"],
+  ] as const) {
+    it(`a wheel over the new pane reaches it after focus moves with ${movesWith}`, async () => {
+      const run = await demo120();
+      run.loop.dispatch({ type: "keys", keys: { cycle_pane_next: "prefix+a" }, at: run.clock.current });
+      const [t1, t2] = [run.core.program("t1"), run.core.program("t2")];
+      t1.output("\x1b[?1002h\x1b[?1006h");
+      t2.output("\x1b[?1002h\x1b[?1006h");
+      await run.advance(20);
+      await run.keys(`press@30:5,${move}`);
+      expect([focusedPane(run), t1.receivedHex()]).toEqual(["t2", hexOf("\x1b[<0;6;4M")]);
+      const before = t2.receivedHex();
+      await run.keys("wheelup@80:5");
+      expect(t2.receivedHex().slice(before.length)).toBe(hexOf("\x1b[<64;8;4M"));
+    }, TEST_MS);
+  }
 
   for (const [binding, keys, typed] of [
     ["next pane on prefix+a", { cycle_pane_next: "prefix+a" }, "ax"],

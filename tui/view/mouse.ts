@@ -125,8 +125,9 @@ export class Pointer {
     }
   }
 
-  /** A key, text or paste goes to `pane`: a pane scrolled back shows its newest rows again first. */
+  /** Before input is routed to `pane`, drop a forward grab on any other pane and show the newest rows. */
   typed(pane: string, look: PaneLook | null): PointerAct[] {
+    if (this.grab.kind === "forward" && this.grab.pane !== pane) this.grab = NONE;
     return look && rowsAboveBottom(look) > 0 ? [{ kind: "scroll", pane, fromBottom: 0 }] : [];
   }
 
