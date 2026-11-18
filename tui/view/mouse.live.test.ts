@@ -32,7 +32,9 @@ const hex = (text: string): string => Buffer.from(text, "latin1").toString("hex"
 const osc52Of = (text: string): string => `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x1b\\`;
 
 /**
- * The pane's program: raw input, each read appended to `file` and printed as `IN:<hex>`. `mouse` "1" turns mouse
+ * The pane's program: raw input, each read appended to `file` and printed as `IN:<hex>`; after a read that holds a
+ * mouse release it prints `UP:<releases so far>`, a line short enough for any pane (an `IN:` line of a press and a
+ * release read at once is wider than a half-width pane, which draws it on two rows). `mouse` "1" turns mouse
  * reporting on at its first read, "2" at its start, "0" never.
  */
 const PROGRAM = `
@@ -41,9 +43,12 @@ const { appendFileSync } = require("node:fs");
 process.stdin.setRawMode(true);
 process.stdout.write(mouse === "1" ? "TYPE-G\\r\\n" : mouse === "2" ? "\\x1b[?1000h\\x1b[?1006hMOUSE-ON\\r\\n" : "SELECT-ME\\r\\n");
 let first = true;
+let releases = 0;
 process.stdin.on("data", (bytes) => {
   appendFileSync(file, bytes);
   process.stdout.write("IN:" + Buffer.from(bytes).toString("hex") + "\\r\\n");
+  const released = (Buffer.from(bytes).toString("latin1").match(/\\x1b\\[<[0-9;]*m/g) || []).length;
+  if (released) process.stdout.write("UP:" + (releases += released) + "\\r\\n");
   if (first && mouse === "1") process.stdout.write("\\x1b[?1000h\\x1b[?1006hMOUSE-READY\\r\\n");
   first = false;
 });
@@ -163,7 +168,7 @@ describe.skipIf(!bin || process.platform === "win32")("the mouse at the screen's
     // the second pane's program asked for the mouse: the first click only focuses it, the second reaches it in its cells
     type(run, "click@70:5");
     type(run, "click@70:5");
-    await run.until(/IN:[0-9a-f]*6d/, "the second click at the second program");
+    await run.until("UP:1", "the second click at the second program");
     expect(readFileSync(second, "latin1")).toBe("\x1b[<0;8;4M\x1b[<0;8;4m");
     expect(readFileSync(file, "latin1")).toBe("");
     // the divider dragged from x 61 to x 50: the first side is 27 of 76 columns
@@ -174,6 +179,8 @@ describe.skipIf(!bin || process.platform === "win32")("the mouse at the screen's
     const doc = await hc.call("doc.get", { name: OVIS_LAYOUT_DOC });
     const tab = (doc.value as { workspaces: { tabs: { id: string; root: { ratio?: number } }[] }[] }).workspaces[0]!.tabs.find((one) => one.id === "one")!;
     expect(tab.root.ratio).toBe(27 / 76);
+    // the drag reached the divider alone, and no click came after the one the program got
+    expect(readFileSync(second, "latin1")).toBe("\x1b[<0;8;4M\x1b[<0;8;4m");
     // the tab bar: " 1:one  2:two" from x 24
     type(run, "click@33:0");
     await run.until("SELECT-ME", "the second tab's pane");
