@@ -16,7 +16,7 @@ import { agentInfoOf, agentOfStatus, type CoreHost, coreHost, buildSnapshot, typ
 import { type CoreChange, coreModel, type SessionNote } from "./core-model.ts";
 import { EVENT_LINE_BYTES, openEventStream } from "./event-stream.ts";
 import { AdapterError } from "./errors.ts";
-import { layoutCalls, LayoutStore, moveBesideEdit, ownsLayout, ratioEdit, resizeEdit, swapEdit, zoomEdit } from "./layout-ops.ts";
+import { layoutCalls, LayoutStore, moveBesideEdit, newLayoutId, ownsLayout, ratioEdit, RESIZE_STEP, resizeEdit, swapEdit, zoomEdit } from "./layout-ops.ts";
 import { checkoutHolding, defaultCheckoutPath, factsOf, git, gitDirIdentity, labeledWorktree, realPath, type Checkout, type Repository, repositoryOf, WORKTREE_LABEL, WorktreeError, worktreeFolder, worktreeLabel } from "./worktrees.ts";
 import type { SessionSnapshot, WorkspaceWorktreeInfo } from "../../shared/herdr-api.generated.ts";
 import type { WorktreeInfo } from "../herdr/worktree-info.ts";
@@ -560,7 +560,7 @@ function createAnswers(hc: HcConnection, firstTurn: FirstTurn, forgetTurns: (liv
     if (!found.own) throw new AdapterError("unsupported", "the Herdr app arranges this core's workspaces, tabs and panes");
     return found;
   };
-  const layouts = new LayoutStore(hc, { snapshot: read, newId: () => `ovis-${crypto.randomUUID()}`, terminal, terminalEnv: options.terminalEnv, startFolder });
+  const layouts = new LayoutStore(hc, { snapshot: read, newId: newLayoutId, terminal, terminalEnv: options.terminalEnv, startFolder });
   /** A name asked for, as herdr's rename takes it: the workspace-routes refuse an empty one first. */
   const nameOf = (params: Record<string, unknown>): string => {
     const name = params["label"];
@@ -976,7 +976,7 @@ function createAnswers(hc: HcConnection, firstTurn: FirstTurn, forgetTurns: (liv
     async "pane.resize"(params) {
       const paneId = paneIdOf(params);
       const direction = paneDirection(params["direction"]);
-      const amount = typeof params["amount"] === "number" && Number.isFinite(params["amount"]) ? params["amount"] : 0.05;
+      const amount = typeof params["amount"] === "number" && Number.isFinite(params["amount"]) ? params["amount"] : RESIZE_STEP;
       const { changed, reason } = await layouts.edit(resizeEdit(paneId, direction, amount));
       return { resize: await outcome(paneId, changed, reason) };
     },

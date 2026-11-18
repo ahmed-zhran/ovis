@@ -13,6 +13,15 @@ export function ownsLayout(doc: unknown): boolean {
   return doc === null || doc === undefined;
 }
 
+/** What every terminal Ovis starts gets over its environment outside Windows: Ovis's terminal views draw 24-bit colour. */
+export const TERMINAL_COLOUR: Readonly<Record<string, string>> = Object.freeze({ TERM: "xterm-256color", COLORTERM: "truecolor" });
+
+/** How far a resize moves a pane's border when the call names no amount: this share of its split. */
+export const RESIZE_STEP = 0.05;
+
+/** A new workspace's or tab's id: `ovis-` and a random UUID, so no two clients make the same one. */
+export const newLayoutId = (): string => `ovis-${crypto.randomUUID()}`;
+
 /** Whether this core writes documents, by what its hello names (never its version): Ovis's layout needs `doc.set`. */
 export function layoutCalls(hello: { methods: readonly string[] }): boolean {
   return hello.methods.includes("doc.set");
