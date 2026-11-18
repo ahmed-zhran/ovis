@@ -225,6 +225,23 @@ describe("with-core's options", () => {
     expect(leftovers(run)).toEqual(NOTHING_LEFT);
   }, TEST_MS);
 
+  it("redirects plugin discovery and status away from the caller's herdr and Ovis", async () => {
+    const env = callerEnv({
+      HERDR_SOCKET: "/not-the-test/herdr.sock", PORT: "7317",
+      HERDR_PLUGIN_CONFIG_DIR: "/not-the-test/config", HERDR_PLUGIN_STATE_DIR: "/not-the-test/state",
+      HC_SOCKET: "/not-the-test/hc.sock", OVIS_TEST_HC_BIN: undefined,
+    });
+    const run = helper(["--no-core", "--", "sh", "-c",
+      'printf "%s\\n" "${HERDR_SOCKET-unset}" "$PORT" "$HC_SOCKET" "$HERDR_PLUGIN_CONFIG_DIR" "$HERDR_PLUGIN_STATE_DIR"'], env);
+    expect(await run.exited).toBe(0);
+    const root = run.stderr().match(/root=(\S+)/)?.[1];
+    expect(root).toBeDefined();
+    expect(run.stdout().trimEnd().split("\n")).toEqual([
+      "unset", "1", `${root}/run/hc.sock`, `${root}/plugin-config`, `${root}/plugin-state`,
+    ]);
+    expect(leftovers(run)).toEqual(NOTHING_LEFT);
+  }, TEST_MS);
+
   it("--no-core starts no hc: a stand-in hc first on PATH logs nothing", async () => {
     const dir = join(scratch, "standin");
     mkdirSync(dir);

@@ -16,6 +16,7 @@
  *
  * The command gets the caller's environment without any HC_*, XDG_*, OVIS_* or HERDR_WEB_* name,
  * then the isolated core's (HC_SOCKET, HC_SESSION, XDG_*), a scratch HOME and HERDR_TEST_SESSION.
+ * It does not inherit HERDR_SOCKET and uses scratch plugin folders and closed port 1.
  * It runs as the leader of a process group of its own (`detached: true`: Bun starts it through
  * setsid()), which a signal or the time limit ends as a whole, while the helper has not reaped it.
  * The core's cleanup goes through scripts/test-hc.ts, which kills only a pid proven to be that core's.
@@ -167,7 +168,7 @@ function parse(args: string[]): Options {
 /** The caller's environment without anything that names a core, a session folder or an Ovis server. */
 function cleanedEnv(): Record<string, string> {
   return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] =>
-    entry[1] !== undefined && !/^(HC_|XDG_|OVIS_|HERDR_WEB_)/.test(entry[0])));
+    entry[1] !== undefined && entry[0] !== "HERDR_SOCKET" && !/^(HC_|XDG_|OVIS_|HERDR_WEB_)/.test(entry[0])));
 }
 
 /** HC_SOCKET, HC_SESSION and XDG_* from a `KEY=value` (or `export KEY='value'`) file, refused unless the socket is a trial's. */
@@ -287,7 +288,10 @@ async function main(): Promise<number> {
   }
   console.error(`with-core: root=${folder.root}`);
 
-  const env: Record<string, string> = { ...cleanedEnv(), ...folder.env, HERDR_TEST_SESSION: `with-core-${process.pid}` };
+  const env: Record<string, string> = {
+    ...cleanedEnv(), ...folder.env, HERDR_TEST_SESSION: `with-core-${process.pid}`, PORT: "1",
+    HERDR_PLUGIN_CONFIG_DIR: join(folder.root, "plugin-config"), HERDR_PLUGIN_STATE_DIR: join(folder.root, "plugin-state"),
+  };
   if (options.mode === "core" && !finishing) {
     core = new IsolatedCore(bin, folder);
     try {
