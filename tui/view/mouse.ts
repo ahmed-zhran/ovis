@@ -4,9 +4,8 @@
  * sidebar toggle, or grabs a divider. Over a pane that is not focused a press only focuses it. Over the focused
  * pane the event goes to its program, in its own grid's cells, when the program asked for a mouse mode and shift
  * is not held; otherwise the wheel scrolls the pane's history here and a drag selects, and the release copies.
- * A program gets a drag and its release only after the press that began them went to it; a drag begun anywhere
- * else (the press that only focused its pane, the chrome, another pane) reaches no program. Over an open overlay
- * only its close control acts.
+ * A program gets a drag and its release only if its press went there and its pane has kept the focus.
+ * Over an open overlay only its close control acts.
  * The answer is a list of acts for the loop to perform; nothing here writes, sends or draws.
  */
 import type { LayoutNode, SplitDirection } from "../../server/herdr-core/layout-doc.ts";
@@ -83,6 +82,11 @@ export class Pointer {
   private grab: Grab = NONE;
   private selection: Selection | null = null;
   private grabs = 0;
+
+  /** A forwarded drag ends as soon as focus leaves its pane, even if focus returns before the next mouse report. */
+  focusChanged(pane: string | null): void {
+    if (this.grab.kind === "forward" && this.grab.pane !== pane) this.grab = NONE;
+  }
 
   mouse(over: "overlay" | "screen", event: MouseInput, scene: PointerScene): PointerAct[] {
     if (over === "overlay") {

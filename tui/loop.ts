@@ -417,6 +417,7 @@ export function startLoop(options: LoopOptions): Loop {
     const pane = focused(state.world, state.focus).pane?.id ?? null;
     if (pane !== paneFocus) {
       paneFocus = pane;
+      pointer.focusChanged(pane);
       panes.focus(pane);
     }
   }

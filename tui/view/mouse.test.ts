@@ -186,7 +186,7 @@ const osc52Of = (text: string): string => `\x1b]52;c;${Buffer.from(text, "utf8")
  * The host's screen as the bytes written to it draw it: every write replayed into an emulator standing in for the host
  * terminal. `text` of row `row` from column `from` to `to`; `inverted` only the cells drawn with inverse video.
  */
-async function hostScreen(run: Run): Promise<{ text: (row: number, from: number, to: number) => string; inverted: (row: number, from: number, to: number) => string }> {
+async function hostScreen(run: Run) {
   const made = await createEmulator({ cols: 120, rows: 40, events: {} });
   if (!made.ok) throw new Error(made.error.message);
   const host = made.value;
@@ -211,7 +211,13 @@ async function hostScreen(run: Run): Promise<{ text: (row: number, from: number,
       }
       return text;
     };
-    return { text: (row, from, to) => pick(row, from, to, false), inverted: (row, from, to) => pick(row, from, to, true) };
+    const cursor = host.cursorState();
+    if (!cursor.ok) throw new Error(cursor.error.message);
+    return {
+      text: (row: number, from: number, to: number) => pick(row, from, to, false),
+      inverted: (row: number, from: number, to: number) => pick(row, from, to, true),
+      cursor: cursor.value,
+    };
   } finally {
     host.dispose();
   }
@@ -225,6 +231,60 @@ const focusedPane = (run: Run): string | undefined => {
 const docSets = (run: Run) => run.sent.filter((frame) => frame.channel === 0 && new TextDecoder().decode(frame.payload).includes("\"doc.set\""));
 
 describe("mouse on the whole screen", () => {
+  for (const [move, keys, focus, left] of [
+    ["a directional key", "ctrl+b,l", "t2", 73],
+    ["a press on the sidebar", "press@3:3", "t4", 25],
+    ["a press on another tab", "press@34:0", "t3", 25],
+    ["a tab switch key", "ctrl+b,n", "t3", 25],
+    ["a workspace switch key", "ctrl+b,w,2", "t4", 25],
+  ] as const) {
+    it(`a held drag ends when ${move} moves focus; a new press starts a new grab`, async () => {
+      const run = await demo120();
+      const old = run.core.program("t1");
+      old.output("\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+      run.core.program("t2").output("\x1b[?1004h");
+      await run.advance(20);
+      const start = old.receivedHex().length;
+      await run.keys("press@30:5");
+      expect(old.receivedHex().slice(start)).toBe(hexOf("\x1b[<0;6;4M"));
+
+      await run.keys(keys);
+      expect(focusedPane(run)).toBe(focus);
+      await run.live();
+      const next = run.core.program(focus);
+      if (focus === "t2") {
+        expect(old.receivedHex().slice(start)).toBe(hexOf("\x1b[<0;6;4M\x1b[O"));
+        expect(next.receivedHex()).toBe(hexOf("\x1b[I"));
+      }
+      const oldBefore = old.receivedHex();
+      const newBefore = next.receivedHex();
+      await run.keys("drag@31:5");
+      // Program output forces the next frame without another key to resync the pane focus.
+      next.output("\x1b[?1002h\x1b[?1006h\x1b[4;3H@");
+      await run.advance(20);
+      expect({ old: old.receivedHex(), next: next.receivedHex(), focus: focusedPane(run), cursor: (await hostScreen(run)).cursor }).toMatchObject({
+        old: oldBefore, next: newBefore, focus, cursor: { x: left + 3, y: 5, visible: true },
+      });
+
+      await run.keys("release@31:5");
+      expect([old.receivedHex(), next.receivedHex()]).toEqual([oldBefore, newBefore]);
+      await run.keys(`press@${left + 5}:5,drag@${left + 6}:5,release@${left + 6}:5`);
+      expect(next.receivedHex().slice(newBefore.length)).toBe(hexOf("\x1b[<0;6;4M\x1b[<32;7;4M\x1b[<0;7;4m"));
+    }, TEST_MS);
+  }
+
+  it("a held drag stays canceled when keyboard focus returns before its next mouse report", async () => {
+    const run = await demo120();
+    const program = run.core.program("t1");
+    program.output("\x1b[?1002h\x1b[?1006h");
+    await run.advance(20);
+    await run.keys("press@30:5,ctrl+b,l,ctrl+b,h");
+    expect(focusedPane(run)).toBe("t1");
+    expect(program.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
+    await run.keys("drag@31:5,release@31:5");
+    expect(program.receivedHex()).toBe(hexOf("\x1b[<0;6;4M"));
+  }, TEST_MS);
+
   it("mouse: a press over a pane with 1002 and 1006 arrives in pane-local cells; over chrome nothing is forwarded; with shift, or with no mouse mode, nothing is forwarded and a selection starts", async () => {
     const run = await demo120();
     expect(focusedPane(run)).toBe("t1");
