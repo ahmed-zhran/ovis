@@ -522,6 +522,41 @@ const RESTING: [state: string, enter: () => Promise<Resting>][] = [
     expect(run.loop.report().actions).toContain("divider:done");
     return { run };
   }],
+  ["the close-workspace dialog open", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("ctrl+b,D");
+    expect(run.loop.report().mode.overlays).toEqual(["confirm"]);
+    return { run };
+  }],
+  ["a rename field open", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("ctrl+b,T,x");
+    expect(run.loop.report().mode.overlays).toEqual(["text"]);
+    return { run };
+  }],
+  ["after a split, the new pane focused", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("ctrl+b,v");
+    await run.live();
+    const state = run.loop.model();
+    expect([run.loop.panes.views().map((view) => view.terminal).sort(), state.focus.panes[state.focus.tabs[state.focus.workspace!]!]]).toEqual([["t1", "t2", "t5"], "t5"]);
+    return { run };
+  }],
+  ["after a layout write that changed nothing", async () => {
+    const run = await start({ fixture: demo });
+    await run.live();
+    await run.advance(1);
+    await run.keys("ctrl+b,H");
+    await run.advance(20);
+    expect(run.loop.model().notices.map((notice) => [notice.code, notice.calm])).toEqual([["layout_unchanged", true]]);
+    return { run };
+  }],
 ];
 
 describe("nothing in, nothing out, in every state the screen rests in", () => {

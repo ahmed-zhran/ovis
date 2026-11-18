@@ -15,6 +15,7 @@ import type { HcTransport, HelloInfo } from "../server/herdr-core/connection.ts"
 import { editLayout } from "../server/herdr-core/layout-ops.ts";
 import type { ScreenRange } from "./emulator/index.ts";
 import { DividerWrites } from "./core/divider.ts";
+import { LayoutWrites } from "./core/layout.ts";
 import { type CoreLink, type LinkNotice, type LinkState, openLink } from "./core/link.ts";
 import { createPanes, type PaneInput, type PaneNotice, type Panes, type PaneView } from "./core/pane.ts";
 import { CoreWorld, focusDirection, paneToward } from "./core/world.ts";
@@ -211,6 +212,18 @@ export function startLoop(options: LoopOptions): Loop {
     },
   });
 
+  const layout = new LayoutWrites({
+    hc: link,
+    model: world.model,
+    folder: options.cwd,
+    answer: (answer) => {
+      guard(() => dispatch(answer.type === "notice"
+        ? { type: "notice", code: answer.code, data: answer.data, ...(answer.calm ? { calm: true } : {}), at: clock.now() }
+        : { type: "follow", target: answer.target, away: answer.away, at: clock.now() }));
+      arm();
+    },
+  });
+
   function onLinkNotice(notice: LinkNotice): void {
     panes.notice(notice);
     if (notice.type === "state") {
@@ -297,7 +310,8 @@ export function startLoop(options: LoopOptions): Loop {
           if (toward !== null) dispatch({ type: "select", target: { kind: "pane", id: toward }, at: clock.now() });
           return;
         }
-        // layout writes and the agent list come with later rows of the plan: one notice per press, never silence
+        if (layout.run(effect) !== null) return;
+        // the agent list comes with a later row of the plan: one notice per press, never silence
         dispatch({ type: "notice", code: "not_built", data: { action: effect.action }, at: clock.now() });
         return;
       }
