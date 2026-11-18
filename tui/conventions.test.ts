@@ -68,27 +68,47 @@ describe("import closure of tui/main.ts", () => {
     ]);
   });
 
+  const snapshot = "server/herdr-core/snapshot.ts";
+  const scanSnapshot = (source: string) => closure("tui/main.ts", (path) =>
+    path === "tui/main.ts" ? 'import "../server/herdr-core/snapshot.ts";' : path === snapshot ? source : undefined);
+
   it("allows snapshot's foreground-job type without allowing a runtime import", () => {
-    const snapshot = "server/herdr-core/snapshot.ts";
-    const graph: Record<string, string> = {
-      "tui/main.ts": 'import "../server/herdr-core/snapshot.ts";',
-      "server/foreground-job.ts": 'import "./darwin-process.ts";',
-    };
-    const scan = (declaration: string) => closure("tui/main.ts", (path) =>
-      path === snapshot ? declaration : graph[path]);
-    const types = scan('import type { JobProcess } from "../foreground-job.ts";');
+    const types = scanSnapshot('import type { JobProcess } from "../foreground-job.ts";');
     expect(types.reached).toContain(snapshot);
     expect(types.reached).not.toContain("server/foreground-job.ts");
     expect(types.offenders).toEqual([]);
-    expect(scan('import { jobProcessesBelow } from "../foreground-job.ts";').offenders).toEqual([
+    expect(scanSnapshot('import { jobProcessesBelow } from "../foreground-job.ts";').offenders).toEqual([
       "server/herdr-core/snapshot.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
+    ]);
+  });
+
+  it("rejects a value import after a type export without a semicolon", () => {
+    const { offenders } = scanSnapshot([
+      "type Probe62 = number",
+      "export type { Probe62 }",
+      'import { jobProcessesBelow } from "../foreground-job.ts";',
+    ].join("\n"));
+    expect(offenders).toEqual([
+      "server/herdr-core/snapshot.ts:3: ../foreground-job.ts (server/foreground-job.ts)",
+    ]);
+  });
+
+  it("rejects foreground-job type imports outside snapshot and other server types inside it", () => {
+    const graph: Record<string, string> = {
+      "tui/main.ts": 'import "../server/herdr-core/snapshot.ts";\nimport "../server/herdr-core/core-model.ts";',
+      [snapshot]: 'import type { Conversation } from "../conversation.ts";',
+      "server/herdr-core/core-model.ts": 'import type { JobProcess } from "../foreground-job.ts";',
+    };
+    expect(closure("tui/main.ts", (path) => graph[path]).offenders).toEqual([
+      "server/herdr-core/snapshot.ts:1: ../conversation.ts (server/conversation.ts)",
+      "server/herdr-core/core-model.ts:1: ../foreground-job.ts (server/foreground-job.ts)",
     ]);
   });
 });
 
 describe("the screen's product code", () => {
   it("starts no process and never imports tui/testing/", () => {
-    const testing = productCode().flatMap((file) => relativeImports(file, stripComments(read(file)))
+    const testing = productCode().flatMap((file) => relativeImports(file, read(file))
       .filter(({ target }) => target.startsWith("tui/testing/")).map(({ line, specifier }) => `${file}:${line}: ${specifier}`));
     fail([...matches(productCode(), /\bBun\s*\.\s*(?:spawnSync|spawn|\$)|["'](?:node:)?child_process["']/), ...testing],
       "The screen starts no process (no Bun.spawn, Bun.spawnSync, Bun.$ or node:child_process) and never imports tui/testing/: the launcher starts the core, and only test files and the tooling under tui/testing/ start processes.");

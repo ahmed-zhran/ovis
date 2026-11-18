@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import ts from "typescript-api";
 
 export const repo = join(import.meta.dir, "..");
 
@@ -43,23 +44,36 @@ export function stripComments(text: string, { strings = false } = {}): string {
 
 export const lineOf = (text: string, index: number): number => text.slice(0, index).split("\n").length;
 
-/**
- * Module specifiers of static imports and re-exports, side-effect imports and `import("…")` with a literal (as in
- * scripts/conventions.test.ts). A declaration never runs on into the next `import`: one that no semicolon ends would
- * otherwise take the import after it for its own `from` and hide what that import names.
- */
-const SPECIFIER = /(?:^|[\s;])(?:import|export)\s(?:(?!\bimport\b)[^;])*?\sfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/gm;
-
-/** Each relative import of `code` (comments removed), as the repository path it names and its line. */
+/** Each literal relative import or re-export, as the repository path it names and its line. */
 export function relativeImports(file: string, code: string): { target: string; line: number; specifier: string; typeOnly: boolean }[] {
-  return [...code.matchAll(SPECIFIER)].flatMap((match) => {
-    const specifier = match[1] ?? match[2] ?? match[3]!;
-    if (!specifier.startsWith(".")) return [];
-    // the match may start with the newline before the import
-    const at = match.index + match[0].search(/\S/);
-    const typeOnly = /^(?:import|export)\s+type\s*(?:\{|\*)/.test(match[0].slice(at - match.index));
-    return [{ target: posix.normalize(posix.join(posix.dirname(file), specifier.replace(/\?.*$/, ""))), line: lineOf(code, at), specifier, typeOnly }];
-  });
+  const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest);
+  const imports: { target: string; line: number; specifier: string; typeOnly: boolean }[] = [];
+  function visit(node: ts.Node): void {
+    let module: ts.Node | undefined;
+    let typeOnly = false;
+    if (ts.isImportDeclaration(node)) {
+      module = node.moduleSpecifier;
+      const clause = node.importClause;
+      // Only declaration-level named and namespace type imports qualify for the exception.
+      typeOnly = clause?.isTypeOnly === true && clause.name === undefined && clause.namedBindings !== undefined;
+    } else if (ts.isExportDeclaration(node)) {
+      module = node.moduleSpecifier;
+      typeOnly = node.isTypeOnly;
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      module = node.arguments[0];
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+      module = node.argument.literal;
+    }
+    if (module && ts.isStringLiteralLike(module) && module.text.startsWith(".")) {
+      const specifier = module.text;
+      const target = posix.normalize(posix.join(posix.dirname(file), specifier.replace(/\?.*$/, "")));
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+      imports.push({ target, line, specifier, typeOnly });
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return imports;
 }
 
 /**
@@ -80,7 +94,7 @@ export function importClosure(
     const file = queue.shift()!;
     const text = /\.(?:ts|tsx|mjs|js)$/.test(file) ? source(file) : undefined;
     if (text === undefined) continue;
-    for (const { target, line, specifier, typeOnly } of relativeImports(file, stripComments(text))) {
+    for (const { target, line, specifier, typeOnly } of relativeImports(file, text)) {
       if (typeOnly && ignoreTypeOnly?.(file, target)) continue;
       if (!follow(target)) offenders.push(`${file}:${line}: ${specifier} (${target})`);
       else if (!reached.has(target)) {
