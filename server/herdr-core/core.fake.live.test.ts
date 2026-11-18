@@ -628,9 +628,10 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
    * One line's view of two attaches written in one turn, beside an idle viewer that stays: per round this line (A) closes, then
    * another viewer's attach with a new size and A's attach with the size the terminal had are written together, and A's line is read
    * frame by frame (attachOrder's names). Counted only where the core applied the other attach first: the terminal then ends at A's
-   * size, and A's line hears the other's size and then its own.
+   * size, and A's line hears the other's size and then its own. At least `least` rounds, and on, to at most `most`, until the
+   * other's event was heard behind A's reply once: how soon that comes is the core's timing.
    */
-  async function meetings(socket: string, rounds: number): Promise<{ first: number; behind: number; wrong: string[]; sample: string[] }> {
+  async function meetings(socket: string, least: number, most: number): Promise<{ rounds: number; first: number; behind: number; wrong: string[]; sample: string[] }> {
     const control = (await line(socket)).hc;
     const raws = await Promise.all([connectCoreSocket(socket), connectCoreSocket(socket), connectCoreSocket(socket)]);
     const [a, r, s] = raws.map((raw) => {
@@ -681,7 +682,7 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       };
       return { state, call, attach: (cols: number, rows: number) => call("terminal.attach", { terminal: state.terminal, cols, rows, resumed: true }), close: () => raw.write(encodeFrame(state.stream, FRAME_CLOSE, new Uint8Array(0))) };
     });
-    const counts = { first: 0, behind: 0, wrong: [] as string[], sample: [] as string[] };
+    const counts = { rounds: 0, first: 0, behind: 0, wrong: [] as string[], sample: [] as string[] };
     try {
       const terminal = (await control.call("terminal.run", { argv: ["sleep", "1000"] })).address;
       for (const viewer of [a!, r!, s!]) {
@@ -696,7 +697,8 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
       await until("A's first bytes", () => a!.state.heard.includes("bytes"));
       s!.attach(100, 30);
       await until("the idle viewer's first bytes", () => s!.state.heard.includes("bytes"));
-      for (let round = 0; round < rounds; round++) {
+      for (let round = 0; round < most && (round < least || counts.behind === 0); round++) {
+        counts.rounds++;
         const other = `${110 + (round % 40)}x35`;
         const heard = a!.state.heard;
         const closing = heard.length;
@@ -734,13 +736,14 @@ describe.skipIf(!bin)("the fake herdr-core against a real hc", () => {
   }
 
   it("k3 a line's attach reply can overtake the event of a change another viewer made just before it, which comes before the attach's own", async () => {
-    const ROUNDS = 60;
-    const seen = await meetings(real.socket, ROUNDS);
-    console.log(`k3: ${seen.first} of ${ROUNDS} rounds the other attach was applied first; its event came behind this line's reply in ${seen.behind}; e.g. ${seen.sample.join(", ")}`);
+    // sixty rounds heard the late order as few as 3 times in a measured run (docs/tui/parity.md has the rates), so sixty alone could
+    // miss it: the rounds go on until it was heard once
+    const seen = await meetings(real.socket, 60, 600);
+    console.log(`k3: ${seen.first} of ${seen.rounds} rounds the other attach was applied first; its event came behind this line's reply in ${seen.behind}; e.g. ${seen.sample.join(", ")}`);
     // every round keeps what the fake keeps: the own event after the reply, an earlier change's event before the own
     expect(seen.wrong).toEqual([]);
-    // and the order `late` stands for happens on this core: in the measured runs in a sixth to more than half of such races
-    expect(seen.first).toBeGreaterThan(ROUNDS / 2);
+    // and the order `late` stands for happens on this core
+    expect(seen.first).toBeGreaterThan(seen.rounds / 2);
     expect(seen.behind).toBeGreaterThan(0);
   }, TEST_MS * 2);
 

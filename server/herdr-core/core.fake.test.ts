@@ -308,12 +308,14 @@ describe("fake herdr-core: size rules (probe c, both versions)", () => {
     expect(await meet()).toEqual(["size 120x40", "reply", "bytes", "size 100x30"]);
     hold = true;
     expect(await meet()).toEqual(["reply", "bytes", "size 120x40", "size 100x30"]);
-    // a held event with no frame of its line behind it goes out as the event loop turns
+    // a held event with no frame of its line behind it goes out as the event loop turns, and a later one waits behind it, held or not
     const from = core.log.length;
     core.emit("size", t, { cols: 90, rows: 28 });
-    expect([core.heldEvents(), heard(from)]).toEqual([1, []]);
+    hold = false;
+    core.emit("size", t, { cols: 91, rows: 28 });
+    expect([core.heldEvents(), heard(from)]).toEqual([2, []]);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect([core.heldEvents(), heard(from)]).toEqual([0, ["size 90x28"]]);
+    expect([core.heldEvents(), heard(from)]).toEqual([0, ["size 90x28", "size 91x28"]]);
   });
 
   it("any RESIZE is a stamp, also at the current size", async () => {
