@@ -46,8 +46,9 @@ import type { PaneInput } from "./pane.ts";
  * and no screen may have sent anything but a resumed attach and CLOSE outside the user's input.
  *
  * In a quarter of the sequences a third screen joins, and in three in ten the fake sends a size event
- * behind the reply of an attach written in the same turn (its `late` option: in long runs real cores do
- * so in a fifth to more than half of such races). There the row's sentence does not hold, and docs/tui/parity.md
+ * behind the reply of an attach written in the same turn (its `late` option: real cores did so in 10 to
+ * 51 percent of such races over one verification's runs of 1,200, depending on who else listens to the
+ * core and views the terminal: a range of runs, not a bound). There the row's sentence does not hold, and docs/tui/parity.md
  * says why: on the wire another screen's repaint and a viewer's choice are the same resumed attach,
  * and an earlier change's event behind a reply reads like a later choice, so a repaint can keep or take
  * an older size. For those tails with no viewer whose input leads, only this is asserted: the terminal

@@ -880,6 +880,31 @@ describe("a repaint advertises the size the last viewer chose", () => {
     }
   });
 
+  it("a viewed size heard inside the gap is not awaited as the repaint's own event: the other viewer taking another size and leaving makes nothing attach again", async () => {
+    for (const options of [{}, OLD]) {
+      const { core, stage, screen, t, rival } = await inGap(options, true);
+      // the other viewer chooses 110x35 inside the gap, and the pane's repaint advertises it: an attach that changes nothing
+      await rival.detach();
+      await rival.attach(t, 110, 35, true);
+      await stage.settle();
+      screen.release();
+      await stage.settle();
+      expect([asked(screen, t), core.size(t)]).toEqual([["80x24", "110x35"], "110x35"]);
+      // no frame pass: the repaint is in use and not shown yet when the other viewer takes another size and leaves. The core hands
+      // the terminal to the pane at the 110x35 its attach advertises: that event is no sign that the repaint took the terminal
+      // from a choice, so the 100x30 the viewer left behind is not attached for
+      await rival.detach();
+      await rival.attach(t, 100, 30, true);
+      await stage.settle();
+      await rival.detach();
+      await stage.settle();
+      await stage.pass();
+      expect(await steady(stage, core, t)).toEqual(Array(10).fill("5/110x35"));
+      expect([asked(screen, t), core.viewers(t).length, screen.state(t), screen.sent(t, SIZE_FRAMES)]).toEqual([["80x24", "110x35"], 1, "Live", []]);
+      expect(core.events(t, "size").slice(-3)).toEqual(["size 110x35", "size 100x30", "size 110x35"]);
+    }
+  });
+
   it("a driving viewer's resize inside the gap stays, and the repaint advertises it", async () => {
     for (const options of [{}, OLD]) {
       const { core, stage, screen, t, rival } = await inGap(options, false);
@@ -1237,7 +1262,9 @@ describe("three screens on one terminal: what holds when two of them repaint in 
         // the row's sentence holds in the orders where A fires after another screen: A attached with its rectangle last, 100x30.
         // Where A fires first, B takes C's repaint at B's older 110x35 for a choice and is made again with it: the limit pinned here
         expect([core.size(t), core.viewers(t).length]).toEqual([rests, 3]);
-        expect(core.size(t)).not.toBe(`${HEADLESS.cols}x${HEADLESS.rows}`);
+        // and no attach of any screen advertised the size of a terminal nobody views, which all three heard between their CLOSEs
+        expect([a, b, c].flatMap((screen) => asked(screen, t))).not.toContain(`${HEADLESS.cols}x${HEADLESS.rows}`);
+        expect(core.events(t, "size")).toContain(`size ${HEADLESS.cols}x${HEADLESS.rows}`);
         // nothing attaches again and nothing else is sent for fifty steps
         const wire = () => `${traffic(core).attaches} attaches, ${traffic(core).closes} CLOSE, ${traffic(core).sizes} size events, the terminal ${core.size(t)}`;
         const still = wire();
