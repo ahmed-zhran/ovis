@@ -81,8 +81,9 @@ export interface CoreRead {
  * 0.1.17 and 0.1.18 keep it until `terminal.rm`). A terminal someone killed, or one finished by the core stopping, leaves
  * at once, as in the browser.
  */
-function keepsPlace(record: Record<string, unknown>): Record<string, unknown> {
-  return record["state"] === "finished" && record["reason"] === "exited" ? { ...record, state: "live" } : record;
+export function keepsPlace<T extends object>(record: T): T {
+  const fields = record as Record<string, unknown>;
+  return fields["state"] === "finished" && fields["reason"] === "exited" ? { ...record, state: "live" } : record;
 }
 
 function byAddress(terminals: readonly unknown[]): Map<string, Record<string, unknown>> {
