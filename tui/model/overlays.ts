@@ -104,19 +104,21 @@ function closes(ids: ReadonlySet<string>, input: OverlayInput): boolean {
   return inputChords(input).some((chord) => ids.has(chordId(chord)));
 }
 
-const isEnter = (input: OverlayInput) => input.kind === "key" && (input.event.key === "ENTER" || input.event.key === "NUMPAD_ENTER") && Object.keys(input.event.mods).length === 0;
+export const isEnter = (input: OverlayInput) => input.kind === "key" && (input.event.key === "ENTER" || input.event.key === "NUMPAD_ENTER") && Object.keys(input.event.mods).length === 0;
+
+export function editField(current: Field, input: OverlayInput): Field {
+  if (input.kind !== "key") return insert(current, input.event.text);
+  const next = edit(current, input.event);
+  if (next !== null) return next;
+  const typed = input.event.text;
+  return typed !== undefined && !input.event.mods.alt ? insert(current, typed) : current;
+}
 
 /** A field's answer to one input: accept with Enter, else edit. */
 function fieldInput<O extends Extract<Overlay, { field: Field }>>(overlay: O, input: OverlayInput, accept: (text: string) => OverlayAnswer): OverlayAnswer {
   if (isEnter(input)) return accept(overlay.field.graphemes.join(""));
-  const withField = (next: Field): O => ({ ...overlay, field: next });
-  if (input.kind === "key") {
-    const next = edit(overlay.field, input.event);
-    if (next !== null) return { overlay: withField(next), effects: [] };
-    const typed = input.event.text;
-    return { overlay: typed !== undefined && !input.event.mods.alt ? withField(insert(overlay.field, typed)) : overlay, effects: [] };
-  }
-  return { overlay: withField(insert(overlay.field, input.event.text)), effects: [] };
+  const next = editField(overlay.field, input);
+  return { overlay: next === overlay.field ? overlay : { ...overlay, field: next }, effects: [] };
 }
 
 const run = (action: RunEffect["action"], target: Target | null, name: string | null): RunEffect => ({ type: "run", action, target, index: null, name });
