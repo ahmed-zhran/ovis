@@ -105,11 +105,28 @@ describe("the pointer", () => {
     });
   }
 
-  it("an open overlay takes the mouse: nothing reaches a pane or the chrome", () => {
+  it("an open overlay takes the mouse: nothing reaches a pane or the chrome; a left press on its close control closes it", () => {
     const pointer = new Pointer();
     for (const event of [ev(["press", "left", 3, 2]), ev(["press", "left", 1, 0]), ev(["press", "wheelUp", 3, 2])]) {
       expect(pointer.mouse("overlay", event, sceneOf("a", lookA(true)))).toEqual([]);
     }
+    const withClose: PointerScene = { ...sceneOf("a", lookA(true)), hits: new HitMap([{ rect: { x: 0, y: 1, width: 9, height: 5 }, target: { pane: "a" } }, { rect: { x: 2, y: 2, width: 4, height: 1 }, target: { part: "overlay:help", id: "close" } }]) };
+    expect(pointer.mouse("overlay", ev(["press", "left", 3, 2]), withClose)).toEqual([{ kind: "close_overlay" }]);
+    expect(pointer.mouse("overlay", ev(["press", "right", 3, 2]), withClose)).toEqual([]);
+    expect(pointer.mouse("overlay", ev(["release", "left", 3, 2]), withClose)).toEqual([]);
+    expect(pointer.mouse("overlay", ev(["press", "left", 1, 3]), withClose)).toEqual([]);
+  });
+
+  it("a drag whose press went to no program reaches none, also over the pane the press focused or over the focused one", () => {
+    // the press focuses a (focus b at the press); a is focused from then on
+    let pointer = new Pointer();
+    expect(pointer.mouse("screen", ev(["press", "left", 3, 2]), sceneOf("b", lookA(true)))).toEqual([{ kind: "select", target: { kind: "pane", id: "a" } }]);
+    expect([ev(["motion", "left", 4, 2]), ev(["release", "left", 4, 2])].map((event) => pointer.mouse("screen", event, sceneOf("a", lookA(true))))).toEqual([[], []]);
+    // a press on the chrome's empty cells, dragged over the focused a
+    pointer = new Pointer();
+    expect([ev(["press", "left", 16, 0]), ev(["motion", "left", 3, 2]), ev(["release", "left", 3, 2])].map((event) => pointer.mouse("screen", event, sceneOf("a", lookA(true))))).toEqual([[], [], []]);
+    // a move with no button held still goes to a, once the drag is over
+    expect(pointer.mouse("screen", ev(["motion", null, 3, 2]), sceneOf("a", lookA(true)))).toEqual([{ kind: "forward", pane: "a", event: ev(["motion", null, 3, 3]) }]);
   });
 
   it("the wheel stops at the oldest kept row and at the newest; a key brings a scrolled pane back to the newest", () => {
@@ -384,6 +401,119 @@ describe("mouse on the whole screen", () => {
     expect(docSets(run).length).toBe(2);
     expect((await hostScreen(run)).text(1, 55, 56)).toBe("++");
     expect((run.core.docs.get(OVIS_LAYOUT_DOC)!.value as { workspaces: { tabs: { root: { ratio: number } }[] }[] }).workspaces[0]!.tabs[0]!.root.ratio).toBe(32 / 96);
+  }, TEST_MS);
+
+  it("a drag that began with the press that only focused a pane reaches no program, even after an earlier click reached it", async () => {
+    const run = await demo120();
+    run.core.program("t2").output("\x1b[?1002h\x1b[?1006h");
+    await run.advance(20);
+    // focus t2, then one click it really gets, then focus t1 again
+    await run.keys("click@80:5,click@80:5");
+    expect(run.core.program("t2").receivedHex()).toBe(hexOf("\x1b[<0;8;4M\x1b[<0;8;4m"));
+    await run.keys("click@30:5");
+    expect(focusedPane(run)).toBe("t1");
+    const heard = run.core.program("t2").receivedHex().length;
+    const from = run.sent.length;
+    // a click on t2 whose pointer moved: the focus moves at the press, and nothing of the gesture is sent
+    await run.keys("press@80:5,drag@81:5,drag@82:6,release@82:6");
+    expect(focusedPane(run)).toBe("t2");
+    expect(run.core.program("t2").receivedHex().slice(heard)).toBe("");
+    expect(dataTo(run, "t2", from)).toEqual([]);
+    // the next click on the focused pane reaches it whole
+    await run.keys("click@80:5");
+    expect(run.core.program("t2").receivedHex().slice(heard)).toBe(hexOf("\x1b[<0;8;4M\x1b[<0;8;4m"));
+  }, TEST_MS);
+
+  it("a drag begun on the tab bar reaches no program when it moves over the focused pane", async () => {
+    const run = await demo120();
+    run.core.program("t2").output("\x1b[?1002h\x1b[?1006h");
+    await run.advance(20);
+    await run.keys("click@80:5,click@80:5");
+    expect(focusedPane(run)).toBe("t2");
+    const heard = run.core.program("t2").receivedHex().length;
+    const from = run.sent.length;
+    await run.keys("press@100:0,drag@80:5,drag@81:5,release@81:5");
+    expect(focusedPane(run)).toBe("t2");
+    expect(run.core.program("t2").receivedHex().slice(heard)).toBe("");
+    expect(dataTo(run, "t2", from)).toEqual([]);
+  }, TEST_MS);
+
+  it("with 1003 a focusing click whose pointer moves one cell sends nothing; a move with no button then reaches the focused program", async () => {
+    const run = await demo120();
+    run.core.program("t2").output("\x1b[?1003h\x1b[?1006h");
+    await run.advance(20);
+    await run.keys("click@80:5,click@80:5,click@30:5");
+    expect(focusedPane(run)).toBe("t1");
+    const heard = run.core.program("t2").receivedHex().length;
+    await run.keys("press@80:5,drag@81:5,release@81:5");
+    expect(focusedPane(run)).toBe("t2");
+    expect(run.core.program("t2").receivedHex().slice(heard)).toBe("");
+    // a move with no button held over the focused t2: screen cell (82, 5) is its cell (9, 3)
+    run.type("\x1b[<35;83;6M");
+    await run.settle();
+    expect(run.core.program("t2").receivedHex().slice(heard)).toBe(hexOf("\x1b[<35;10;4M"));
+  }, TEST_MS);
+
+  it("a selection over wide letters draws inverted exactly what it copies, from either column of a letter", async () => {
+    const run = await demo120();
+    // t1's row 1 (screen row 3) starts with 안녕하세요: 안 in cells 25-26, 녕 in 27-28
+    expect((await hostScreen(run)).text(3, 25, 29)).toBe("안녕하");
+    for (const [keys, text] of [
+      ["press@26:3,drag@28:3,release@28:3", "안녕"],
+      ["press@28:3,drag@26:3,release@26:3", "안녕"],
+      ["press@26:3,drag@27:3,release@27:3", "안녕"],
+      ["press@25:3,drag@26:3,release@26:3", "안"],
+    ] as const) {
+      const written = run.host.output().length;
+      await run.keys(keys);
+      await run.advance(20);
+      expect({ keys, copied: run.host.output().slice(written).includes(osc52Of(text)), drawn: (await hostScreen(run)).inverted(3, 25, 45) }).toEqual({ keys, copied: true, drawn: text });
+    }
+  }, TEST_MS);
+
+  it("a divider drag with each move in its own read writes each move once the write before it is answered, the newest last", async () => {
+    const run = await demo120();
+    await run.keys("press@71:10");
+    for (let n = 1; n <= 10; n++) {
+      run.type(`\x1b[<32;${72 - n};11M`);
+      await run.settle();
+    }
+    const ratios = docSets(run).map((frame) => JSON.parse(new TextDecoder().decode(frame.payload)).params.value.workspaces[0].tabs[0].root.ratio as number);
+    expect(ratios.length).toBe(10);
+    expect(ratios.every((ratio, n) => n === 0 || ratio < ratios[n - 1]!)).toBe(true);
+    await run.keys("release@61:10");
+    await run.advance(20);
+    expect(docSets(run).length).toBe(10);
+    expect((run.core.docs.get(OVIS_LAYOUT_DOC)!.value as { workspaces: { tabs: { root: { ratio: number } }[] }[] }).workspaces[0]!.tabs[0]!.root.ratio).toBe(ratios.at(-1)!);
+  }, TEST_MS);
+
+  it("a click on an overlay's close control closes it; a click elsewhere in it does nothing", async () => {
+    const run = await demo120();
+    await run.keys("ctrl+b,?");
+    await run.advance(20);
+    expect(run.loop.model().overlays.map((overlay) => overlay.kind)).toEqual(["help"]);
+    // the close keys sit at the top right of the help, cells 93-114 of row 2
+    await run.keys("click@60:10");
+    expect(run.loop.model().overlays.map((overlay) => overlay.kind)).toEqual(["help"]);
+    await run.keys("click@100:2");
+    expect(run.loop.model().overlays).toEqual([]);
+  }, TEST_MS);
+
+  it("the wheel draws every row of the pane at its new place", async () => {
+    const run = await demo120();
+    run.core.program("t1").output(Array.from({ length: 60 }, (_, n) => `row-${n}`).join("\r\n"));
+    await run.advance(20);
+    const rows = async () => {
+      const screen = await hostScreen(run);
+      return Array.from({ length: 36 }, (_, y) => screen.text(2 + y, 25, 30));
+    };
+    const shown = (bottom: number) => Array.from({ length: 36 }, (_, y) => `row-${bottom - 35 + y}`);
+    expect(await rows()).toEqual(shown(59));
+    for (const [keys, bottom] of [["wheelup@40:20", 56], ["wheelup@40:20,wheelup@40:20", 50], ["wheeldown@40:20", 53], ["wheeldown@40:20,wheeldown@40:20", 59]] as const) {
+      await run.keys(keys);
+      await run.advance(20);
+      expect({ keys, rows: await rows() }).toEqual({ keys, rows: shown(bottom) });
+    }
   }, TEST_MS);
 
   it("divider drag is stale after a foreign edit", async () => {

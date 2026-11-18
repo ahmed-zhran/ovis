@@ -4,6 +4,9 @@
  * sidebar toggle, or grabs a divider. Over a pane that is not focused a press only focuses it. Over the focused
  * pane the event goes to its program, in its own grid's cells, when the program asked for a mouse mode and shift
  * is not held; otherwise the wheel scrolls the pane's history here and a drag selects, and the release copies.
+ * A program gets a drag and its release only after the press that began them went to it; a drag begun anywhere
+ * else (the press that only focused its pane, the chrome, another pane) reaches no program. Over an open overlay
+ * only its close control acts.
  * The answer is a list of acts for the loop to perform; nothing here writes, sends or draws.
  */
 import type { LayoutNode, SplitDirection } from "../../server/herdr-core/layout-doc.ts";
@@ -12,7 +15,7 @@ import type { EngineHistory, ScreenPoint, ScreenRange } from "../emulator/index.
 import type { MouseInput } from "../model/effects.ts";
 import type { Target } from "../model/focus.ts";
 import type { Rect, SplitCells } from "./geometry.ts";
-import type { GridCell, HitMap } from "./paint.ts";
+import { type GridCell, type HitMap, ordered } from "./paint.ts";
 
 /** Rows the history moves for one notch of the wheel. */
 const WHEEL_ROWS = 3;
@@ -55,7 +58,9 @@ export type PointerAct =
   /** the dragged divider's ratio; `done` at the release */
   | { readonly kind: "divider"; readonly grab: number; readonly tab: string; readonly name: DividerName; readonly ratio: number; readonly done: boolean }
   /** the selection changed: the next frame draws it */
-  | { readonly kind: "redraw" };
+  | { readonly kind: "redraw" }
+  /** the top overlay's close control was clicked */
+  | { readonly kind: "close_overlay" };
 
 type Grab =
   | { readonly kind: "none" }
@@ -81,9 +86,11 @@ export class Pointer {
 
   mouse(over: "overlay" | "screen", event: MouseInput, scene: PointerScene): PointerAct[] {
     if (over === "overlay") {
-      // an open overlay owns the mouse: nothing reaches the chrome or a pane under it
-      if (event.action === "press") this.grab = NONE;
-      return [];
+      // an open overlay owns the mouse: nothing reaches the chrome or a pane under it; its close control closes it
+      if (event.action !== "press") return [];
+      this.grab = NONE;
+      const hit = event.button === "left" ? scene.hits?.at(event.col, event.row) : null;
+      return hit && "part" in hit && hit.part.startsWith("overlay:") && hit.id === "close" ? [{ kind: "close_overlay" }] : [];
     }
     if (isWheel(event)) return this.wheel(event, scene);
     if (event.action === "press") return this.press(event, scene);
@@ -99,8 +106,10 @@ export class Pointer {
       case "divider":
         return this.drag(grab, event);
       case "none": {
-        // a move with no button held: the focused program sees it only if it asked for any motion (the pane machine's rule)
-        const hit = event.action === "motion" ? scene.hits?.at(event.col, event.row) : null;
+        // with no grab only a move with no button held goes on: the focused program sees it only if it asked for any
+        // motion (the pane machine's rule). A drag whose press went to no program, and its release, go nowhere.
+        if (event.action !== "motion" || event.button !== undefined) return [];
+        const hit = scene.hits?.at(event.col, event.row);
         const pane = hit && "pane" in hit ? hit.pane : null;
         const look = pane !== null && pane === scene.focus ? scene.look(pane) : null;
         return look && pane !== null && look.programMouse && !event.mods.shift ? [{ kind: "forward", pane, event: inGrid(event, look) }] : [];
@@ -184,7 +193,7 @@ export class Pointer {
     const moved = this.selection !== null || end.x !== grab.anchor.x || end.y !== grab.anchor.y;
     if (moved) this.selection = { pane: grab.pane, start: grab.anchor, end, emulator: look.emulator, altScreen: look.altScreen };
     const acts: PointerAct[] = moved ? [{ kind: "redraw" }] : [];
-    if (event.action === "release" && this.selection) acts.push({ kind: "copy", pane: grab.pane, range: ordered(this.selection.start, this.selection.end) });
+    if (event.action === "release" && this.selection) acts.push({ kind: "copy", pane: grab.pane, range: ordered(this.selection) });
     return acts;
   }
 
@@ -232,8 +241,4 @@ function inGrid(event: MouseInput, look: PaneLook): MouseInput {
 function pointOf(event: MouseInput, look: PaneLook): ScreenPoint {
   const cell = gridCell(event, look);
   return { x: cell.x, y: look.history.viewportTop + cell.y };
-}
-
-function ordered(a: ScreenPoint, b: ScreenPoint): ScreenRange {
-  return a.y < b.y || (a.y === b.y && a.x <= b.x) ? { start: a, end: b } : { start: b, end: a };
 }

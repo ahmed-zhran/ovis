@@ -344,13 +344,11 @@ export function startLoop(options: LoopOptions): Loop {
       case "forward":
         toPane(step.pane, step.event);
         return;
-      case "scroll": {
+      case "scroll":
+        // the emulator marks every row of its screen changed when the screen moves: the next pass draws them all
         panes.view(step.pane)?.emulator?.scrollFromBottom(step.fromBottom);
-        const held = grids.get(step.pane);
-        if (held) held.grid.allDirty = true;
         owePass();
         return;
-      }
       case "copy":
         copy(step.pane, step.range);
         return;
@@ -363,10 +361,13 @@ export function startLoop(options: LoopOptions): Loop {
       case "redraw":
         owePass();
         return;
+      case "close_overlay":
+        dispatch({ type: "close_overlay", at: clock.now() });
+        return;
     }
   }
 
-  /** The selected text to the host's clipboard as OSC 52, with a notice saying whether it went. */
+  /** The selected text to the host's clipboard as OSC 52, with a notice: `copied`, or `copy_refused` over the size cap. */
   function copy(pane: string, range: ScreenRange): void {
     const text = panes.view(pane)?.emulator?.textOf(range);
     if (!text?.ok) return;
@@ -377,11 +378,12 @@ export function startLoop(options: LoopOptions): Loop {
       return;
     }
     act("copy");
-    const taken = host.write(write.bytes);
-    if (!taken) painter?.invalidate();
-    dispatch(taken
-      ? { type: "notice", code: "copied", data: { bytes: data.length }, at: clock.now() }
-      : { type: "notice", code: "copy_refused", data: { reason: "not_taken", bytes: data.length }, at: clock.now() });
+    // a write the host does not take means the terminal is gone: the screen ends, and no notice could be seen
+    if (!host.write(write.bytes)) {
+      painter?.invalidate();
+      return;
+    }
+    dispatch({ type: "notice", code: "copied", data: { bytes: data.length }, at: clock.now() });
   }
 
   /** What the pointer reads of a shown pane as the last frame drew it; null for a pane not drawn or with no picture. */
