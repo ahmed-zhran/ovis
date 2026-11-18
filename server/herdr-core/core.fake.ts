@@ -42,7 +42,7 @@
 
 import { createServer, type Socket } from "node:net";
 import { AUTOMATIC_INPUT_FEATURE, encodeFrame, type Frame, FRAME_AUTOMATIC_INPUT, FRAME_CLOSE, FRAME_CREDIT, FRAME_DATA, FRAME_FACTS, FRAME_FOCUS, FRAME_RESIZE, type HcTransport, makeFrameReader } from "./connection.ts";
-import type { AttachResult, CoreInfo, DocGetParams, DocSetParams, EventsSubscribeParams, HcMethod, HcMethods, MachineView, Terminal, TerminalAttachParams, TerminalLabelParams, TerminalListParams, TerminalRunParams } from "./hc-api.generated.ts";
+import type { AttachResult, CoreInfo, DocGetParams, DocSetParams, EventsSubscribeParams, HcMethod, HcMethods, MachineView, Status, Terminal, TerminalAttachParams, TerminalLabelParams, TerminalListParams, TerminalRunParams } from "./hc-api.generated.ts";
 
 /** where a terminal nobody views runs */
 export const HEADLESS = { cols: 200, rows: 120 } as const;
@@ -466,6 +466,13 @@ export class FakeHcCore {
     this.log.push({ what: "event", seq: this.seq, type, terminal, data });
     const params = terminal === null ? { data, seq: this.seq, type } : { data, seq: this.seq, terminal, type };
     this.notify((filter) => this.hears(filter, terminal), { jsonrpc: "2.0", method: "event", params }, type === "size");
+  }
+
+  /** A status written by a pane is also present in the next snapshot. */
+  reportStatus(terminal: string, status: Status): void {
+    const { terminal: record } = this.held(terminal);
+    record.status = structuredClone(status);
+    this.emit("status", terminal, { status: record.status });
   }
 
   /** How many `size` events are held back on their way (`late`): none once the event loop has turned. */

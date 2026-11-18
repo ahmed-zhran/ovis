@@ -114,6 +114,13 @@ async function runCases(cases: SizeCase[]): Promise<void> {
 }
 
 describe("fake herdr-core: size rules (probe c, both versions)", () => {
+  it("an agent report is available to a viewer subscribing after the pane reported", async () => {
+    const s = scene();
+    const terminal = await s.run();
+    s.core.reportStatus(terminal, { state: "blocked", app: "claude" });
+    expect((await s.control.call("terminal.get", { terminal })).status).toEqual({ state: "blocked", app: "claude" });
+  });
+
   it("F1 latest stamp wins", async () => {
     await runCases([
       { name: "the later of two stamped viewers", size: "80x24", steps: async (s, t) => { await s.attach("A", t, 120, 40); await s.attach("B", t, 80, 24); } },
