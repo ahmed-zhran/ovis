@@ -1,5 +1,6 @@
 import type { PaneInfo, SessionSnapshot } from "../../shared/herdr-api.generated.ts";
 import { type HcConnection, HcError } from "./connection.ts";
+import type { Terminal } from "./hc-api.generated.ts";
 import { AdapterError } from "./errors.ts";
 import { foreignLayout, leaves, neighbour, OVIS_LAYOUT_DOC, type OvisLayout, type PaneDirection, resizeLeaf, setRatio, type SplitDirection, splitLeaf, swapLeaves, type TabLayout } from "./layout-doc.ts";
 import { buildSnapshot, type CoreHost, type FirstTurn, type HcTerminal, keptLayout, LAYOUT_DOC, OTHER_WORKSPACE_ID, PANE_NAME_LABEL, SEEN_LABEL, type SessionOf, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
@@ -246,21 +247,21 @@ export function moveLabels(place: NewTab | null, tabName: string): Record<string
 export interface LayoutView { shown: SessionSnapshot; own: boolean }
 
 /** How a caller reads the core into a snapshot. */
-export interface CoreRead {
+export interface ReadOptions {
   firstTurn?: FirstTurn;
   sessionOf?: SessionOf;
   host: CoreHost;
   /** finished terminals too (`terminal.list` with `all`), each through `shown` before the snapshot groups it */
   all?: boolean;
   /** the terminals as the caller shows them; unset, as listed */
-  shown?: (terminals: HcTerminal[]) => HcTerminal[];
+  shown?: (terminals: Terminal[]) => HcTerminal[];
 }
 
 /**
  * The core read once into the snapshot a caller shows, with whether Ovis keeps its layout (ownsLayout) from the
  * same read of the app's document, and the terminals as hc listed them.
  */
-export async function readCore(hc: Pick<HcConnection, "call" | "hello">, read: CoreRead): Promise<LayoutView & { terminals: HcTerminal[] }> {
+export async function readCore(hc: Pick<HcConnection, "call" | "hello">, read: ReadOptions): Promise<LayoutView & { terminals: Terminal[] }> {
   const [list, app, ovis, hello] = await Promise.all([
     hc.call("terminal.list", read.all ? { all: true } : {}),
     hc.call("doc.get", { name: LAYOUT_DOC }),
