@@ -194,7 +194,7 @@ export interface PreferencesSync {
 }
 
 export function usePreferencesSync(enabled: boolean): PreferencesSync {
-  const { own, watch, take } = useSettings();
+  const { own, watch, update } = useSettings();
   const pins = useSyncExternalStore(subscribeSidebarPins, currentSidebarPins, currentSidebarPins);
   const muted = useSyncExternalStore(subscribePaneMutes, currentPaneMutes, currentPaneMutes);
   const tabLabels = useSyncExternalStore(subscribeTabLabels, currentTabLabels, currentTabLabels);
@@ -298,7 +298,7 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     // Taken at once, as the stores below are: the next document, answer or edit is judged against it before React draws it.
     // Each of the four tells `quiet` as it lands. A list not in yet is still this tab's old one, which differs from the
     // new baseline wherever the one taken will, so what is unsent reads as nothing before the last is in only if it is nothing after.
-    if (Object.keys(taken.patch).length > 0 && !gone.current) take(taken.patch);
+    if (Object.keys(taken.patch).length > 0 && !gone.current) update(taken.patch);
     if (taken.pins !== null) setSidebarPins(taken.pins);
     if (taken.muted !== undefined) setPaneMutes(taken.muted);
     if (taken.tabLabels !== null) setTabLabels(taken.tabLabels);
@@ -306,7 +306,7 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     setLoaded(true);
     setTaken((count) => count + 1);
     quiet();
-  }, [here, quiet, take]);
+  }, [here, quiet, update]);
 
   const receive = useCallback((remote: SharedPreferences) => {
     if (inFlight.current === null) { absorb(remote); return; }
@@ -373,6 +373,14 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
   const track = useCallback(function track(body: PreferencesChange, request: () => Promise<SharedPreferences>): void {
     window.clearTimeout(sendTimer.current);
     inFlight.current = body;
+    // this save is over: a request that went beside it is now the one on its way, and a document held so far stays
+    // held behind that one, judged once it is answered
+    const over = (): void => {
+      const next = beside.current;
+      beside.current = null;
+      if (next === null) settled();
+      else track(next.body, () => next.request);
+    };
     request().then((saved) => {
       refused.current = null;
       // An older server silently drops new names. Acknowledge exactly what was sent, not
@@ -383,7 +391,7 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
       if (body.muted_panes !== undefined && saved.muted_panes === undefined) { base.current.muted = null; setPaneMutes(null); }
       if (body.tab_labels !== undefined && Object.keys(body.tab_labels).length > 0 && saved.tab_labels === undefined && saved.settings.autoTabNames !== false) base.current.tabLabels = null;
       absorb(saved);
-      settled();
+      over();
       failures.current = 0;
       setRetrying(false);
       if (preferencesChange(base.current, here()) === null) {
@@ -400,7 +408,7 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
       // no answer at all: the server may have stored it, and a value changed here since it went (taken back
       // included) is not to give way to it
       if (status === null) base.current = unconfirmed(base.current, body, here());
-      settled();
+      over();
       if (status === 403) {
         standDown();
       } else if (status === 404) {
@@ -418,10 +426,6 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
           if (live.current) pauseTimer.current = window.setTimeout(() => setPaused(false), pausedWait(failures.current));
         } else if (live.current && !streamLostRef.current && !streamClosed.current) retryTimer.current = window.setTimeout(() => setAttempt((count) => count + 1), RETRY_MS);
       }
-    }).finally(() => {
-      const next = beside.current;
-      beside.current = null;
-      if (next !== null) track(next.body, () => next.request);
     });
   }, [absorb, settled, here, rest, standDown]);
   const go = useCallback((body: PreferencesChange, keepalive: boolean): void => {
@@ -448,7 +452,8 @@ export function usePreferencesSync(enabled: boolean): PreferencesSync {
     // request may not outlive the page), what is unsent, that change's values included, goes beside it: the same
     // values, and last write wins; it is the save on its way once that change settles (`beside`).
     const leaving = (event: Event): void => {
-      if (event.type === "visibilitychange" && document.visibilityState !== "hidden") return;
+      // a save that ended in a 403 or a 404 set no render up to take this listener away
+      if ((event.type === "visibilitychange" && document.visibilityState !== "hidden") || off.current || readOnly.current) return;
       // what is unsent as the page goes: `pending` is as of the render that set this up, and an edit since may not be
       // drawn; a value changed since the change on its way went goes too, a return to the value before it included
       const local = here();

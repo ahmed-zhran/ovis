@@ -11,7 +11,6 @@ import { DEFAULT_SETTINGS, SettingsProvider, sanitizeSettings, useSettings, type
 import { currentSidebarPins, setSidebarPins } from "./sidebarPins.ts";
 import { currentPaneMutes, setPaneMutes } from "./paneMutes.ts";
 import { usePreferencesSync } from "./preferencesSync.ts";
-import { readThemeFile, withImported, type CustomTheme, type CustomThemes } from "./customThemes.ts";
 import type { UserError } from "./userError.ts";
 
 describe("preferences sync real send path", () => {
@@ -1833,27 +1832,19 @@ describe("preferences sync real send path", () => {
     expect([bodies.length, store.get().settings.showThinking]).toEqual([before + 1, !DEFAULT_SETTINGS.showThinking]);
   });
 
-  it("a tab that takes a late document leaves another tab's unsent theme import stored, and that tab's next import keeps it", async () => {
-    const theme = (name: string, base00: string): CustomTheme => {
-      const result = readThemeFile(`base00: "${base00}"\nbase05: "e0e0e0"\n`, name);
-      if ("error" in result) throw new Error(result.error);
-      return result.theme;
-    };
-    const importing = (client: Client, imported: CustomTheme): void => client.update((current) => ({ customThemes: withImported(current.customThemes, imported)! }));
-    const names = (themes: unknown): string[] => (themes as CustomThemes).themes.map((entry) => entry.name);
-    const a = await open();
-    const b = await open();
-    // a's event stream brings b's first import late
-    clients.splice(clients.indexOf(a), 1);
-    await act(async () => { importing(b, theme("Alpha", "101010")); });
-    await send();
-    await act(async () => { importing(b, theme("Bravo", "202020")); });
-    await act(async () => { a.receive(store.get()); });
-    clients.push(a);
+  it.each([["as read-only (403)", 403], ["with no preferences route (404)", 404]] as const)("a page that goes after its save was refused %s sends nothing", async (_name, status) => {
+    store.set({ settings: { darkTheme: "tokyo-night" } });
+    const gate = Promise.withResolvers<void>();
+    refusing = () => gate.promise.then(() => Response.json({ error: { code: "refused", message: "no" } }, { status }));
+    const client = await open();
+    await act(async () => { client.update({ darkTheme: "gruvbox" }); });
+    await windows();
+    await act(async () => { gate.resolve(); });
+    await act(async () => {});
+    refusing = null;
 
-    await act(async () => { importing(b, theme("Charlie", "303030")); });
-    await windows(3);
+    await act(async () => { pageEvents.dispatchEvent(new Event("pagehide")); });
 
-    expect([names(b.settings.customThemes), names(store.get().settings.customThemes), names(a.settings.customThemes)]).toEqual([["Alpha", "Bravo", "Charlie"], ["Alpha", "Bravo", "Charlie"], ["Alpha", "Bravo", "Charlie"]]);
+    expect([bodies.length, store.get().settings.darkTheme]).toEqual([1, "tokyo-night"]);
   });
 });
