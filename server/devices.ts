@@ -996,9 +996,9 @@ export class DeviceStore {
    * Writes `write` (the row of a link) with the binding of a PC in no account in the same turn, binding first: a row
    * that is not written takes its binding back (T13, T59).
    */
-  private bindingWith<T>(account: string, key: string, write: () => T): T {
+  private bindingWith<T>(account: string, first: { key: string; listKey: string | null }, write: () => T): T {
     if (this.pc === null || this.pc.account() !== null) return write();
-    const takeBack = this.pc.bind(account, key);
+    const takeBack = this.pc.bind(account, first.key, first.listKey);
     try { return write(); } catch (error) {
       try { takeBack(); } catch (left) { console.error(`[devices] the binding of a link that was not written could not be taken back: ${left instanceof Error ? left.message : String(left)}`); }
       throw error;
@@ -1614,7 +1614,7 @@ export class DeviceStore {
    * one made since would have taken the row (dropWaiting). That write's failure is logged and changes nothing of the
    * above; the next start clears it.
    */
-  private promote(id: string, link: { oldKey: string; key: string; account: string }, sessionId: string, vouched: boolean): PairedDevice | null {
+  private promote(id: string, link: { oldKey: string; key: string; account: string; listKey: string | null }, sessionId: string, vouched: boolean): PairedDevice | null {
     const row = this.provisional(id);
     const waiting = this.pending?.waiting;
     if (!row || !waiting || row.key !== link.oldKey || this.account() !== null || this.removedByAccount(link.key) || !this.admits(link.key)) return null;
@@ -1633,7 +1633,7 @@ export class DeviceStore {
     waiting.rows.delete(row.id);
     // the end of its code, which this write brings, names the device it brought in
     waiting.joined = { device_id: row.id, label: row.label };
-    try { this.bindingWith(link.account, link.key, () => this.enroll(device, now, [], false)); }
+    try { this.bindingWith(link.account, link, () => this.enroll(device, now, [], false)); }
     catch (error) {
       waiting.rows.set(row.id, row);
       delete waiting.joined;
@@ -1705,6 +1705,8 @@ export class DeviceStore {
     // the final guard, in the commit turn: nothing waits between it and the write
     if (!this.admits(admitting.relay_public_key, confirmProof)) throw new AdmissionRefusedError();
     const device = this.knowingRemovals(this.admitted(admitting, now));
+    // A waiting first link enrolls its own binding row. Every other member enrollment consumes T67.
+    if (device.account !== undefined && device.linked_at === undefined) this.pc?.setOthersEver();
     this.journalAdmission(device);
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
@@ -2401,10 +2403,10 @@ export class DeviceStore {
    * (`auth_changed`); the linking one goes on until it signs in again with the new key. A row that waits to link
    * is no device yet: its link makes it one (promote).
    */
-  linkAccountKey(deviceId: string, oldKey: string, key: string, account: string, sessionId = "", vouched = false): PairedDevice | null {
+  linkAccountKey(deviceId: string, oldKey: string, key: string, account: string, sessionId = "", vouched = false, listKey: string | null = null): PairedDevice | null {
     this.assertAccountWritable();
     const device = this.devices.find((d) => d.id === deviceId && d.relay_public_key === oldKey);
-    if (!device) return this.promote(deviceId, { oldKey, key, account }, sessionId, vouched);
+    if (!device) return this.promote(deviceId, { oldKey, key, account, listKey }, sessionId, vouched);
     const moved = key !== oldKey || device.link_moved_key === true;
     // the link that takes a row from no account into one is on the device's own word unless a member of that same
     // account approved its pairing: a code started by a device outside the account names its starter in `added_by` and
@@ -2415,7 +2417,8 @@ export class DeviceStore {
     if (key !== oldKey && !this.admits(key)) return null;
     const updated = key !== oldKey ? this.admitted(linked, Date.now()) : linked;
     const next = this.devices.map((d) => d === device ? updated : d);
-    this.bindingWith(account, key, () => this.save(next));
+    if (this.pc?.account() === account && (device.account !== account || oldKey !== key)) this.pc.setOthersEver();
+    this.bindingWith(account, { key, listKey }, () => this.save(next));
     this.devices = next;
     this.accountOrder?.recordJoins([updated]);
     this.endNoAccountCode();

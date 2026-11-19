@@ -124,10 +124,10 @@ export class PcAccountState {
   }
 
   /** The first link binds the PC; returns what takes this write back, should the row it belongs to not be written. */
-  bind(account: string, key: string): () => void {
+  bind(account: string, key: string, listKey: string | null = null): () => void {
     if (this.doc.binding !== null) throw new Error("This PC is already in an account");
     const before = this.doc;
-    this.write({ ...this.doc, binding: { account, bind_id: randomBytes(16).toString("hex") }, first: { key, list_key: null }, others_ever: this.doc.others_ever || this.doc.clears.length > 0 });
+    this.write({ ...this.doc, binding: { account, bind_id: randomBytes(16).toString("hex") }, first: { key, list_key: listKey }, others_ever: this.doc.others_ever || this.doc.clears.length > 0 });
     return () => this.write(before);
   }
 
