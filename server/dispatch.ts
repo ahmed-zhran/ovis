@@ -47,7 +47,8 @@ import { handleHerdrUpdateRequest } from "./herdr-update.ts";
 import { handlePortalRequest } from "./portal.ts";
 import { handleRelayRequest } from "./relay/routes.ts";
 import type { LocalConfirms } from "./account/local-confirm.ts";
-import type { PendingRedemptions } from "./account/pending.ts";
+import type { PendingRedemption, PendingRedemptions } from "./account/pending.ts";
+import type { KeyProofPairings } from "./account/key-proof.ts";
 import { handlePendingRequest } from "./account/pending-routes.ts";
 import { handleAccountRequest } from "./account/routes.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
@@ -128,6 +129,10 @@ export interface RequestServices {
   readonly localConfirms?: LocalConfirms;
   /** devices waiting for this PC's screen to approve their key (server/account/pending.ts); only with the release flag */
   readonly pendingRedemptions?: PendingRedemptions;
+  /** pairings that prove their key and wait for this PC's screen (server/account/key-proof.ts); Linux with the flag only */
+  readonly keyProofPairings?: KeyProofPairings;
+  /** puts a waiting key on this PC's screen */
+  readonly askScreenForKey?: (entry: PendingRedemption) => void;
   readonly portalStartupResult: PortalStartup | undefined;
   readonly portalStartup: Promise<PortalStartup>;
 }
