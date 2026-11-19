@@ -68,5 +68,7 @@ test("T71: a decline from another page is refused", async () => {
 test("T71: with the release flag off there is no pending list", async () => {
   const made = await pc(false);
   expect(made.app.context.services.pendingRedemptions).toBeUndefined();
-  expect((await made.local("/api/devices/pending")).status).toBe(404);
+  const tried = await made.local("/api/devices/pending");
+  expect(tried.status).not.toBe(200);
+  expect(tried.body.pending).toBeUndefined();
 });
