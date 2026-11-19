@@ -42,7 +42,6 @@ export const GUIDE_JA: Record<string, string> = {
   "Same Wi-Fi": "同じ Wi-Fi",
   "This computer": "このコンピューター",
   "now": "今",
-  "Other ways": "ほかの方法",
   "Reopen it in Settings → Agents.": "設定 → エージェントからもう一度開けます。",
   "Looking for agents…": "エージェントを探しています…",
   "Couldn't look for agents": "エージェントを探せませんでした",

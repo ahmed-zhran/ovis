@@ -475,7 +475,9 @@ describe("the dashboard", () => {
       await act(async () => { button("Add a PC").props.onClick(); });
       expect(footerLabels()).toEqual(["Close", "Pair with a QR or code"]);
       await act(async () => { button("Pair with a QR or code").props.onClick(); });
-      expect(footerLabels()).toEqual(["Back", "Pair with a code"]);
+      expect(footerLabels()).toEqual(["Back"]);
+      // the code way is folded under Other ways in the dialog's body, not a footer action
+      expect(dialog().findAll((n) => n.type === "details").map((d) => textOf(d.findByType("summary")))).toEqual(["Other ways"]);
       await shownAs({ kind: "code-entry", failure: null });
       expect(footerLabels()).toEqual(["Cancel", "Pair"]);
       await shownAs({ kind: "code-compare", offer: { v: 1, server_id: ids.mini, server_public_key: "k", relay: AP, name: "Mac mini" } });
@@ -492,7 +494,7 @@ describe("the dashboard", () => {
         await act(async () => { addPcTrigger().props.onClick(); });
         expect(footerLabels()).toEqual(["Pair with a QR or code", "Close"]);
         await act(async () => { button("Pair with a QR or code").props.onClick(); });
-        expect(footerLabels()).toEqual(["Pair with a code", "Back"]);
+        expect(footerLabels()).toEqual(["Back"]);
         await shownAs({ kind: "code-entry", failure: null });
         expect(footerLabels()).toEqual(["Pair", "Cancel"]);
         await shownAs({ kind: "code-compare", offer: { v: 1, server_id: ids.mini, server_public_key: "k", relay: AP, name: "Mac mini" } });
@@ -577,7 +579,7 @@ describe("the dashboard", () => {
       expect(dialog().props["data-pair-dialog"]).toBe("qr");
       expect(dialog().parent?.props.className).toBe("modal-scrim");
       expect(String(dialog().props.className)).not.toContain("relay-shell");
-      expect(dialog().findByType("footer").findAll((n) => n.type === "button").map(textOf)).toEqual(["Back", "Pair with a code"]);
+      expect(dialog().findByType("footer").findAll((n) => n.type === "button").map(textOf)).toEqual(["Back"]);
       expect(renderer!.root.findAll((n) => n.props.inert === true)).toHaveLength(1);
       expect(textOf(dialog())).toContain("Scan the QR code on your PC");
       expect(textOf(dialog())).toContain("Settings → Devices and PCs → Add a connection → Ovis relay");

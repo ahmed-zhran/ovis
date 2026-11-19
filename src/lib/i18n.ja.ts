@@ -288,6 +288,7 @@ const BASE: Record<string, string> = {
 
   "Reload app": "アプリを再読み込み",
   "Details": "詳細",
+  "Other ways": "ほかの方法",
 
   "Submit": "送信",
   "Recommended": "推奨",

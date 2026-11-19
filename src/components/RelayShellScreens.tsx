@@ -14,6 +14,20 @@ import { relayFailureText } from "./relayFailureText.ts";
 import { CodeEntry, ReadyCheckpoint, type RelayShellProps } from "./RelayShell.tsx";
 import { SheepMascot } from "./SheepMascot.tsx";
 
+/**
+ * The ways in besides the QR code, folded under one small grey link: a device without a camera, or a PC pairing with a
+ * PC, types the PC's code instead (the owner's word, 2026-11: the main path is the sign-in and the QR code).
+ */
+export function OtherWays({ onCodeStart }: { readonly onCodeStart: () => void }) {
+  const t = useT();
+  return (
+    <details className="relay-shell-other-ways">
+      <summary>{t("Other ways")}</summary>
+      <button type="button" className="btn" onClick={onCodeStart}>{t("Pair with a code")}</button>
+    </details>
+  );
+}
+
 function PcCard({ name, detail = null }: { readonly name: string; readonly detail?: string | null }) {
   return (
     <div className="relay-step-cards">
@@ -216,20 +230,22 @@ export function RelayShellCardContent({ props, view, signInFirst, saved, addingP
             })}
           </ul>
           <p className="relay-shell-copy">{t("To add another PC, open Settings → Devices and PCs → Add a connection → Ovis relay on it and scan the QR code.")}</p>
-          <div className="relay-shell-actions"><button type="button" className="btn" onClick={onCodeStart}>{t("Pair with a code")}</button></div>
+          <OtherWays onCodeStart={onCodeStart} />
         </>
       )}
       {(account === null ? state.kind === "empty" : view === "pair" || addingPc) && (
         <>
           <h1 className="relay-shell-title">{t("Scan the QR code on your PC")}</h1>
           <p className="relay-shell-copy">{t("On the PC, open Settings → Devices and PCs → Add a connection → Ovis relay and scan the QR code.")}</p>
-          <div className="relay-shell-actions">
-            <button type="button" className="btn btn-primary" onClick={onCodeStart}>{t("Pair with a code")}</button>
-            {back}
-            {account && (addingPc
-              ? <button type="button" className="btn btn-ghost" onClick={() => setAddingPc(false)}>{t("Back")}</button>
-              : <button type="button" className="btn btn-ghost" onClick={() => setSignedOutView("sign-in")}>{t("Sign in instead")}</button>)}
-          </div>
+          {(back || account) && (
+            <div className="relay-shell-actions">
+              {back}
+              {account && (addingPc
+                ? <button type="button" className="btn btn-ghost" onClick={() => setAddingPc(false)}>{t("Back")}</button>
+                : <button type="button" className="btn btn-ghost" onClick={() => setSignedOutView("sign-in")}>{t("Sign in instead")}</button>)}
+            </div>
+          )}
+          <OtherWays onCodeStart={onCodeStart} />
         </>
       )}
       {(state.kind === "code-entry" || state.kind === "code-looking") && (

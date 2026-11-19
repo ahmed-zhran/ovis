@@ -286,6 +286,7 @@ const BASE: Record<string, string> = {
 
   "Reload app": "앱 새로 고침",
   "Details": "자세히",
+  "Other ways": "다른 방법",
 
   "Submit": "제출",
   "Recommended": "추천",

@@ -358,3 +358,24 @@
 .relay-shell-sign-in-links {
   margin: 0;
 }
+
+.relay-shell-other-ways {
+  margin-top: var(--space-5);
+  text-align: center;
+}
+
+.relay-shell-other-ways > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch-target);
+  padding-inline: var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.relay-shell-other-ways > .btn {
+  width: 100%;
+  min-height: var(--touch-target);
+  margin-top: var(--space-2);
+}

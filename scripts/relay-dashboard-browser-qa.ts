@@ -1130,6 +1130,7 @@ export async function relayDashboardQa({ browser, origin, evidence }: DashboardQ
         document.addEventListener("invalid", () => { seen["qaInvalid"] = String(Number(seen["qaInvalid"]) + 1); }, true);
         document.addEventListener("submit", () => { seen["qaSubmit"] = String(Number(seen["qaSubmit"]) + 1); }, true);
       });
+      await dialog.getByText("Other ways", { exact: true }).click();
       await dialog.getByRole("button", { name: "Pair with a code" }).click();
       await page.locator('[role=dialog][data-pair-dialog="code"]').waitFor();
       const codeField = await page.evaluate(() => {
@@ -1208,9 +1209,10 @@ export async function relayDashboardQa({ browser, origin, evidence }: DashboardQ
 
     await page.locator('[role=dialog][data-add-pc-mode="add"] [data-sheet-primary]').click();
     await page.locator('[role=dialog][data-pair-dialog="qr"]').waitFor();
-    measured.push(await tabFooter("pair-qr", ["Pair with a code", "Back"]));
+    measured.push(await tabFooter("pair-qr", ["Back"]));
 
-    await page.locator('[role=dialog][data-pair-dialog="qr"] [data-sheet-primary]').click();
+    await page.locator('[role=dialog][data-pair-dialog="qr"]').getByText("Other ways", { exact: true }).click();
+    await page.locator('[role=dialog][data-pair-dialog="qr"]').getByRole("button", { name: "Pair with a code" }).click();
     await page.locator('[role=dialog][data-pair-dialog="code"]').waitFor();
     measured.push(await tabFooter("pair-code", ["Pair", "Cancel"]));
 

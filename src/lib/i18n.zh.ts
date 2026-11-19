@@ -289,6 +289,7 @@ const BASE: Record<string, string> = {
 
   "Reload app": "重新加载应用",
   "Details": "详情",
+  "Other ways": "其他方式",
 
 
   "Submit": "提交",

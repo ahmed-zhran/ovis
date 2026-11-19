@@ -42,7 +42,6 @@ export const GUIDE_ZH: Record<string, string> = {
   "Same Wi-Fi": "同一 Wi-Fi",
   "This computer": "这台电脑",
   "now": "刚刚",
-  "Other ways": "其他方式",
   "Reopen it in Settings → Agents.": "可在 设置 → 代理 中再次打开。",
   "Looking for agents…": "正在查找代理…",
   "Couldn't look for agents": "无法查找代理",

@@ -42,7 +42,6 @@ export const GUIDE_KO: Record<string, string> = {
   "Same Wi-Fi": "같은 Wi-Fi",
   "This computer": "이 컴퓨터",
   "now": "지금",
-  "Other ways": "다른 방법",
   "Reopen it in Settings → Agents.": "설정 → 에이전트에서 다시 열어요.",
   "Looking for agents…": "에이전트를 찾는 중…",
   "Couldn't look for agents": "에이전트를 찾지 못했어요",
