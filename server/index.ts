@@ -55,7 +55,7 @@ import { RelayService } from "./relay/service.ts";
 import { AccountMailbox, accountServiceUrl, passAccountService } from "./account/mailbox.ts";
 import { accountOpensAll } from "../shared/account-devices-api.ts";
 import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
-import { AdmissionOrder } from "./account/admission-order.ts";
+import { PcAccountState } from "./account/pc-binding.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
@@ -269,9 +269,9 @@ export function createServer(
   const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge) : null;
   // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
   try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
-  const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
-  for (const strict of [safetyLog?.strict, admissions?.strict]) if (strict) console.error(strict);
-  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, admissions });
+  const pcAccount = opensAll ? PcAccountState.open(stateDir) : null;
+  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount });
+  for (const strict of [safetyLog?.strict, pcAccount?.strict]) if (strict) console.error(strict);
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
   if (options.profile === "machine") devices.closeGate();
   const preferences = new PreferenceStore(stateDir);

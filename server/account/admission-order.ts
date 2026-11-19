@@ -6,13 +6,9 @@
  * `legacy` once (T50) and keep their creation order among themselves; a row with no origin, or a tie, has no age and
  * so no authority over another row (T19). Read only while OVIS_ACCOUNT_OPENS_ALL is on.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { writePrivateState } from "../private-state.ts";
 import { AccountSnapshotError, parseAdmissionOrigin, type AdmissionFrom, type AdmissionHow, type AdmissionOrigin } from "../../shared/account-snapshot.ts";
-import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
-/** This PC's account state (P12); S2-03 keeps only `next_admit` in it, and the binding joins it later under the same `v`. */
+/** This PC's account state (P12, server/account/pc-binding.ts), which holds `next_admit`. */
 export const ADMISSION_FILE = "account-pc.json";
 
 export type OriginFrom = AdmissionFrom;
@@ -57,54 +53,7 @@ export function mergedOrigin(a: RowOrigin | undefined, b: RowOrigin | undefined)
   return a.from === b.from && a.how === b.how && a.by === b.by && a.admit_no === b.admit_no && a.at === b.at ? a : undefined;
 }
 
-export class AdmissionOrder {
-  private nextAdmit = 1;
-  private problem: string | null = null;
-  /** no order file and no journal: this folder's rows predate the release and are stamped `legacy` once (T50) */
-  readonly fresh: boolean = false;
-
-  private constructor(private readonly path: string) {}
-
-  static open(stateDir: string): AdmissionOrder {
-    const order = new AdmissionOrder(join(stateDir, ADMISSION_FILE));
-    let text: string;
-    try { text = readFileSync(order.path, "utf8"); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") order.problem = `Cannot read ${order.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
-      else if (existsSync(join(stateDir, DEVICE_JOURNAL_FILE))) order.problem = `${order.path} is missing beside the device journal`;
-      else (order as { fresh: boolean }).fresh = true;
-      return order;
-    }
-    try {
-      const value = JSON.parse(text) as { v?: unknown; next_admit?: unknown };
-      if (value.v !== 1 || !Number.isSafeInteger(value.next_admit) || (value.next_admit as number) < 1) order.problem = `${order.path} is not this PC's account state`;
-      else order.nextAdmit = value.next_admit as number;
-    } catch { order.problem = `${order.path} is not JSON`; }
-    return order;
-  }
-
-  /** Why this PC fails closed, or null: no row is admitted while its order cannot be known. */
-  get strict(): string | null {
-    return this.problem === null ? null : `${this.problem}: only this PC itself gets in until the account state is restored.`;
-  }
-
-  static legacy(createdAt: string): RowOrigin {
-    return { from: "legacy", how: "legacy", by: null, admit_no: 0, at: createdAt };
-  }
-
-  /** Ends the one-time legacy stamping: the rows went to disk first, so a stop in between stamps them again, not twice. */
-  settleFresh(): void {
-    if (!this.fresh || this.problem !== null) return;
-    writePrivateState(this.path, { v: 1, next_admit: this.nextAdmit });
-    (this as { fresh: boolean }).fresh = false;
-  }
-
-  /** The origin of a row being admitted now; its number is on disk before the row is, so none is ever used twice. */
-  admit(from: OriginFrom, how: OriginHow, by: string | null, now: number): RowOrigin {
-    if (this.problem !== null) throw new Error(this.strict!);
-    const admitNo = this.nextAdmit;
-    writePrivateState(this.path, { v: 1, next_admit: admitNo + 1 });
-    this.nextAdmit = admitNo + 1;
-    (this as { fresh: boolean }).fresh = false;
-    return { from, how, by, admit_no: admitNo, at: new Date(now).toISOString() };
-  }
+/** The stamp of a row that existed before the upgrade (T50): older than every later admission here. */
+export function legacyOrigin(createdAt: string): RowOrigin {
+  return { from: "legacy", how: "legacy", by: null, admit_no: 0, at: createdAt };
 }
