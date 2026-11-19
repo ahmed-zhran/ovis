@@ -398,19 +398,23 @@ describe("key proof (device-row-states T71, T72; S2-13 wire)", () => {
     expect(decodeFrame(encodeFrame(hello))).toEqual(hello);
   });
   it("T71: the challenge, the proof and the wait round-trip", () => {
-    for (const frame of [
+    const frames: MuxFrame[] = [
       { ...session, type: FrameType.KEY_CHALLENGE, payload: { challenge: "A".repeat(43) } },
       { ...session, type: FrameType.KEY_PROVE, payload: { signature: "A".repeat(86) } },
       { ...session, type: FrameType.KEY_PENDING, payload: {} },
-    ] as const satisfies readonly MuxFrame[]) expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
+    ];
+    for (const frame of frames) expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
   });
   it("T72: the wait carries no fingerprint, whatever the sender put in it", () => {
-    const decoded = decodeFrame(wire(FrameType.KEY_PENDING, JSON.stringify({ fingerprint: "AAAA-BBBB" })));
+    const decoded = decodeFrame(wire(FrameType.KEY_PENDING, JSON.stringify({ fingerprint: "AAAA-BBBB" }), 0, 0));
     expect(decoded).toEqual({ ...session, type: FrameType.KEY_PENDING, payload: {} });
   });
+  it("T71: the proof frames are session frames only", () => {
+    rejects(() => decodeFrame(wire(FrameType.KEY_PENDING, "{}", 0, 1)));
+  });
   it("T71: a malformed challenge or proof is a protocol error", () => {
-    rejects(() => decodeFrame(wire(FrameType.KEY_CHALLENGE, JSON.stringify({ challenge: "short" }))));
-    rejects(() => decodeFrame(wire(FrameType.KEY_PROVE, JSON.stringify({ signature: "A".repeat(85) }))));
+    rejects(() => decodeFrame(wire(FrameType.KEY_CHALLENGE, JSON.stringify({ challenge: "short" }), 0, 0)));
+    rejects(() => decodeFrame(wire(FrameType.KEY_PROVE, JSON.stringify({ signature: "A".repeat(85) }), 0, 0)));
   });
   it("T71: an old app on a PC that needs the proof is refused key_proof_required", () => {
     expect(SESSION_ERRORS).toContain("key_proof_required");
