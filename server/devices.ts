@@ -628,7 +628,8 @@ export class DeviceStore {
 
   /** A row whose key was removed at or after the row was made: revoked, whether or not its own write happened yet. */
   private stale(device: StoredDevice): boolean {
-    if (this.evidence !== null) return this.coveredByEvidence(device) || this.frozen(device);
+    // while a lock stands only a row confirmed on this PC's screen gets in, whether or not its teardown ran (P11, T46)
+    if (this.evidence !== null) return this.coveredByEvidence(device) || this.frozen(device) || (this.safety?.inForce.locked === true && device.origin?.from !== "pc");
     return device.relay_public_key !== undefined
       && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || t.removed_at >= device.created_at));
   }
@@ -903,6 +904,22 @@ export class DeviceStore {
     const signers = this.memberRows(signer, account);
     const targets = this.devices.filter((d) => d.relay_public_key === key);
     return signers.length > 0 && targets.every((target) => signers.every((row) => compareAdmission(row, target) === "older"));
+  }
+
+  /** The origin of the row `id` in devices.json (P22), or null for a row this PC holds no origin of. */
+  originOf(id: string): RowOrigin | null {
+    return this.devices.find((d) => d.id === id)?.origin ?? null;
+  }
+
+  /**
+   * The lock turned on (T46): every row not confirmed on this PC's screen (origin from `pc`) ends in this turn, its
+   * sessions closed first, each journalled as a drop for the lock. Returns the ids that went.
+   */
+  endUnlockedRows(): string[] {
+    if (this.evidence === null) return [];
+    const gone = this.devices.filter((d) => d.origin?.from !== "pc");
+    this.drop(gone, "pc", "locked");
+    return gone.map((d) => d.id);
   }
 
   /** Whether the account-opens-all release flag is on for this store. */
@@ -1840,10 +1857,10 @@ export class DeviceStore {
   }
 
   /** A removal's journal entry, after its deny (P8 step 4). A journal that cannot be written stops no removal. */
-  private journalRemoval(device: StoredDevice, by: DeviceRemovedEvent["by"]): void {
+  private journalRemoval(device: StoredDevice, by: DeviceRemovedEvent["by"], why?: string): void {
     if (this.journal === null) return;
     try {
-      this.publish(this.journal.append({ kind: "remove", how: typeof by === "object" ? "member" : "pc", key: device.relay_public_key ?? null, no: device.origin?.admit_no ?? null, row: device.id, label: device.label, by: typeof by === "object" ? by.device_id : null, account: device.account ?? null }));
+      this.publish(this.journal.append({ kind: "remove", how: why ?? (typeof by === "object" ? "member" : "pc"), key: device.relay_public_key ?? null, no: device.origin?.admit_no ?? null, row: device.id, label: device.label, by: typeof by === "object" ? by.device_id : null, account: device.account ?? null }));
     } catch (error) { console.error(`[devices] the removal of ${device.id} could not be journalled: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
@@ -1914,8 +1931,8 @@ export class DeviceStore {
   }
 
   /** The rows `gone` lose their access in one write; their sessions close and each removal is announced. */
-  private drop(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"]): void {
-    if (this.evidence !== null) { this.dropBeforeWrite(gone, by); return; }
+  private drop(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"], why?: string): void {
+    if (this.evidence !== null) { this.dropBeforeWrite(gone, by, why); return; }
     const next = this.devices.filter((d) => !gone.includes(d));
     // A valid older/manual registry can have devices without a gate timestamp. Removing its
     // last device must still leave durable evidence that this store was once gated.
@@ -2006,7 +2023,7 @@ export class DeviceStore {
    * P8 steps 2 to 5 for rows the deny already covers: the gate in memory, the rows out of memory, their sessions and
    * codes ended, each removal told; then the registry write, whose failure is thrown only after all of that.
    */
-  private dropBeforeWrite(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"]): void {
+  private dropBeforeWrite(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"], why?: string): void {
     if (gone.length === 0) return;
     const next = this.devices.filter((d) => !gone.includes(d));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? new Date().toISOString();
@@ -2019,7 +2036,7 @@ export class DeviceStore {
       for (const close of listeners ?? []) close();
     }
     for (const device of gone) this.announceRemoval(device, by);
-    for (const device of gone) this.journalRemoval(device, by);
+    for (const device of gone) this.journalRemoval(device, by, why);
     // a signer removed here takes the blocks it signed with it (T73), whether or not the registry write below works
     this.liftOrphanedBlocks();
     this.save(next, gate);
