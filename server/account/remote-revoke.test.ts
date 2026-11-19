@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { exportAccountKey, newRecordId, signAccountRecord } from "../../shared/account-records.ts";
 import type { DeviceStore } from "../devices.ts";
-import { relayConnection, relayFixture } from "../relay/test-helpers.ts";
+import { relayConnection, relayFixture, caughtUp } from "../relay/test-helpers.ts";
 import { applyAccountRecords } from "./records.ts";
 import { handleRelayRequest } from "../relay/routes.ts";
 
@@ -33,6 +33,7 @@ async function member(devices: DeviceStore): Promise<Key & { id: string }> {
 /** A request from `caller` through the relay, signed in with its key. */
 async function remote(f: ReturnType<typeof relayFixture>, caller: Key & { id: string }) {
   const link = await relayConnection(f);
+  caughtUp(f);
   await link.auth({ keys: caller.keys, publicKey: caller.spki, id: caller.id });
   return async (method: "GET" | "POST" | "DELETE", target: string) => {
     const response = await link.open(target, { method, headers: [["content-type", "application/json"], ["x-herdr-machine", "1"]] }).response;
