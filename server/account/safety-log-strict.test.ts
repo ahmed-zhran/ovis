@@ -44,7 +44,7 @@ describe("the safety log's endings and its failed writes (P24, S19)", () => {
   test.skipIf(NO_CHMOD)("S19: an append that cannot be written fails the PC closed until a reload finds the log whole, and every way in is refused meanwhile", async () => {
     const at = dir();
     const log = SafetyLog.open(at);
-    const devices = new DeviceStore(at, null, null, log);
+    const devices = new DeviceStore(at, null, null, { safety: log });
     const phone = await signer();
     const id = devices.pairRelay(devices.startPairing().code, "Phone", phone.spki)!.device.id;
     chmodSync(at, 0o500);
