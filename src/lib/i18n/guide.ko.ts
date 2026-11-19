@@ -102,4 +102,5 @@ export const GUIDE_KO: Record<string, string> = {
   "Reach this PC from anywhere.": "어디서든 이 PC에 연결해요.",
   "Set up later": "나중에 설정",
   "Keep SSH or a screen working on this PC: reached only through the relay, one stolen older device could lock you out of it.": "이 PC에 SSH나 화면 접근을 남겨 두세요. 릴레이로만 닿으면, 오래된 기기 하나를 도난당했을 때 이 PC에 못 들어갈 수 있어요.",
+  "A device removed while this PC was off is let go after it restarts, once it reads your account again.": "이 PC가 꺼져 있는 동안 제거된 기기는, 다시 켜진 뒤 계정을 읽고 나서 끊겨요.",
 };
