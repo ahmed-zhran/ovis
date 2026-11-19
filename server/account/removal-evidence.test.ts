@@ -98,10 +98,10 @@ describe("account removals and local Revokes kept apart (account-removed.json)",
     const [revoke] = evidence(dir).revokes;
     devices.removeAccountKey(k, ACCOUNT, removal());
     // the account's tombstone shows; the Revoke stays its own evidence, never coalesced into it
-    expect(evidence(dir).revokes).toEqual([revoke]);
+    expect(evidence(dir).revokes).toEqual([revoke!]);
     expect(tombstones(dir)[0]!.record_id).not.toBe("local");
     // forgetting the account's removal brings the PC's own Revoke back into the tombstone file
-    SafetyLog.open(dir).append({ record: { id: pcRecordId(), kind: "forget", account: ACCOUNT, target: k, signer: "pc", signed_at: new Date().toISOString(), sig: "" }, got: "pc" });
+    SafetyLog.open(dir).append({ record: { id: pcRecordId(), kind: "forget", account: ACCOUNT, target: k, signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
     const reopened = store(dir);
     expect(tombstones(dir)).toEqual([expect.objectContaining({ key: k, record_id: "local" })]);
     expect(reopened.isTombstoned(k)).toBe(true);
