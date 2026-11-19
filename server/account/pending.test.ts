@@ -116,3 +116,27 @@ test("T71: every change is told, as the list the PC's screen shows", async () =>
   pending.decline(entry.id);
   expect(heard).toEqual([1, 0]);
 });
+
+test("T71: a redemption that ends unapproved gives its code's use back, and an approved one keeps it", async () => {
+  let now = 1_000_000;
+  const released: string[] = [];
+  const pending = new PendingRedemptions({ serverId: SERVER, now: () => now, journalDrop: () => {}, release: (codeId) => { released.push(codeId); } });
+  const named = async (code: string, codeId: string) => {
+    const phone = await device();
+    const { challenge } = pending.name(code, "Phone", phone.spki, "relay", undefined, codeId);
+    return (await pending.prove(challenge, await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey)))!;
+  };
+  const declined = await named("code1", "use-1");
+  const approved = await named("code1", "use-2");
+  await named("code2", "use-3");
+  pending.decline(declined.id);
+  pending.take(approved.id, approved.fingerprint);
+  now += PENDING_MS + 1;
+  pending.list();
+  expect(released).toEqual(["use-1", "use-3"]);
+  const phone = await device();
+  pending.name("code3", "Phone", phone.spki, "relay", undefined, "use-4");
+  now += PENDING_MS + 1;
+  pending.list();
+  expect(released).toEqual(["use-1", "use-3", "use-4"]);
+});
