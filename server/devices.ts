@@ -935,7 +935,9 @@ export class DeviceStore {
     if (caller === undefined || target === undefined) return "unorderable";
     if (caller.id === target.id) return "allowed";
     const rows = target.relay_public_key === undefined ? [target] : this.rowsOfKey(target.relay_public_key);
-    const verdicts = rows.map((row) => row.id === caller.id ? "older" : compareAdmission(caller, row));
+    // rule B: every row of the target joined after every row of the caller's key, in both stores
+    const callers = caller.relay_public_key === undefined ? [caller] : this.rowsOfKey(caller.relay_public_key);
+    const verdicts = rows.flatMap((row) => callers.map((from) => row.id === from.id ? "older" : compareAdmission(from, row)));
     if (verdicts.every((verdict) => verdict === "older")) return "allowed";
     return verdicts.includes("newer") ? "older" : "unorderable";
   }
@@ -947,9 +949,11 @@ export class DeviceStore {
   removeAuthority(signer: string, key: string, account: string): boolean {
     if (signer === key) return true;
     // an account-joined key signs only its own remove (P5, ruling 1): only devices.json member rows count here
-    const signers = this.memberRows(signer, account).filter((row) => this.devices.includes(row));
+    if (!this.memberRows(signer, account).some((row) => this.devices.includes(row))) return false;
+    // rule B: every target row joined after every row of the signer's key, account-joined rows included
+    const signers = this.rowsOfKey(signer);
     const targets = this.rowsOfKey(key);
-    return signers.length > 0 && targets.every((target) => signers.every((row) => compareAdmission(row, target) === "older"));
+    return targets.every((target) => signers.every((row) => compareAdmission(row, target) === "older"));
   }
 
   /** The origin of the row `id` in devices.json (P22), or null for a row this PC holds no origin of. */
