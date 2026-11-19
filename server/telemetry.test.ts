@@ -1415,25 +1415,28 @@ describe("another server on the same state directory", () => {
     expect(sent.map((event) => event.settings)).toEqual([null]);
   });
 
-  test("an off that another server's write counts while it waits for the lock is counted once", () => {
-    const { telemetry, stateDir } = setup();
-    const other = setup({ stateDir });
-    const before = telemetry.change({ enabled: false }).counts_generation ?? 0;
-    const lock = join(stateDir, "telemetry.lock");
-    const openSync = fs.openSync;
-    let between: number | undefined;
-    const open = spyOn(fs, "openSync").mockImplementation(((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode) => {
-      if (path === lock && between === undefined) {
-        between = -1;
-        // the off has marked and has not taken the lock: another server's write counts it first
-        between = other.telemetry.change({}).counts_generation;
+  test("an off whose first mark lands after another server's off took the same counter counts past it", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    seen(telemetry);
+    const late = setup({ stateDir });
+    const off = join(stateDir, "telemetry-off");
+    const renameSync = fs.renameSync;
+    let heard: number | undefined;
+    const rename = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (to === off && heard === undefined) {
+        heard = -1;
+        // the other off, begun at the same counter, is done before this one's first mark lands
+        heard = telemetry.change({ enabled: false }).counts_generation;
       }
-      return openSync(path, flags ?? "r", mode);
-    }) as typeof fs.openSync);
-    let after: number | undefined;
-    try { after = telemetry.change({ enabled: false }).counts_generation; }
-    finally { open.mockRestore(); }
-    expect([between, after]).toEqual([before + 1, before + 1]);
+      return renameSync(from, to);
+    });
+    try { late.telemetry.change({ enabled: false }); }
+    finally { rename.mockRestore(); }
+    // a page that heard the other off and not this one turns the counts on again
+    telemetry.change({ enabled: true, settings: settingsSnapshot({ theme: "light" }), generation: heard });
+    clock.now += 60_000;
+    await telemetry.report();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
   });
 
   test("a mark naming the largest counter is not taken as one", () => {

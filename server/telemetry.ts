@@ -501,26 +501,15 @@ export class Telemetry {
     return Math.max(this.saved.forgotten, readSaved(this.file, this.offFile)?.forgotten ?? 0, markCounter(offMark(this.offFile)) ?? 0) + 1;
   }
 
-  /** writes a new mark naming `counter`, and gives it back */
-  private markOff(counter: number): string {
+  private markOff(counter: number): void {
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
     const id = randomUUID();
-    const mark = `${id} ${counter}`;
     const temp = `${this.offFile}.${id}.tmp`;
-    writeFileSync(temp, mark, { mode: 0o600 });
+    writeFileSync(temp, `${id} ${counter}`, { mode: 0o600 });
     try { renameSync(temp, this.offFile); } catch (error) {
       rmSync(temp, { force: true });
       throw error;
     }
-    return mark;
-  }
-
-  /**
-   * the counter an off that marked `marked` naming `offAt` brings `forgotten` to, once FILE was read again: while its mark
-   * still stands, a write that counted it meanwhile counted this off; after another off's mark, one more than that
-   */
-  private offCounted(offAt: number, marked: string): number {
-    return Math.max(offAt, offMark(this.offFile) === marked ? this.saved.forgotten : this.saved.forgotten + 1);
   }
 
   private persist(): boolean {
@@ -633,13 +622,12 @@ export class Telemetry {
     // turned off while an event is on its way: stop it before anything is read or written (a read may write the mark), and
     // even if OFF_FILE cannot be written
     let offAt = 0;
-    let marked = "";
     if (clean.enabled === false) {
       this.abort?.abort(); this.activeAbort?.abort(); this.countsAbort?.abort();
       // marked before the lock is even asked for: another server's send checks the mark right before it goes, so an off
       // stops it at once, whatever the wait for the lock
       offAt = this.offCounter();
-      marked = this.markOff(offAt);
+      this.markOff(offAt);
     }
     // the off mark an on was asked against: an off marked after it, even one done before this server gets the lock, wins
     const markAsked = clean.enabled === true ? offMark(this.offFile) : null;
@@ -647,7 +635,9 @@ export class Telemetry {
       let markAtStart = offMark(this.offFile);
       if (clean.enabled === true && markAtStart !== markAsked && !(markAsked === null && markAtStart?.startsWith(MIGRATED_MARK))) return "superseded";
       this.refresh();
-      const counter = this.offCounted(offAt, marked);
+      // the counter this off brings `forgotten` to: one past any counted while it waited for the lock, its own mark too when
+      // another write counted it meanwhile (counted twice drops what was not sent once more; it never sends anything)
+      const counter = Math.max(offAt, this.saved.forgotten + 1);
       // an off counts itself below, so it is not counted twice
       if (clean.enabled !== false) this.forgetUnwrittenOff(this.saved);
       // the read just now marked an older build's off: that mark is the one this change found
@@ -684,9 +674,9 @@ export class Telemetry {
     }, (): "applied" | "superseded" | "busy" => {
       // another server holds the lock: an off still goes, with its mark and without what was not sent; anything else waits
       if (clean.enabled !== false) return "busy";
-      const markedNow = this.markOff(offAt);
+      this.markOff(offAt);
       this.refresh();
-      const counter = this.offCounted(offAt, markedNow);
+      const counter = Math.max(offAt, this.saved.forgotten + 1);
       this.forgetUnsent(counter);
       this.saved.enabled = false;
       try { this.persist(); } catch (error) { console.error(`telemetry: ${this.file} could not be written (${message(error)})`); }
