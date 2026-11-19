@@ -1522,7 +1522,7 @@ export class DeviceStore {
    * A relay AUTH for an account-joined row: null when no such row stands here or the signature is not its key's, so a
    * caller without the key learns nothing; else the row's own verdict, read after the proof (T66).
    */
-  async matchAccountRelay(deviceId: string, nonce: Uint8Array, signature: string, serverId: string): Promise<{ match: DeviceMatch } | { refused: Exclude<AccessAnswer, { ok: true }> } | null> {
+  async matchAccountRelay(deviceId: string, nonce: Uint8Array, signature: string, serverId: string): Promise<{ match: DeviceMatch } | { refused: Exclude<AccessAnswer, { ok: true }>; holdUntil: string | null } | null> {
     if (this.joinedRows === null || this.failsClosed() || nonce.byteLength !== 32 || !/^[A-Za-z0-9_-]{86}$/.test(signature)) return null;
     if (this.devices.some((d) => d.id === deviceId)) return null;
     const row = this.joinedRows.row(deviceId);
@@ -1542,7 +1542,7 @@ export class DeviceStore {
     const current = this.joinedRows.row(deviceId);
     if (!verified || current === null || current.key !== row.key || this.accountRowStale(current)) return null;
     const answer = this.joinedRows.access(deviceId);
-    return "ok" in answer ? { match: { id: current.id, label: current.label, role: "drive" } } : { refused: answer };
+    return "ok" in answer ? { match: { id: current.id, label: current.label, role: "drive" } } : { refused: answer, holdUntil: this.joinedRows.row(deviceId)?.hold_until ?? null };
   }
 
   /** The account rows' store ends the sessions of a row it dropped (P8 step 3 for a list drop, T35). */
