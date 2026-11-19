@@ -982,7 +982,18 @@ export class DeviceStore {
 
   /** The PC leaves its account, for one of the three named reasons (P12); nothing else clears the binding. */
   clearAccountBinding(reason: ClearReason, by: string): boolean {
-    return this.pc?.clear(reason, by) ?? false;
+    const cleared = this.pc?.clear(reason, by) ?? false;
+    // a PC in no account keeps no account-joined row (T44)
+    if (cleared) this.endAccountRows(reason);
+    return cleared;
+  }
+
+  /** Every account-joined row ends: its sessions close first, then it leaves account-devices.json (T44, P8 order). */
+  private endAccountRows(reason: "revoke_all" | "identity_reset" | "left_on_pc"): void {
+    const ids = (this.joinedRows?.rows() ?? []).map((row) => row.id);
+    if (ids.length === 0) return;
+    for (const id of ids) this.closeAccountSessions(id);
+    this.joinedRows!.removeRows(ids, reason);
   }
 
   /**
@@ -2121,6 +2132,7 @@ export class DeviceStore {
    */
   revokeAll(user?: string): string[] {
     this.assertWritable();
+    this.endAccountRows("revoke_all");
     if (this.evidence !== null) return this.revokeAllInOrder(user);
     this.tombstone(this.devices, Date.now());
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? new Date().toISOString();
