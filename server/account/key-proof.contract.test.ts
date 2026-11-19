@@ -12,11 +12,11 @@ import { pairingPc, phone, SERVER_ID, type Pc } from "./pairing.test-helpers.ts"
 const pcs: Pc[] = [];
 afterEach(async () => { for (const pc of pcs.splice(0)) await pc.close(); });
 
-async function pc(accountOpensAll: boolean) {
+async function pc(accountOpensAll: boolean, platform?: NodeJS.Platform) {
   const told: { pending: { id: string; action: { kind: string; pending?: string; fingerprint?: string } }[] }[] = [];
   let push!: (line: string) => void;
   const input = new ReadableStream<Uint8Array>({ start(controller) { push = (line) => controller.enqueue(new TextEncoder().encode(line)); } });
-  const made = await pairingPc({ server: { accountOpensAll, desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
+  const made = await pairingPc({ server: { accountOpensAll, ...(platform ? { platform } : {}), desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
   pcs.push(made);
   const screen = {
     told,
@@ -86,4 +86,22 @@ test("T71: with the release flag off, pairing is today's: no challenge, the devi
   const admitted = await link.pair(await made.offerCode(), device.spki);
   expect(admitted.device_id).toMatch(/^[0-9a-f]{16}$/);
   expect(types).not.toContain(FrameType.KEY_CHALLENGE);
+});
+
+test("T71: on Linux, a pairing waits for the screen even when no screen path answers, and is never let in by its code alone", async () => {
+  const made = await pairingPc({ server: { accountOpensAll: true, platform: "linux" } });
+  pcs.push(made);
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
+});
+
+test("T71: on a PC with no screen proof (macOS, Windows), pairing is today's, flag on or off", async () => {
+  for (const platform of ["darwin", "win32"] as const) {
+    const made = await pc(true, platform);
+    const device = await phone();
+    const link = await relayConnection(made);
+    const admitted = await link.pair(await made.offerCode(), device.spki);
+    expect(admitted.device_id).toMatch(/^[0-9a-f]{16}$/);
+  }
 });

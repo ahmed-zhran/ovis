@@ -220,6 +220,8 @@ export function createServer(
     desktopActivity?: boolean;
     /** OVIS_ACCOUNT_OPENS_ALL, the Step 2 release flag (off by default): screen proof (server/account/local-confirm.ts) exists only with it */
     accountOpensAll?: boolean;
+    /** the platform the key confirm is decided by; tests name another than this machine's */
+    platform?: NodeJS.Platform;
     /** the desktop app's end of the desktop-owner channel (`takeDesktopOwnerFd`); used only with `accountOpensAll` */
     desktopOwner?: { input: ReadableStream<Uint8Array>; write(line: string): void };
     backgroundWait?: { grace: number; limit: number };
@@ -551,7 +553,7 @@ export function createServer(
     release: (codeId, key) => devices.releaseRedemption(codeId, key),
   }) : undefined;
   // a key confirm needs a screen this PC can prove: Linux in this release; elsewhere pairing is as before
-  const keyProofPairings = localConfirms && pendingRedemptions && process.platform === "linux"
+  const keyProofPairings = localConfirms && pendingRedemptions && (options.platform ?? process.platform) === "linux"
     ? new KeyProofPairings({ pending: pendingRedemptions, seams: devices }) : undefined;
   devices.onKeyRemoved((key, cause) => pendingRedemptions?.dropKey(key, cause));
   const askScreen = localConfirms && keyProofPairings ? (entry: PendingRedemption) => askScreenForKey(localConfirms, keyProofPairings, entry) : undefined;
