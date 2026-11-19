@@ -160,5 +160,10 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(await devices.liftAuthority(await lift(record.id, await key()))).toBe(false);
     const forged = { ...(await lift(record.id, older)), signature: (await lift(record.id, newer)).signature };
     expect(await devices.liftAuthority(forged)).toBe(false);
+    // a signer admitted after the block came is late (T52): its row is newer than the blocked key, so it lifts nothing
+    const late = await key();
+    const lateRow = devices.pairRelay(devices.startPairing().code, "Late", late.spki, Date.now(), () => true);
+    expect(lateRow).toBeNull();
+    expect(await devices.liftAuthority(await lift(record.id, late))).toBe(false);
   });
 });
