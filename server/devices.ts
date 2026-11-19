@@ -2118,23 +2118,23 @@ export class DeviceStore {
    * P8 steps 2 to 5 for rows the deny already covers: the gate in memory, the rows out of memory, their sessions and
    * codes ended, each removal told; then the registry write, whose failure is thrown only after all of that.
    */
-  private dropBeforeWrite(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"], why?: string): void {
-    if (gone.length === 0) return;
+  private dropBeforeWrite(gone: readonly StoredDevice[], by: DeviceRemovedEvent["by"], why?: string, joined?: { ids: string[]; reason: "remove" | "revoke" }): void {
+    if (gone.length === 0 && !joined?.ids.length) return;
     const next = this.devices.filter((d) => !gone.includes(d));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? new Date().toISOString();
     this.devices = next;
     this.gateClosedAt = gate;
     if (gone.some((d) => this.pending?.holders.has(d.id))) this.endPairing(undefined, "revoked");
-    for (const device of gone) {
-      const listeners = this.revocations.get(device.id);
-      this.revocations.delete(device.id);
-      for (const close of listeners ?? []) close();
+    for (const device of gone) this.closeAccountSessions(device.id);
+    if (joined?.ids.length) {
+      for (const id of joined.ids) this.closeAccountSessions(id);
+      this.joinedRows?.removeRows(joined.ids, joined.reason);
     }
     for (const device of gone) this.announceRemoval(device, by);
     for (const device of gone) this.journalRemoval(device, by, why);
     // a signer removed here takes the blocks it signed with it (T73), whether or not the registry write below works
     this.liftOrphanedBlocks();
-    this.save(next, gate);
+    if (gone.length > 0) this.save(next, gate);
   }
 
   /**
@@ -2307,9 +2307,10 @@ export class DeviceStore {
       this.dropWaiting([key]);
       // with no deny on disk the evidence cannot say which rows it covers: every row of the key goes for this run
       const gone = this.devices.filter((d) => d.relay_public_key === key && (denied !== null || this.coveredByEvidence(d)));
-      this.drop(gone, record.by);
+      const ids = (this.joinedRows?.rowsByKey(key) ?? []).filter((row) => denied !== null || this.coveredByEvidence(this.joinedAsStored(row))).map((row) => row.id);
+      this.dropBeforeWrite(gone, record.by, undefined, { ids, reason: "remove" });
       if (denied !== null) throw denied;
-      return added || gone.length > 0;
+      return added || gone.length > 0 || ids.length > 0;
     }
     // a pairing of this key made on this PC after the removal was signed wins: a replayed or late remove
     // leaves it and its key be, and takes only the key's other rows. Any other row goes, however late the remove
