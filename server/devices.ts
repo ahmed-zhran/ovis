@@ -596,7 +596,7 @@ export class DeviceStore {
    * it. A marker covers a row of its account, or one that names no account while this PC is in that account, unless
    * that row names no account and was paired here knowing every standing removal of the marker (`paired_over`).
    */
-  private coveredByEvidence(device: StoredDevice): boolean {
+  private coveredByEvidence(device: Pick<StoredDevice, "relay_public_key" | "account" | "paired_over">): boolean {
     const key = device.relay_public_key;
     if (key === undefined || this.evidence === null) return false;
     if (this.evidence.standingRevokes(key).length > 0) return true;
@@ -687,6 +687,11 @@ export class DeviceStore {
       }
       return admitNo !== undefined && asof?.joined != null && admitNo < asof.joined;
     });
+  }
+
+  /** A list read is not local pairing: it cannot supersede any standing removal. */
+  admitsFromList(key: string, account: string): boolean {
+    return this.admits(key) && !this.isTombstoned(key) && !this.coveredByEvidence({ relay_public_key: key, account });
   }
 
   /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
