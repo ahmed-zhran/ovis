@@ -58,6 +58,7 @@ import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
 import { PcAccountState } from "./account/pc-binding.ts";
 import { RemovalEvidence } from "./account/removal-evidence.ts";
 import { DeviceJournal } from "./account/device-journal.ts";
+import { mergeAccountState } from "./account/account-merge.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
@@ -266,8 +267,6 @@ export function createServer(
     return state;
   };
   const pcAccount = opensAll ? checkedOrder(stateDir) : null;
-  // a strict start changes nothing on disk, and nothing is merged with a damaged folder either, flag on or off: the
-  // check only reads, and a folder main wrote has no numbered row, so main's merge is unchanged (S29)
   // one rule, whatever the flag and with or without a sibling: when this folder's or its sibling's order is missing or
   // behind the rows it numbered, the start is blocked as a merge that could not be made blocks it, and writes nothing
   // to either folder (no merge, fold, repair or legacy pass) until the damage is repaired (S19, S29)
@@ -275,19 +274,24 @@ export function createServer(
   const blocked = pcAccount?.strict ?? damage(stateDir) ?? (options.siblingStateDir ? damage(options.siblingStateDir) : null);
   if (blocked !== null) console.error(blocked);
   const untouched = blocked !== null;
-  const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
-  let accountBlocked: string | null = null;
-  if (options.siblingStateDir && !untouched) {
+  // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
+  // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
+  const logMerge = opensAll && options.siblingStateDir && !untouched ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
+  // a sibling dir's account state is merged too; one that cannot be fails this PC closed like a damaged log (S19)
+  const accountMerge = opensAll && options.siblingStateDir && !untouched ? mergeAccountState(stateDir, options.siblingStateDir) : null;
+  const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge ?? accountMerge) : null;
+  // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
+  if (!untouched) try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
+  // then its rows: none is imported while the merged log holds a lock, a block or a freeze in force, and a row whose
+  // key differs between the two copies is dropped (T48, T27)
+  const closure = safetyLog !== null && (safetyLog.strict !== null || safetyLog.state().locked || safetyLog.state().freezes.length > 0);
+  const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir, undefined, opensAll ? { holdImports: closure, dropConflictingKeys: true } : {}) : null;
+  let accountBlocked: string | null = accountMerge;
+  if (options.siblingStateDir && !untouched && accountBlocked === null) {
     try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
     catch (error) { accountBlocked = `cannot merge the account tombstones of ${options.siblingStateDir}: ${error instanceof Error ? error.message : String(error)}`; }
     if (accountBlocked !== null) console.error(accountBlocked);
   }
-  // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
-  // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
-  const logMerge = opensAll && options.siblingStateDir && !untouched ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
-  const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge) : null;
-  // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
-  if (!untouched) try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
   const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
   // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
   const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
