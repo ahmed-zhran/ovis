@@ -694,8 +694,13 @@ export class DeviceStore {
     if (confirmed) return true;
     const row = key === undefined ? undefined : this.devices.find((d) => d.relay_public_key === key);
     const admitNo = row?.origin?.admit_no;
-    if (admitNo === undefined) return false;
-    return state.freezes.every((freeze) => freeze.asof?.joined != null && admitNo < freeze.asof.joined);
+    return state.freezes.every(({ record, asof }) => {
+      if (record.kind === "freeze") {
+        const no = key === undefined ? null : this.accountOrder?.no(key);
+        return key !== undefined && no != null && !this.accountOrder?.late(key) && no <= record.after;
+      }
+      return admitNo !== undefined && asof?.joined != null && admitNo < asof.joined;
+    });
   }
 
   /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
@@ -885,8 +890,16 @@ export class DeviceStore {
     if (record.kind !== "lift" || record.signer === "pc" || this.safety === null) return false;
     if (!await verifySafetyRecord(record as DeviceSafetyRecord)) return false;
     const blocked = this.safety.state().blocks.find((entry) => entry.record.id === record.target);
-    const joined = blocked?.asof?.joined;
-    if (blocked === undefined || joined === null || joined === undefined) return false;
+    if (blocked === undefined) {
+      const line = this.safety.state().freezes.find((entry) => entry.record.id === `f:${record.target}`)?.record;
+      if (line?.kind !== "freeze" || line.account !== record.account || !this.accountOrder || this.accountOrder.late(record.signer)) return false;
+      const signerNo = this.accountOrder.no(record.signer);
+      const targetNo = this.accountOrder.no(line.target);
+      return signerNo !== null && targetNo !== null && signerNo < Math.min(targetNo, line.after)
+        && this.memberRows(record.signer, record.account).some((row) => !this.frozen(row));
+    }
+    const joined = blocked.asof?.joined;
+    if (joined === null || joined === undefined) return false;
     // a key the account's order marks late is not trusted as older than the key it would free (P21, T52)
     if (this.accountOrder?.late(record.signer) ?? false) return false;
     const signers = this.memberRows(record.signer, record.account);
