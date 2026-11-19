@@ -15,6 +15,8 @@ const ENGLISH = [
   "View",
   "Reload",
   "Quit",
+  "Confirm",
+  "Decline",
 ] as const;
 
 export type TextKey = (typeof ENGLISH)[number];
@@ -38,6 +40,8 @@ const TRANSLATIONS: Record<Exclude<DesktopLocale, "en">, Record<TextKey, string>
     "View": "보기",
     "Reload": "새로고침",
     "Quit": "종료",
+    "Confirm": "확인",
+    "Decline": "거절",
   },
   ja: {
     "Open Ovis": "Ovis を開く",
@@ -56,6 +60,8 @@ const TRANSLATIONS: Record<Exclude<DesktopLocale, "en">, Record<TextKey, string>
     "View": "表示",
     "Reload": "再読み込み",
     "Quit": "終了",
+    "Confirm": "確認",
+    "Decline": "拒否",
   },
   zh: {
     "Open Ovis": "打开 Ovis",
@@ -74,6 +80,8 @@ const TRANSLATIONS: Record<Exclude<DesktopLocale, "en">, Record<TextKey, string>
     "View": "视图",
     "Reload": "重新加载",
     "Quit": "退出",
+    "Confirm": "确认",
+    "Decline": "拒绝",
   },
 };
 

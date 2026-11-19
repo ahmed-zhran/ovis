@@ -4,6 +4,8 @@ import { chmodSync, copyFileSync, cpSync, createWriteStream, existsSync, mkdirSy
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { Duplex } from "node:stream";
+import { DESKTOP_OWNER_FD } from "./ownerChannel.ts";
 import { ovisName } from "../../../server/legacy-env.ts";
 
 type Env = Record<string, string | undefined>;
@@ -15,10 +17,11 @@ type Env = Record<string, string | undefined>;
  * (NixOS) the program starts directly. Windows hands a child only the handles marked inheritable,
  * and has no /bin/bash: there the program always starts directly.
  */
-const CLOSE_INHERITED = `for fd in $(ls /proc/$$/fd 2>/dev/null || ls /dev/fd); do if [ "$fd" -gt 2 ] 2>/dev/null; then eval "exec $fd>&-" 2>/dev/null; fi; done; exec "$@"`;
+const closeInherited = (keep: readonly number[]) => `for fd in $(ls /proc/$$/fd 2>/dev/null || ls /dev/fd); do if [ "$fd" -gt 2 ] 2>/dev/null${keep.map((fd) => ` && [ "$fd" -ne ${fd} ]`).join("")}; then eval "exec $fd>&-" 2>/dev/null; fi; done; exec "$@"`;
 
-export function withoutInherited(command: string, args: string[], bash = "/bin/bash", platform: NodeJS.Platform = process.platform): [string, string[]] {
-  return platform !== "win32" && isFile(bash) ? [bash, ["-c", CLOSE_INHERITED, "ovis", command, ...args]] : [command, args];
+/** `keep`: descriptors the app hands the program on purpose (the desktop-owner channel), left open. */
+export function withoutInherited(command: string, args: string[], bash = "/bin/bash", platform: NodeJS.Platform = process.platform, keep: readonly number[] = []): [string, string[]] {
+  return platform !== "win32" && isFile(bash) ? [bash, ["-c", closeInherited(keep.filter(Number.isInteger)), "ovis", command, ...args]] : [command, args];
 }
 
 export interface Layout {
@@ -164,13 +167,18 @@ export interface RunningServer {
   child: ChildProcess;
   url: string;
   exited: Promise<number | null>;
+  /** the desktop-owner channel's socket, when the server was given one (ownerChannel.ts) */
+  owner: Duplex | null;
 }
 
 const LISTENING = /^Ovis listening on (http:\/\/\S+)$/m;
 
-export function startServer(layout: Layout, env: Env, log: WriteStream, timeoutMs = 60_000, onSpawn?: (child: ChildProcess) => void): Promise<RunningServer> {
-  const [command, args] = withoutInherited(layout.serverBinary, ["serve"]);
-  const child = spawn(command, args, { cwd: layout.server, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+export function startServer(layout: Layout, env: Env, log: WriteStream, timeoutMs = 60_000, onSpawn?: (child: ChildProcess) => void, owner = false): Promise<RunningServer> {
+  // the channel is a socketpair (Node makes one for a child's "pipe"), at a descriptor the bash wrapper leaves open
+  const [command, args] = owner
+    ? withoutInherited(layout.serverBinary, ["serve", "--desktop-owner-fd", String(DESKTOP_OWNER_FD)], undefined, undefined, [DESKTOP_OWNER_FD])
+    : withoutInherited(layout.serverBinary, ["serve"]);
+  const child = spawn(command, args, { cwd: layout.server, env, stdio: owner ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"], windowsHide: true });
   if (child.pid !== undefined) onSpawn?.(child);
   const exited = new Promise<number | null>((resolve) => {
     child.once("exit", (code) => resolve(code));
@@ -193,7 +201,7 @@ export function startServer(layout: Layout, env: Env, log: WriteStream, timeoutM
       if (error) {
         child.kill("SIGKILL");
         reject(error);
-      } else resolve({ child, url: url!, exited });
+      } else resolve({ child, url: url!, exited, owner: owner ? child.stdio[DESKTOP_OWNER_FD] as Duplex : null });
     };
     const listening = () => {
       const match = LISTENING.exec(output);

@@ -1,5 +1,5 @@
 /** The core and its terminals keep running, as for every hc client. */
-import { app, autoUpdater as squirrel, BrowserWindow, ipcMain, Menu, nativeImage, Notification, powerMonitor, powerSaveBlocker, session, shell, Tray, type MenuItemConstructorOptions } from "electron";
+import { app, autoUpdater as squirrel, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, powerSaveBlocker, session, shell, Tray, type MenuItemConstructorOptions } from "electron";
 import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readFileSync, rmSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,6 +13,7 @@ import { desktopLocale, desktopText } from "./text.ts";
 import { hideWindow } from "./windowClose.ts";
 import { argvLinkQuery, LINK_SCHEME, openLinkQuery, tellsLink } from "./openLink.ts";
 import { openOutside } from "./openOutside.ts";
+import { ownerChannel, type OwnerPending } from "./ownerChannel.ts";
 
 type StepState = "pending" | "ok" | "failed";
 export interface Status {
@@ -161,7 +162,7 @@ async function launch(): Promise<void> {
       const running = await startServer(programs, serverEnv(process.env, { hc, stateDir, port }), log, 60_000, (child) => {
         spawning = child;
         writeSaved(savedPath, { port, server: { pid: child.pid!, bun: programs.serverBinary, started: processStartSync(child.pid!) } });
-      });
+      }, process.platform === "linux");
       spawning = null;
       if (quitting) {
         await stopServer(running);
@@ -169,6 +170,7 @@ async function launch(): Promise<void> {
         return;
       }
       server = running;
+      if (running.owner) listenOwner(running.owner);
       const runLog = log;
       void running.exited.then((code) => {
         runLog.end();
@@ -190,6 +192,23 @@ async function launch(): Promise<void> {
     if (log && !server) log.end();
   }
   if (server) await window?.loadURL(server.url).catch((error: unknown) => console.error(`Opening ${server?.url} failed: ${message(error)}`));
+}
+
+/**
+ * The desktop-owner channel (device table R8, T68, T72): each action the server puts on this PC's screen is asked
+ * once, as the server words it, with Decline the default; only this window's own person can answer it.
+ */
+function listenOwner(socket: NonNullable<RunningServer["owner"]>): void {
+  const asked = new Set<string>();
+  const channel = ownerChannel(socket, socket, (pending: readonly OwnerPending[]) => {
+    for (const item of pending) {
+      if (asked.has(item.id)) continue;
+      asked.add(item.id);
+      const detail = [...item.shown.lines, ...(item.shown.fingerprint === undefined ? [] : [item.shown.fingerprint])].join("\n");
+      const options = { type: "question" as const, title: item.shown.title, message: item.shown.title, detail, buttons: [text("Confirm"), text("Decline")], defaultId: 1, cancelId: 1, noLink: true };
+      void (window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options)).then(({ response }) => { channel.answer(item.id, response === 0); });
+    }
+  });
 }
 
 async function waitUntilEnded(pid: number, timeoutMs: number): Promise<void> {
