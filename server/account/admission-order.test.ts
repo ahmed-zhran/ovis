@@ -62,12 +62,13 @@ describe("one admission order per PC (origin and admit_no)", () => {
 
     // a number is never used again: not after a Revoke, not after a restart
     expect(devices.revoke(second)).toBe(true);
-    const third = await pairRelay(store(dir), base + 120_000);
+    const reopened = store(dir);
+    const third = await pairRelay(reopened, base + 120_000);
     expect(row(dir, third).origin?.admit_no).toBe(3);
     expect(JSON.parse(readFileSync(join(dir, ADMISSION_FILE), "utf8"))).toMatchObject({ v: 1, next_admit: 4 });
 
     // a cookie pairing takes the next number of the same order
-    const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    const cookie = reopened.pair(reopened.startPairing().code, "Laptop", "drive")!;
     expect(row(dir, cookie.device.id).origin).toMatchObject({ from: "remote", how: "code", admit_no: 4 });
   });
 

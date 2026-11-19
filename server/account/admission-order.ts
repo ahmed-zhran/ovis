@@ -1,0 +1,119 @@
+/**
+ * One admission order per PC (rows P21 and P22 of the account-opens-all design). Every row this PC admits carries an
+ * `origin`: where it came from, by which path, and `admit_no`, its place in this PC's own order, taken from
+ * `next_admit` in `account-pc.json` and never used twice. Age in any decision on this PC is that order: no account
+ * registration number, no journal sequence and no clock stands in for it. Rows from before the upgrade are stamped
+ * `legacy` once (T50) and keep their creation order among themselves; a row with no origin, or a tie, has no age and
+ * so no authority over another row (T19). Read only while OVIS_ACCOUNT_OPENS_ALL is on.
+ */
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writePrivateState } from "../private-state.ts";
+import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+
+/** This PC's account state (P12); S2-03 keeps only `next_admit` in it, and the binding joins it later under the same `v`. */
+export const ADMISSION_FILE = "account-pc.json";
+
+export type OriginFrom = "pc" | "remote" | "recover" | "legacy";
+export type OriginHow = "list" | "add" | "member" | "code" | "digits" | "qr" | "promoted" | "confirmed" | "link" | "legacy";
+
+export interface RowOrigin {
+  readonly from: OriginFrom;
+  readonly how: OriginHow;
+  /** the member that approved or signed it in, when one did */
+  readonly by: string | null;
+  readonly admit_no: number;
+  readonly at: string;
+}
+
+const FROMS: ReadonlySet<string> = new Set(["pc", "remote", "recover", "legacy"]);
+const HOWS: ReadonlySet<string> = new Set(["list", "add", "member", "code", "digits", "qr", "promoted", "confirmed", "link", "legacy"]);
+
+export function isRowOrigin(value: unknown): value is RowOrigin {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const origin = value as Record<string, unknown>;
+  return Object.keys(origin).length === 5 && FROMS.has(origin.from as string) && HOWS.has(origin.how as string)
+    && (origin.by === null || typeof origin.by === "string") && Number.isSafeInteger(origin.admit_no) && (origin.admit_no as number) >= 0
+    && typeof origin.at === "string" && (origin.from === "legacy") === (origin.how === "legacy") && (origin.from === "legacy") === (origin.admit_no === 0);
+}
+
+interface AdmissionRow { readonly id: string; readonly created_at: string; readonly origin?: RowOrigin | undefined }
+
+/**
+ * Which of two rows joined this PC first: `older` when `a` did, `newer` when `b` did, null when they cannot be placed
+ * against each other (a missing origin, or two legacy rows made at the same time). Null gives no authority either way.
+ */
+export function compareAdmission(a: AdmissionRow, b: AdmissionRow): "older" | "newer" | null {
+  if (a.origin === undefined || b.origin === undefined || a.id === b.id) return null;
+  if (a.origin.from === "legacy" && b.origin.from === "legacy") {
+    const [left, right] = [Date.parse(a.created_at), Date.parse(b.created_at)];
+    if (Number.isNaN(left) || Number.isNaN(right) || left === right) return null;
+    return left < right ? "older" : "newer";
+  }
+  if (a.origin.admit_no === b.origin.admit_no) return null;
+  return a.origin.admit_no < b.origin.admit_no ? "older" : "newer";
+}
+
+/** What a remote caller may act on: its own row, and the rows that joined this PC after it (T19 in 2d). */
+export function remoteReach(caller: AdmissionRow, target: AdmissionRow): boolean {
+  if (caller.id === target.id) return true;
+  return compareAdmission(caller, target) === "older";
+}
+
+/** Two copies of a row keep an origin only when both hold the same one (T27 in 2d). */
+export function mergedOrigin(a: RowOrigin | undefined, b: RowOrigin | undefined): RowOrigin | undefined {
+  if (a === undefined || b === undefined) return undefined;
+  return a.from === b.from && a.how === b.how && a.by === b.by && a.admit_no === b.admit_no && a.at === b.at ? a : undefined;
+}
+
+export class AdmissionOrder {
+  private nextAdmit = 1;
+  private problem: string | null = null;
+  /** no order file and no journal: this folder's rows predate the release and are stamped `legacy` once (T50) */
+  readonly fresh: boolean = false;
+
+  private constructor(private readonly path: string) {}
+
+  static open(stateDir: string): AdmissionOrder {
+    const order = new AdmissionOrder(join(stateDir, ADMISSION_FILE));
+    let text: string;
+    try { text = readFileSync(order.path, "utf8"); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") order.problem = `Cannot read ${order.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
+      else if (existsSync(join(stateDir, ACCOUNT_JOURNAL_FILE))) order.problem = `${order.path} is missing beside the device journal`;
+      else (order as { fresh: boolean }).fresh = true;
+      return order;
+    }
+    try {
+      const value = JSON.parse(text) as { v?: unknown; next_admit?: unknown };
+      if (value.v !== 1 || !Number.isSafeInteger(value.next_admit) || (value.next_admit as number) < 1) order.problem = `${order.path} is not this PC's account state`;
+      else order.nextAdmit = value.next_admit as number;
+    } catch { order.problem = `${order.path} is not JSON`; }
+    return order;
+  }
+
+  /** Why this PC fails closed, or null: no row is admitted while its order cannot be known. */
+  get strict(): string | null {
+    return this.problem === null ? null : `${this.problem}: only this PC itself gets in until the account state is restored.`;
+  }
+
+  static legacy(createdAt: string): RowOrigin {
+    return { from: "legacy", how: "legacy", by: null, admit_no: 0, at: createdAt };
+  }
+
+  /** Ends the one-time legacy stamping: the rows went to disk first, so a stop in between stamps them again, not twice. */
+  settleFresh(): void {
+    if (!this.fresh || this.problem !== null) return;
+    writePrivateState(this.path, { v: 1, next_admit: this.nextAdmit });
+    (this as { fresh: boolean }).fresh = false;
+  }
+
+  /** The origin of a row being admitted now; its number is on disk before the row is, so none is ever used twice. */
+  admit(from: OriginFrom, how: OriginHow, by: string | null, now: number): RowOrigin {
+    if (this.problem !== null) throw new Error(this.strict!);
+    const admitNo = this.nextAdmit;
+    writePrivateState(this.path, { v: 1, next_admit: admitNo + 1 });
+    this.nextAdmit = admitNo + 1;
+    (this as { fresh: boolean }).fresh = false;
+    return { from, how, by, admit_no: admitNo, at: new Date(now).toISOString() };
+  }
+}

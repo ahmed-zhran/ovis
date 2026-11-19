@@ -13,6 +13,7 @@
 import { createHash, createPublicKey, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { AdmissionOrder, isRowOrigin, type RowOrigin } from "./account/admission-order.ts";
 import { AccountRecordError, parseAccountRecord, type AddRecord, type RemoveRecord } from "../shared/account-records.ts";
 import { type AccountPairing, type AccountPairingEnd, type AccountPairingState, type AccountPairingTurnedAway, type DevicePairedEvent, type DeviceRemovedEvent, type DevicePairToken, type DeviceRole, type DevicesRevokedAll, type PairedDevice, type DeviceConnection, STREAM_COOKIE_PREFIX } from "../shared/protocol.ts";
 import type { MuxClock } from "../shared/relay-mux-engine.ts";
@@ -162,6 +163,8 @@ export interface StoredDevice {
    * not know is kept as it is and counts as `word`.
    */
   joined_by?: JoinedBy;
+  /** where this PC admitted the row from, and its place in this PC's own order (server/account/admission-order.ts) */
+  origin?: RowOrigin;
 }
 
 /**
@@ -301,7 +304,8 @@ export function readDeviceRegistry(path: string): DeviceRegistry {
       && (d.added_by === undefined || typeof d.added_by === "string")
       && (d.linked_at === undefined || typeof d.linked_at === "string")
       && (d.link_moved_key === undefined || typeof d.link_moved_key === "boolean")
-      && (d.account_add === undefined || isJsonObject(d.account_add)))) return { kind: "bad" };
+      && (d.account_add === undefined || isJsonObject(d.account_add))
+      && (d.origin === undefined || isRowOrigin(d.origin)))) return { kind: "bad" };
   return { kind: "ok", gateClosedAt: parsed.gate_closed_at, devices: parsed.devices as StoredDevice[], placeholder: parsed.placeholder === true && parsed.devices.length === 0 };
 }
 
@@ -459,10 +463,16 @@ export class DeviceStore {
    */
   /** `accountBlocked`: why account records cannot be trusted here (a sibling dir's tombstones that could not be merged). */
   /**
-   * `safety`: the account safety log (server/account/safety-log.ts), with OVIS_ACCOUNT_OPENS_ALL on. While it fails
-   * closed no device signs in or pairs and account records are refused: only this PC itself gets in.
+   * `account`: the account-opens-all state, with OVIS_ACCOUNT_OPENS_ALL on. `safety`, the safety log
+   * (server/account/safety-log.ts), and `admissions`, this PC's admission order (server/account/admission-order.ts):
+   * while either fails closed no device signs in or pairs and account records are refused, so only this PC itself
+   * gets in. With `admissions`, every row admitted gets its origin.
    */
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, private readonly safety: { readonly strict: string | null } | null = null) {
+  private readonly safety: { readonly strict: string | null } | null;
+  private readonly admissions: AdmissionOrder | null;
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; admissions?: AdmissionOrder | null } = {}) {
+    this.safety = account.safety ?? null;
+    this.admissions = account.admissions ?? null;
     this.path = join(stateDir, "devices.json");
     this.tombstonePath = join(stateDir, "account-tombstones.json");
     this.pendingTombstonePath = join(stateDir, "account-tombstones.pending.json");
@@ -494,6 +504,7 @@ export class DeviceStore {
         rmSync(this.pendingTombstonePath, { force: true });
       }
       this.finishInterruptedWrites();
+      this.stampLegacy();
     }
   }
 
@@ -525,12 +536,33 @@ export class DeviceStore {
   }
 
   get accountError(): string | null {
-    return this.safety?.strict ?? this.accountProblem;
+    return this.safety?.strict ?? this.admissions?.strict ?? this.accountProblem;
   }
 
-  /** The safety log fails closed: no device gets in by a row or a code (S19). */
+  /** The safety log or the admission order fails closed: no device gets in by a row or a code. */
   get failsClosed(): boolean {
-    return (this.safety?.strict ?? null) !== null;
+    return (this.safety?.strict ?? this.admissions?.strict ?? null) !== null;
+  }
+
+  /**
+   * Rows from before the upgrade get `legacy` once (T50): on disk before the order file that ends the stamping, so a
+   * stop between the two stamps them again on the next start and never a row admitted since.
+   */
+  private stampLegacy(): void {
+    if (!this.admissions?.fresh || this.error !== null) return;
+    if (this.devices.some((d) => d.origin === undefined)) {
+      const next = this.devices.map((d) => d.origin === undefined ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
+      this.save(next);
+      this.devices = next;
+    }
+    this.admissions.settleFresh();
+  }
+
+  /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */
+  private admitted(device: StoredDevice, now: number): StoredDevice {
+    if (this.admissions === null) return device;
+    const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : device.added_by !== undefined ? "member" : "code";
+    return { ...device, origin: this.admissions.admit("remote", how, device.added_by ?? null, now) };
   }
 
   /**
@@ -1123,7 +1155,8 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(device: StoredDevice, now: number, origin: readonly string[], codeSpent = true): void {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true): void {
+    const device = this.admitted(admitting, now);
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
     this.save(next, gate);
@@ -1328,7 +1361,7 @@ export class DeviceStore {
     const candidateIndex = this.unconfirmedFirstPairs.findIndex(({ device }) => same(digest, device.token_hash));
     if (candidateIndex !== -1) {
       const { device: candidate, origin } = this.unconfirmedFirstPairs[candidateIndex]!;
-      const confirmed = { ...candidate, last_seen_at: new Date(now).toISOString() };
+      const confirmed = this.admitted({ ...candidate, last_seen_at: new Date(now).toISOString() }, now);
       const next = [...this.devices, confirmed];
       const gate = this.gateClosedAt ?? confirmed.created_at;
       // This is an authorization write, not last-seen telemetry: do not match the cookie
@@ -1636,7 +1669,9 @@ export class DeviceStore {
     // account approved its pairing: a code started by a device outside the account names its starter in `added_by` and
     // approves nothing, and an approval for another account does not carry over
     const ownWord = device.account === undefined && device.member_approved_in !== account;
-    const updated: StoredDevice = { ...device, relay_public_key: key, account, linked_at: new Date().toISOString(), link_moved_key: moved, ...(ownWord ? { joined_by: vouched ? "service" as const : "word" as const } : {}) };
+    const linked: StoredDevice = { ...device, relay_public_key: key, account, linked_at: new Date().toISOString(), link_moved_key: moved, ...(ownWord ? { joined_by: vouched ? "service" as const : "word" as const } : {}) };
+    // a link that moves the key admits a key: a new place in this PC's order, never the old row's (P22, T11 in 2d)
+    const updated = key !== oldKey ? this.admitted(linked, Date.now()) : linked;
     const next = this.devices.map((d) => d === device ? updated : d);
     this.save(next);
     this.devices = next;

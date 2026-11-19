@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MAX_PREFERENCES_BYTES, sharedPreferencesBody, type PreferencesChange } from "../shared/preferences.ts";
+import { mergedOrigin } from "./account/admission-order.ts";
 import { readDeviceRegistry, VOUCHED, type StoredDevice } from "./devices.ts";
 import { preparePrivateState, publishPrivateState, writePrivateState } from "./private-state.ts";
 import { normalizeEndpoint, PUSH_EXTRA_KEYS } from "./push.ts";
@@ -113,7 +114,9 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // vouched one, `null` included) is kept whichever copy holds it and whichever account the row takes, as no later
     // link undoes it. Otherwise the kept copy's mark, or, where both copies are in that account, the other's when the
     // kept one has none: a vouched mark goes with its own account only. Only a missing mark is none
-    const { joined_by: own, ...rest } = device;
+    const { joined_by: own, origin: ownOrigin, ...rest } = device;
+    // an origin is kept only when both copies hold the same one: a row's age here is never another dir's word (T27 in 2d)
+    const origin = mergedOrigin(ownOrigin, twin.origin);
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -122,6 +125,7 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     devices.push({
       ...rest,
       ...(joinedBy === undefined ? {} : { joined_by: joinedBy }),
+      ...(origin === undefined ? {} : { origin }),
       role: device.role === "watch" || twin.role === "watch" ? "watch" : "drive",
       created_at: earliest([device.created_at, twin.created_at])!,
       last_seen_at: [device.last_seen_at, twin.last_seen_at].filter((seen): seen is string => seen !== null).sort().at(-1) ?? null,
@@ -134,7 +138,9 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
   for (const device of theirs) {
     // revoked here since the last merge
     if (myIds.has(device.id) || own !== null && !incomplete.own && bases.own?.has(device.id)) continue;
-    devices.push(device);
+    // a row only the other dir holds has no place in this dir's order
+    const { origin: _elsewhere, ...imported } = device;
+    devices.push(imported);
   }
   // every piece of evidence that either side was ever gated keeps the merge gated
   const gate = earliest([own?.gate_closed_at, other?.gate_closed_at, ...mine.map((d) => d.created_at), ...theirs.map((d) => d.created_at)]);
