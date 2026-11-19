@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import {
   decodeFrame, encodeFrame, FrameType, HTTP_END_FLAGS, LIMITS_V1,
   MAX_FRAME_BYTES, MAX_LARGE_WS_MESSAGE_BYTES, MuxProtocolError, REQUEST_HEADERS, RESPONSE_HEADERS,
-  SESSION_ERRORS, STREAM_ERRORS, validateHeaders, validateTarget, WS_DATA_FLAGS,
+  KEY_PROOF_FEATURE, SESSION_ERRORS, STREAM_ERRORS, validateHeaders, validateTarget, WS_DATA_FLAGS,
   WS_CONTINUATION_CAPACITY, WS_START_CAPACITY,
 } from "./relay-mux.ts";
 import type { HeaderList, MuxFrame, SessionError } from "./relay-mux.ts";
@@ -388,5 +388,31 @@ describe("direct carriers", () => {
       ["ws://10.0.0.1:1", "ws://10.0.0.2:1", "ws://10.0.0.3:1", "ws://10.0.0.4:1", "ws://10.0.0.5:1"]]) {
       expect(() => encodeFrame(authOk(direct))).toThrow(MuxProtocolError);
     }
+  });
+});
+
+describe("key proof (device-row-states T71, T72; S2-13 wire)", () => {
+  it("T71: a HELLO that offers key-proof-1 parses", () => {
+    const hello: MuxFrame = { ...session, type: FrameType.HELLO, payload: { protocol: "ovis-mux", versions: [1], features: [KEY_PROOF_FEATURE], required_features: [] } };
+    expect(KEY_PROOF_FEATURE).toBe("key-proof-1");
+    expect(decodeFrame(encodeFrame(hello))).toEqual(hello);
+  });
+  it("T71: the challenge, the proof and the wait round-trip", () => {
+    for (const frame of [
+      { ...session, type: FrameType.KEY_CHALLENGE, payload: { challenge: "A".repeat(43) } },
+      { ...session, type: FrameType.KEY_PROVE, payload: { signature: "A".repeat(86) } },
+      { ...session, type: FrameType.KEY_PENDING, payload: {} },
+    ] as const satisfies readonly MuxFrame[]) expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
+  });
+  it("T72: the wait carries no fingerprint, whatever the sender put in it", () => {
+    const decoded = decodeFrame(wire(FrameType.KEY_PENDING, JSON.stringify({ fingerprint: "AAAA-BBBB" })));
+    expect(decoded).toEqual({ ...session, type: FrameType.KEY_PENDING, payload: {} });
+  });
+  it("T71: a malformed challenge or proof is a protocol error", () => {
+    rejects(() => decodeFrame(wire(FrameType.KEY_CHALLENGE, JSON.stringify({ challenge: "short" }))));
+    rejects(() => decodeFrame(wire(FrameType.KEY_PROVE, JSON.stringify({ signature: "A".repeat(85) }))));
+  });
+  it("T71: an old app on a PC that needs the proof is refused key_proof_required", () => {
+    expect(SESSION_ERRORS).toContain("key_proof_required");
   });
 });
