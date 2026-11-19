@@ -90,6 +90,8 @@ export class DeviceReadOnlyError extends Error {
  * joins a PC that has members by signing in to their account, with a member's approval (docs/account.md).
  */
 /** The final admission guard refused (G3): the PC is locked or closed to the key. Nothing was written. */
+export type KeyRemovedCause = "revoke" | "remove" | "block" | "revoke_all";
+
 export class AdmissionRefusedError extends Error {
   constructor() { super("This PC admits no new device while a lock, a block or a freeze stands"); }
 }
@@ -442,7 +444,7 @@ export class DeviceStore {
    * `expires`: the wall-clock end of its ten minutes, which its `expires_at` shows; `deadline`: the same end on the
    * store's clock, which only moves forward; `over`: set the first time either says its ten minutes are over (codeOver)
    */
-  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string } | null = null;
+  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string; reserved?: { readonly key: string; readonly how: "code" | "qr" } } | null = null;
   /** How the latest codes made for an account ended, newest last: ENDED_ACCOUNT_CODES at most, in memory only. */
   private endedAccountCodes: Extract<AccountPairingState, { state: "ended" }>[] = [];
   /** What a row that waits to link, and the redemption of a code, is bounded on (useClock). */
@@ -486,6 +488,7 @@ export class DeviceStore {
   private readonly evidence: RemovalEvidence | null;
   private readonly journal: DeviceJournal | null;
   private readonly noticeListeners = new Set<(entry: JournalEntry) => void>();
+  private readonly keyRemovedListeners = new Set<(key: string, cause: KeyRemovedCause) => void>();
   /** A deny that could not reach the disk (P8 step 1): only this PC itself gets in until one is written. */
   private denyProblem: string | null = null;
   private readonly revokeAllPath: string;
@@ -657,6 +660,56 @@ export class DeviceStore {
     return state.freezes.every((freeze) => freeze.asof?.joined != null && admitNo < freeze.asof.joined);
   }
 
+  /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
+  onKeyRemoved(listener: (key: string, cause: KeyRemovedCause) => void): () => void {
+    this.keyRemovedListeners.add(listener);
+    return () => { this.keyRemovedListeners.delete(listener); };
+  }
+
+  /**
+   * A code redeemed by a device that named `key`, checked as a pairing checks it (a wrong code spends a guess) and
+   * nothing written: the code's one use is reserved for that key until it is confirmed on this PC's screen, released,
+   * or the code ends. With the release flag off it takes no code.
+   */
+  redeemCode(code: string, how: "code" | "qr", key: string, now = Date.now()): { ok: true; codeId: string; closesAt: string; origin: "pc" | "relay"; accountScope: string | null } | { ok: false; reason: "flag_off" | "invalid_key" | "invalid_code" | "in_use" } {
+    if (this.safety === null) return { ok: false, reason: "flag_off" };
+    if (!isRelayPublicKey(key)) return { ok: false, reason: "invalid_key" };
+    if (!this.checkPairingCode(code, now)) { this.noteRelayFailure("code", now); return { ok: false, reason: "invalid_code" }; }
+    const pending = this.pending!;
+    if (pending.reserved !== undefined || pending.waiting !== undefined) return { ok: false, reason: "in_use" };
+    pending.reserved = { key, how };
+    return { ok: true, codeId: pending.id, closesAt: new Date(pending.expires).toISOString(), origin: pending.remote ? "relay" : "pc", accountScope: this.account() };
+  }
+
+  /** The pending redemption of `key` under `codeId` ended (declined, expired, dropped): its use is free again. */
+  releaseRedemption(codeId: string, key: string): void {
+    if (this.pending?.id === codeId && this.pending.reserved?.key === key) delete this.pending.reserved;
+  }
+
+  /**
+   * The key a redemption reserved, confirmed: on this PC's screen (`screen`, origin pc) or by `ovis recover --admit`
+   * (`recover`). Every guard is asked again in this turn, and only the very key and code reserved commit. A key a row
+   * already holds gives that row the new origin and makes no second row (T5 in 2d).
+   */
+  admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover" }, now = Date.now()): DeviceMatch | null {
+    const pending = this.pending;
+    if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || pending.reserved?.key !== confirm.key || this.codeOver(pending, now)) return null;
+    if (!this.admits(confirm.key)) return null;
+    const origin = this.pc.admit(confirm.source === "screen" ? "pc" : "recover", pending.reserved.how, null, now);
+    const existing = this.devices.find((d) => d.relay_public_key === confirm.key);
+    if (existing !== undefined) {
+      const next = this.devices.map((d) => d === existing ? { ...d, origin } : d);
+      this.save(next);
+      this.devices = next;
+      this.voidPending();
+      return { id: existing.id, label: existing.label, role: existing.role };
+    }
+    const device: StoredDevice = { id: randomBytes(8).toString("hex"), label: normalizeLabel(confirm.label, "Device"), role: "drive", token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: confirm.key, created_at: new Date(now).toISOString(), last_seen_at: null, origin };
+    this.enroll(device, now, [], true);
+    this.clearTombstone(confirm.key);
+    return { id: device.id, label: device.label, role: device.role };
+  }
+
   /** P14: this PC's denial counter, 0 while the release flag is off. */
   gen(): number { return this.pc?.gen() ?? 0; }
 
@@ -680,7 +733,7 @@ export class DeviceStore {
 
   /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */
   private admitted(device: StoredDevice, now: number): StoredDevice {
-    if (this.pc === null) return device;
+    if (this.pc === null || device.origin !== undefined) return device;
     const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : device.added_by !== undefined ? "member" : "code";
     // `by` names the approving member by its account key, as the shared contract reads it
     const by = device.added_by === undefined ? null : this.devices.find((d) => d.id === device.added_by)?.relay_public_key ?? null;
@@ -1118,7 +1171,14 @@ export class DeviceStore {
    * row paired before the removal, and its link would take it back (promote clears the tombstone of a key its row
    * kept). So a tombstone that stands when a waiting row links stood when that row paired.
    */
-  private dropWaiting(keys: readonly string[]): void {
+  private dropWaiting(keys: readonly string[], cause: KeyRemovedCause = "remove"): void {
+    // every key a deny takes ends its reservation and is told, each listener on its own (S2-13)
+    for (const key of keys) {
+      if (this.pending?.reserved?.key === key) delete this.pending.reserved;
+      for (const listener of [...this.keyRemovedListeners]) {
+        try { listener(key, cause); } catch (error) { console.warn(`[devices] a key removal listener failed: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    }
     const waiting = this.pending?.waiting;
     if (!waiting) return;
     for (const row of [...waiting.rows.values()]) if (keys.includes(row.key)) this.dropProvisional(waiting, row, "removed");
@@ -2003,7 +2063,7 @@ export class DeviceStore {
       // each Revoke is its own evidence, also of a key that already has a tombstone (P13)
       for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
       this.refreshTombstones();
-      this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
+      this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []), "revoke");
       return;
     }
     const keys = [...new Set(rows.flatMap((d) => d.relay_public_key === undefined || this.isTombstoned(d.relay_public_key) ? [] : [d.relay_public_key]))];
@@ -2017,7 +2077,7 @@ export class DeviceStore {
         this.tombstones = next;
       } else this.writeTombstones(next);
     }
-    this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
+    this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []), "revoke");
   }
 
   private writeTombstones(next: AccountTombstone[]): void {
