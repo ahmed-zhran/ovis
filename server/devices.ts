@@ -531,6 +531,8 @@ export class DeviceStore {
    * the evidence covers goes. Nothing of it is told to anyone: no session is open yet.
    */
   private takeInEvidence(found: readonly AccountTombstone[]): void {
+    // evidence that cannot be trusted is never written over: the PC fails closed on it instead (S19)
+    if (this.evidence!.strict !== null) return;
     this.evidence!.takeIn(found, this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
     this.refreshTombstones();
     rmSync(this.pendingTombstonePath, { force: true });
