@@ -7,7 +7,7 @@ import type { RequestLog } from "./request-log.ts";
 import { handlePaneRequest } from "./pane-routes.ts";
 import { handleIntegrationsRequest } from "./integrations-routes.ts";
 import type { OrderSequence } from "./order-sequence.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, ObservedIngress, RelayPairingsEvent, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
+import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, ObservedIngress, PendingRedemptionsEvent, RelayPairingsEvent, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { authClient, deviceAuthorizationValue, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { bindScope, cameThroughProxy, decideAccess, decideMachineAccess, forwardingHeaders, inTailnet, isLoopbackAddress, isServeOwnerRequest, lanExposed, machineForwardingHeaders, observedIngress, ownerAccess } from "./access.ts";
@@ -48,6 +48,8 @@ import { handlePortalRequest } from "./portal.ts";
 import { handleRelayRequest } from "./relay/routes.ts";
 import type { LocalConfirms } from "./account/local-confirm.ts";
 import type { RecoveryReleases } from "./account/recovery.ts";
+import type { PendingRedemptions } from "./account/pending.ts";
+import { handlePendingRequest } from "./account/pending-routes.ts";
 import { handleAccountRequest } from "./account/routes.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
 import type { AccountHolds } from "./account/holds.ts";
@@ -127,6 +129,8 @@ export interface RequestServices {
   readonly localConfirms?: LocalConfirms;
   /** releases `ovis recover` made since this start (server/account/recovery.ts); only with the release flag */
   readonly recoveryReleases?: RecoveryReleases;
+  /** devices waiting for this PC's screen to approve their key (server/account/pending.ts); only with the release flag */
+  readonly pendingRedemptions?: PendingRedemptions;
   readonly portalStartupResult: PortalStartup | undefined;
   readonly portalStartup: Promise<PortalStartup>;
 }
@@ -459,7 +463,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
       // and through the relay to a drive account member, with three candidates instead of the digits (docs/account.md)
       const remoteApprover = ctx.peer.kind === "relay" && devices.isAccountApproverSession(ctx.peer.device.id, ctx.peer.key);
-      const pairings = { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void) => {
+      const pairings = { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent | PendingRedemptionsEvent) => void) => {
         const stopPaired = devices.onPaired((event, origin) => { if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); });
         // removals go to streams that may drive, as the client lane's device list needs (docs/account.md)
         const stopRemoved = !openAccess && access.level === "full" && access.role === "drive" ? devices.onRemoved(listener) : undefined;
@@ -467,7 +471,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         const stopRelay = approver ? ctx.services.relay.approvals.subscribe((list) => listener({ type: "relay-pairings", pairings: list }))
           : remoteApprover ? ctx.services.relay.approvals.subscribeRemote((list) => listener({ type: "remote-pairings", pairings: list })) : undefined;
         if (!approver) listener({ type: "relay-pairings", pairings: [] });
-        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
+        // the devices waiting for this PC's screen, to streams that may drive; approving stays on the screen
+        const pending = ctx.services.pendingRedemptions;
+        const stopPending = pending !== undefined && !openAccess && access.level === "full" && access.role === "drive"
+          ? pending.onChange(() => listener({ type: "pending-redemptions", pending: pending.view() })) : undefined;
+        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); stopPending?.(); };
       } };
       // a stream ends with what let it in: a device's revoke, the gate closing on one the open LAN let in, Portal's recheck
       const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : openAccess ? (close) => devices.endWithGate(close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, ownerAccess(access));
@@ -546,6 +554,10 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       forgetPageMedia({ client });
     }
     return handleAuthRequest(request, token, client);
+  }
+  const pendingRedemptions = ctx.services.pendingRedemptions;
+  if (pendingRedemptions !== undefined && (pathname === "/api/devices/pending" || pathname.startsWith("/api/devices/pending/"))) {
+    return handlePendingRequest(request, pathname, pendingRedemptions, access);
   }
   if (pathname === "/api/devices" || pathname.startsWith("/api/devices/")) {
     try {
