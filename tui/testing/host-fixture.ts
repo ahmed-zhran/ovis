@@ -16,6 +16,7 @@ import { writeSync } from "node:fs";
 import { createUnixHost } from "../host/unix.ts";
 
 const mode = process.argv[2] ?? "wait";
+const hash = process.env["HOST_FIXTURE_HASH_INPUT"] === "1" ? new Bun.CryptoHasher("sha256") : null;
 let failing = false;
 const host = createUnixHost({
   writeSync: (fd, buffer, offset, length) => {
@@ -31,8 +32,10 @@ if (!host.enter()) {
 }
 // listening before the probe, so that anything the probe let through would show
 host.onInput((bytes) => {
+  hash?.update(bytes);
   say(`INPUT ${bytes.length} ${Buffer.from(bytes.subarray(0, 32)).toString("hex")}`);
   if (!bytes.includes(0x71)) return;
+  if (hash) say(`SHA256 ${hash.digest("hex")}`);
   if (mode === "exit") host.leave();
   else if (mode === "linger") { host.leave(); setInterval(() => {}, 1000); }
   else if (mode === "process-exit") process.exit(0);

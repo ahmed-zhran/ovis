@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { IsolatedCore, pidAlive } from "../../scripts/test-hc.ts";
+import { processesWith } from "./processes.ts";
 
 /**
  * The helper end to end, against a real hc where OVIS_TEST_HC_BIN names one: the command's
@@ -38,7 +39,7 @@ const teardown = () => (tearing ??= (async () => {
 const handlers = (["SIGTERM", "SIGINT", "SIGHUP"] as const).map((signal) => [signal, () => { void teardown().finally(() => process.exit(128 + constants.signals[signal])); }] as const);
 beforeAll(() => {
   for (const [signal, handler] of handlers) process.on(signal, handler);
-  scratch = mkdtempSync(join(process.env["TMPDIR"] || tmpdir(), "wct-"));
+  scratch = mkdtempSync(join(realpathSync(tmpdir()), "wct-"));
 });
 afterAll(async () => {
   await teardown();
@@ -52,6 +53,7 @@ function callerEnv(extra: Record<string, string | undefined> = {}): Record<strin
 }
 
 interface Run {
+  cwd: string;
   /** resolves once a line of the helper's stderr or the command's stdout matches */
   line: (pattern: RegExp) => Promise<RegExpMatchArray>;
   exited: Promise<number>;
@@ -60,8 +62,9 @@ interface Run {
   stderr: () => string;
 }
 
-function helper(args: string[], env: Record<string, string>, cwd?: string): Run {
-  const child = Bun.spawn([process.execPath, HELPER, ...args], { env, cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+function helper(args: string[], env: Record<string, string>, cwd = mkdtempSync(join(scratch, "command-"))): Run {
+  // A detached system command can keep this directory after with-core exits and removes its root.
+  const child = Bun.spawn([process.execPath, HELPER, ...args], { env: { ...env, TMPDIR: realpathSync(tmpdir()) }, cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   let out = "";
   let err = "";
   const waiters = new Set<() => void>();
@@ -78,6 +81,7 @@ function helper(args: string[], env: Record<string, string>, cwd?: string): Run 
   running.add(run);
   void exited.finally(() => running.delete(run));
   return {
+    cwd,
     exited,
     signal: (name) => child.kill(name),
     stdout: () => out,
@@ -98,24 +102,12 @@ function helper(args: string[], env: Record<string, string>, cwd?: string): Run 
   };
 }
 
-/** Every process whose command line or environment names `root`: a core, a holder or a command of that run. */
-function processesOf(root: string): number[] {
-  return readdirSync("/proc").filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid).flatMap((pid) => {
-    try {
-      const seen = ["cmdline", "environ"].some((file) => readFileSync(`/proc/${pid}/${file}`, "latin1").includes(root));
-      return seen ? [Number(pid)] : [];
-    } catch {
-      return [];
-    }
-  });
-}
-
-/** What the run left: from the helper's own report lines and from /proc. */
+/** What the run left: from the helper's report and a process snapshot. */
 function leftovers(run: Run): { pidsAlive: number[]; socket: boolean; root: boolean; processes: number[] } {
   const root = run.stderr().match(/root=(\S+)/)?.[1];
   if (!root) throw new Error(`the helper named no root: ${run.stderr()}`);
   const pids = (run.stderr().match(/stopped pids=(\S*)/)?.[1] ?? "").split(",").filter(Boolean).map(Number);
-  return { pidsAlive: pids.filter(pidAlive), socket: existsSync(join(root, "run", "hc.sock")), root: existsSync(root), processes: processesOf(root) };
+  return { pidsAlive: pids.filter(pidAlive), socket: existsSync(join(root, "run", "hc.sock")), root: existsSync(root), processes: processesWith(root, run.cwd, root) };
 }
 const NOTHING_LEFT = { pidsAlive: [], socket: false, root: false, processes: [] };
 
@@ -152,6 +144,19 @@ function gatedHc(name: string, options: { gate?: "start" | "stop"; noStop?: bool
 }
 
 describe("with-core's options", () => {
+  it("sees a detached system command in its run's working directory after the helper exits", async () => {
+    const run = helper(["--no-core", "--", "true"], callerEnv());
+    expect(await run.exited).toBe(0);
+    // No marker in argv or the environment: SIP does not disclose these commands' environments.
+    const stray = Bun.spawn(["/bin/sleep", "30"], { env: TOOL_ENV, cwd: run.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
+    try {
+      expect(leftovers(run)).toEqual({ ...NOTHING_LEFT, processes: [stray.pid] });
+    } finally {
+      stray.kill();
+      await stray.exited;
+    }
+  }, TEST_MS);
+
   for (const [what, args, env] of [
     ["an unknown option", ["--frobnicate", "--", "true"], {}],
     ["--size without --pty", ["--no-core", "--size", "40x5", "--", "true"], {}],
@@ -217,11 +222,10 @@ describe("with-core's options", () => {
   }, TEST_MS);
 
   it("runs the command as the leader of a process group and session of its own", async () => {
-    // fields 1, 5 and 6 of /proc/<pid>/stat: the shell's pid, its process group and its session
-    const run = helper(["--no-core", "--", "sh", "-c", "cut -d' ' -f1,5,6 /proc/$$/stat"], callerEnv({ OVIS_TEST_HC_BIN: undefined }));
+    // `s` in ps's state is a session leader on both Linux and macOS.
+    const run = helper(["--no-core", "--", "sh", "-c", 'exec /bin/ps -p "$$" -o pid= -o pgid= -o stat='], callerEnv({ OVIS_TEST_HC_BIN: undefined }));
     expect(await run.exited).toBe(0);
-    const [pid, group, session] = run.stdout().trim().split(" ").map(Number);
-    expect({ group, session }).toEqual({ group: pid, session: pid });
+    expect(run.stdout().trim()).toMatch(/^([1-9]\d*)\s+\1\s+\S*s\S*$/);
     expect(leftovers(run)).toEqual(NOTHING_LEFT);
   }, TEST_MS);
 
@@ -283,19 +287,19 @@ describe("with-core --pty", () => {
     expect(run.stdout()).toContain("a=y b=xy");
   }, TEST_MS);
 
-  it("answers DA1 as a terminal does", async () => {
-    const script = "stty raw -echo; printf '\\033[c'; head -c 9 | od -An -tx1; stty sane";
-    const run = helper(["--no-core", "--pty", "--limit", "20", "--dump", "--", "sh", "-c", script], noHc());
-    expect(await run.exited).toBe(0);
-    expect(run.stdout()).toContain("1b 5b 3f 36 32 3b 32 32 63");
-  }, TEST_MS);
-
   // the queries in the shell's printf notation, and the replies a terminal sends, as hex
   const DA1 = { query: "\\033[c", reply: "1b5b3f36323b323263" };
   const SYNC = { query: "\\033[?2026$p", reply: "1b5b3f323032363b322479" };
   /** each printf, then what the command reads back after it (that many bytes), all printed as hex on one line at the end */
   const readBack = (...steps: [printf: string, bytes: number][]) =>
     `stty raw -echo; ${steps.map(([printf, bytes], i) => `${printf}; r${i}=$(head -c ${bytes} | od -An -tx1 -v | tr -d ' \\n')`).join("; ")}; printf '%s' ${steps.map((_, i) => `"$r${i}"`).join(" ")}; stty sane`;
+
+  it("answers DA1 as a terminal does", async () => {
+    const script = readBack([`printf '${DA1.query}'`, 9]);
+    const run = helper(["--no-core", "--pty", "--limit", "20", "--dump", "--", "sh", "-c", script], noHc());
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toContain(DA1.reply);
+  }, TEST_MS);
 
   for (const [what, script, replies] of [
     ["the start probe's queries (those it does not know left unanswered)", readBack([`printf '\\033[?u${SYNC.query}\\033]10;?\\033\\\\\\033]11;?\\033\\\\\\033]12;?\\033\\\\\\033[16t${DA1.query}'`, 20]), [SYNC, DA1]],
