@@ -57,8 +57,11 @@ export interface PaneScene {
   scrolledBack: boolean;
   /** dimmed last picture while the pane or the core link is not live */
   dim?: boolean;
-  /** cells of its grid drawn inverted: from `start` to `end` (either order) row by row, both included */
-  selection?: { start: GridCell; end: GridCell };
+  /**
+   * cells of its grid drawn selected: from `start` to `end` (either order) row by row, both included; in `colors` when
+   * given (a mouse selection), else inverted (copy mode's)
+   */
+  selection?: { start: GridCell; end: GridCell; colors?: { fg: WrittenColor; bg: WrittenColor } };
 }
 
 /** A cell of a pane's terminal grid: x the column, y the row, both from 0. */
@@ -72,6 +75,8 @@ export interface Scene {
   panes: readonly PaneScene[];
   /** drawn last, on top of everything */
   overlays: readonly Part[];
+  /** every cell under the overlays is drawn dim (a dialog that holds the user's attention) */
+  dim?: boolean;
   /** the pane the user drives */
   focus: string | null;
   /** who owns typing besides the focused pane: an overlay's text field at a cell, an overlay without one, or nobody */
@@ -219,6 +224,7 @@ export class Painter {
       if (redraw && !full && clip.width > 0) redrawn.push(clip);
     }
     for (const pane of scene.panes) this.drawPane(pane, screen, hits, full, redrawn);
+    if (scene.dim) this.dimAll();
     for (const overlay of scene.overlays) this.drawPart(overlay, intersect(overlay.rect, screen), hits, true);
     this.fitHost();
 
@@ -281,6 +287,17 @@ export class Painter {
     this.touched[row] = 1;
   }
 
+  /** Every cell of the composed screen gets the dim attribute; a cell already dim stays as it is. */
+  private dimAll(): void {
+    const grid = this.composed;
+    for (let i = 0; i < grid.style.length; i++) {
+      const style = this.styles.get(grid.style[i]!);
+      if (style.flags & STYLE_FAINT) continue;
+      grid.style[i] = this.styles.id(style.fg, style.bg, style.flags | STYLE_FAINT);
+    }
+    this.touched.fill(1);
+  }
+
   private blankAt(grid: Grid, i: number): void {
     grid.text[i] = " ";
     grid.width[i] = 1;
@@ -337,7 +354,7 @@ export class Painter {
     hits.push({ rect: clip, target: { pane: pane.id } });
     const source = pane.grid;
     const view = pane.view ?? { col: 0, row: 0 };
-    const selection = pane.selection ? JSON.stringify(ordered(pane.selection)) : "";
+    const selection = pane.selection ? JSON.stringify([ordered(pane.selection), pane.selection.colors ?? null]) : "";
     const reselected = (this.selections.get(pane.id) ?? "") !== selection;
     this.selections.set(pane.id, selection);
     if (clip.width > 0) {
@@ -369,8 +386,9 @@ export class Painter {
       const baseStyle = this.styles.get(rawStyle);
       // a wide cell is selected when either of its columns is, as the copy takes it whole
       const selected = selection !== null && (inside(selection, width === 0 ? gx - 1 : gx, gy) || inside(selection, width === 2 ? gx + 1 : gx, gy));
-      const flags = (pane.dim ? baseStyle.flags | STYLE_FAINT : baseStyle.flags) ^ (selected ? STYLE_INVERSE : 0);
-      const style = flags === baseStyle.flags ? rawStyle : this.styles.id(baseStyle.fg, baseStyle.bg, flags);
+      const colors = selected ? pane.selection?.colors : undefined;
+      const flags = (pane.dim ? baseStyle.flags | STYLE_FAINT : baseStyle.flags) ^ (selected && !colors ? STYLE_INVERSE : 0);
+      const style = colors ? this.styles.id(colors.fg, colors.bg, flags & ~STYLE_INVERSE) : flags === baseStyle.flags ? rawStyle : this.styles.id(baseStyle.fg, baseStyle.bg, flags);
       if (width === 0) {
         // the covered column of a wide cell whose first column lies left of the clip
         if (col === clip.x) this.put(col, row, " ", 1, this.styles.blank(style));
@@ -528,7 +546,7 @@ function range(from: number, to: number): number[] {
 function layoutKey(scene: Scene): string {
   const rect = (r: Rect): string => `${r.x},${r.y},${r.width},${r.height}`;
   return [
-    `${scene.width}x${scene.height}`,
+    `${scene.width}x${scene.height}${scene.dim ? " dim" : ""}`,
     ...scene.parts.map((part) => `p ${part.key} ${rect(part.rect)}`),
     ...scene.panes.map((pane) => `t ${pane.id} ${rect(pane.rect)} ${pane.view?.col ?? 0},${pane.view?.row ?? 0} ${pane.grid.grid.cols}x${pane.grid.grid.rows} ${pane.dim ? 1 : 0}`),
     ...scene.overlays.map((overlay) => `o ${overlay.key} ${rect(overlay.rect)}`),
