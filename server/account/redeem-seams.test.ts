@@ -109,7 +109,9 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     const first = devices.startPairing();
     const { codeId } = devices.redeemCode(first.code, "code", frozen) as { codeId: string };
     expect(devices.list(null).some((row) => row.label === "Mine")).toBe(false);
-    expect(devices.admits(other, { codeId, key: frozen })).toBe(false);
+    expect(devices.admits(other, { codeId, key: other, source: "screen" })).toBe(false);
+    // a proof built by hand, even for the reserved key itself, passes neither the freeze nor (below) the lock
+    expect(devices.admits(frozen, { codeId, key: frozen, source: "screen" })).toBe(false);
     // (a) the confirmed key itself comes in, past the freeze
     expect(devices.admitConfirmed({ codeId, key: frozen, label: "Mine", source: "screen" })).not.toBeNull();
     // (d) a key under a standing Revoke stays out unless the confirm names that Revoke
@@ -132,6 +134,8 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(admitted).not.toBeNull();
     const rows = JSON.parse(readFileSync(join(at, "devices.json"), "utf8")) as { devices: { id: string; origin?: { from: string } }[] };
     expect(rows.devices.find((row) => row.id === admitted!.id)?.origin?.from).toBe("pc");
+    expect(devices.admits(await key(), { codeId: id3, key: onScreen, source: "screen" })).toBe(false);
+    expect(devices.admits(onScreen, { codeId: id3, key: onScreen, source: "screen" })).toBe(false);
     // (g) a PC that fails closed admits nobody, a screen confirm included
     const fifth = devices.startPairing();
     const late = await key();
