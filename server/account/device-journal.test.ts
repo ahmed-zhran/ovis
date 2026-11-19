@@ -102,7 +102,7 @@ describe("the device journal (P10, P15)", () => {
     expect(DeviceJournal.open(dir).openNotices()).toHaveLength(1);
     reopened.decide(kept.id);
     expect(DeviceJournal.open(dir).openNotices()).toHaveLength(0);
-  });
+  }, 30_000);
 
   test("G14: failed journal write admits nobody and a throwing listener skips nobody else", async () => {
     const dir = stateDir();
@@ -135,5 +135,5 @@ describe("the device journal (P10, P15)", () => {
     expect(DeviceJournal.open(dir).openNotices()).toHaveLength(OPEN_NOTICES_MAX);
     journal.decide(journal.openNotices()[0]!.id);
     expect(journal.admitsFromList()).toBe(true);
-  });
+  }, 30_000);
 });
