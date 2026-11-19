@@ -519,7 +519,8 @@ export class DeviceStore {
   /** A deny that could not reach the disk (P8 step 1): only this PC itself gets in until one is written. */
   private denyProblem: string | null = null;
   private readonly revokeAllPath: string;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null } = {}) {
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; joinedRows?: AccountRowSource | null } = {}) {
+    this.joinedRows = account.joinedRows ?? null;
     this.safety = account.safety ?? null;
     this.handedLifts = new HandedLifts(stateDir);
     this.pc = account.pc ?? null;
@@ -2138,8 +2139,8 @@ export class DeviceStore {
    */
   revokeAll(user?: string): string[] {
     this.assertWritable();
-    this.endAccountRows("revoke_all");
     if (this.evidence !== null) return this.revokeAllInOrder(user);
+    this.endAccountRows("revoke_all");
     this.tombstone(this.devices, Date.now());
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? new Date().toISOString();
     this.save([], gate);
@@ -2230,15 +2231,20 @@ export class DeviceStore {
     for (const listener of [...this.revokeAllListeners]) listener();
     for (const device of gone) this.announceRemoval(device, "pc");
     for (const device of gone) this.journalRemoval(device, "pc", user === undefined ? undefined : "recover", user);
-    this.liftOrphanedBlocks();
     if (denied !== null) throw denied;
-    this.finishRevokeAll(gone, gate);
+    try { this.finishRevokeAll(gone, gate); } catch (error) {
+      this.denyProblem = "Revoke all was interrupted: only this PC itself gets in until recovery finishes.";
+      throw error;
+    }
     return gone.map((device) => device.id);
   }
 
   /** The writes of a Revoke all whose file is on disk: its Revokes, the empty registry, the PC's account; then the file goes. */
   private finishRevokeAll(rows: readonly StoredDevice[], gate: string): void {
-    this.tombstone(rows, Date.now());
+    const joined = this.joinedRows?.rows() ?? [];
+    this.tombstone([...rows, ...joined.map((row) => this.joinedAsStored(row))], Date.now());
+    this.endAccountRows("revoke_all");
+    this.liftOrphanedBlocks();
     this.save([], gate);
     this.devices = [];
     this.gateClosedAt = gate;
