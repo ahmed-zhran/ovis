@@ -59,8 +59,10 @@ describe("S2-29 the join hold and the first device (T34, T53, T67)", () => {
     expect(reopened.access(row.id)).toEqual({ refused: "join_hold", seconds: 10 });
     const replay = disk.replay("older-member", (entry) => entry.no !== null && 5 < entry.no);
     expect(replay.notices).toMatchObject([{ row: row.id, open: true, no: 42 }]);
-    expect(disk.openNotices().map((entry) => entry.id)).toEqual([replay.notices[0]?.id]);
-    expect(replay.notices[0]?.id).not.toBe(obsolete.id);
+    const [replacement] = replay.notices;
+    if (!replacement) throw new Error("The repaired notice was not replayed");
+    expect(disk.openNotices().map((entry) => entry.id)).toEqual([replacement.id]);
+    expect(replacement.id).not.toBe(obsolete.id);
   });
   test("H1/T42: reopening a held row requires a whole read and a new uninterrupted ten seconds", () => {
     const { store, clock, dir, ports } = machine();
