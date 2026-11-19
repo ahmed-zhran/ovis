@@ -9,32 +9,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateState } from "../private-state.ts";
+import { AccountSnapshotError, parseAdmissionOrigin, type AdmissionFrom, type AdmissionHow, type AdmissionOrigin } from "../../shared/account-snapshot.ts";
 import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
 
 /** This PC's account state (P12); S2-03 keeps only `next_admit` in it, and the binding joins it later under the same `v`. */
 export const ADMISSION_FILE = "account-pc.json";
 
-export type OriginFrom = "pc" | "remote" | "recover" | "legacy";
-export type OriginHow = "list" | "add" | "member" | "code" | "digits" | "qr" | "promoted" | "confirmed" | "link" | "legacy";
+export type OriginFrom = AdmissionFrom;
+export type OriginHow = AdmissionHow;
+/** A row's origin is the shared contract's (shared/account-snapshot.ts); `by` is the approving member's account key. */
+export type RowOrigin = AdmissionOrigin;
 
-export interface RowOrigin {
-  readonly from: OriginFrom;
-  readonly how: OriginHow;
-  /** the member that approved or signed it in, when one did */
-  readonly by: string | null;
-  readonly admit_no: number;
-  readonly at: string;
-}
-
-const FROMS: ReadonlySet<string> = new Set(["pc", "remote", "recover", "legacy"]);
-const HOWS: ReadonlySet<string> = new Set(["list", "add", "member", "code", "digits", "qr", "promoted", "confirmed", "link", "legacy"]);
-
+/** Whether a stored origin is one the shared contract accepts: a legacy one only with admit_no 0, every other from 1. */
 export function isRowOrigin(value: unknown): value is RowOrigin {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const origin = value as Record<string, unknown>;
-  return Object.keys(origin).length === 5 && FROMS.has(origin.from as string) && HOWS.has(origin.how as string)
-    && (origin.by === null || typeof origin.by === "string") && Number.isSafeInteger(origin.admit_no) && (origin.admit_no as number) >= 0
-    && typeof origin.at === "string" && (origin.from === "legacy") === (origin.how === "legacy") && (origin.from === "legacy") === (origin.admit_no === 0);
+  try { parseAdmissionOrigin(value); return true; } catch (error) {
+    if (error instanceof AccountSnapshotError) return false;
+    throw error;
+  }
 }
 
 interface AdmissionRow { readonly id: string; readonly created_at: string; readonly origin?: RowOrigin | undefined }

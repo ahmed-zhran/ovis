@@ -562,7 +562,9 @@ export class DeviceStore {
   private admitted(device: StoredDevice, now: number): StoredDevice {
     if (this.admissions === null) return device;
     const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : device.added_by !== undefined ? "member" : "code";
-    return { ...device, origin: this.admissions.admit("remote", how, device.added_by ?? null, now) };
+    // `by` names the approving member by its account key, as the shared contract reads it
+    const by = device.added_by === undefined ? null : this.devices.find((d) => d.id === device.added_by)?.relay_public_key ?? null;
+    return { ...device, origin: this.admissions.admit("remote", how, by, now) };
   }
 
   /**
