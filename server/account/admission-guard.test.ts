@@ -1,15 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exportAccountKey, newRecordId, signAccountRecord } from "../../shared/account-records.ts";
+import { exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { applyAccountRecords } from "./records.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
-import { pcRecordId, SafetyLog, signedRecordId } from "./safety-log.ts";
+import { pcRecordId, SafetyLog } from "./safety-log.ts";
 
 const ACCOUNT = "acct_1";
 const SERVER_ID = "0123456789abcdef0123456789abcdef";
@@ -38,10 +37,10 @@ async function member(devices: DeviceStore) {
   return { id, key };
 }
 
-/** A block of `target` in force in this PC's log, which joined here as admission number `joined`. */
-function block(log: SafetyLog, target: string, signer: string, joined: number | null): void {
-  const bytes = new Uint8Array(randomBytes(120));
-  log.append({ record: { id: signedRecordId(bytes), kind: "block", account: ACCOUNT, target, signer, signed_at: new Date().toISOString(), sig: randomBytes(64).toString("base64url") }, bytes, got: "handed", asof: { signer_no: 1, target_no: 2, after: 2, joined, signer_removed: false } });
+/** A block of `target` in force in this PC's log, signed by `by`; the target joined here as admission number `joined`. */
+async function block(log: SafetyLog, target: string, by: Awaited<ReturnType<typeof accountKey>>, joined: number | null): Promise<void> {
+  const record = await signSafetyRecord({ v: 1, kind: "block", account: ACCOUNT, target, target_no: 2, signer: by.spki, signer_no: 1, signed_at: new Date().toISOString(), nonce: newRecordId() }, by.keys.privateKey);
+  log.append({ record, got: "handed", asof: { signer_no: 1, target_no: 2, after: 2, joined, signer_removed: false } });
 }
 
 const add = (signer: Awaited<ReturnType<typeof accountKey>>, key: string) =>
@@ -55,7 +54,7 @@ describe("one final admission guard (G3, rule R1)", () => {
     expect(devices.pairRelayApproved("Phone", (await accountKey()).spki, { path: "account", addedBy: approver.id })).not.toBeNull();
     // a freeze stands: a new key is newer than its target, and the same approval admits nobody
     const target = await member(devices);
-    block(log, target.key.spki, approver.key.spki, 99);
+    await block(log, target.key.spki, approver.key, 99);
     expect(devices.pairRelayApproved("Tablet", (await accountKey()).spki, { path: "account", addedBy: approver.id })).toBeNull();
     // an approver gone by commit approves nothing
     const fresh = pc();
@@ -75,7 +74,7 @@ describe("one final admission guard (G3, rule R1)", () => {
     // unchanged generation: it commits
     expect((await applyAccountRecords(devices, [await add(signer.key, (await accountKey()).spki)], SERVER_ID)).map((r) => r.outcome)).toEqual(["applied"]);
     // a freeze stands: refused, and not kept for later
-    block(log, (await accountKey()).spki, signer.key.spki, 99);
+    await block(log, (await accountKey()).spki, signer.key, 99);
     const newKey = (await accountKey()).spki;
     expect((await applyAccountRecords(devices, [await add(signer.key, newKey)], SERVER_ID)).map((r) => r.outcome)).toEqual(["refused"]);
     expect(devices.hasKey(newKey)).toBe(false);
@@ -86,7 +85,7 @@ describe("one final admission guard (G3, rule R1)", () => {
     const older = await member(devices);
     const target = await member(devices);
     // the block's target joined this PC as admission 2: keys admitted before it stay admissible, every new key is newer
-    block(log, target.key.spki, older.key.spki, 2);
+    await block(log, target.key.spki, older.key, 2);
     expect(devices.admits(older.key.spki)).toBe(true);
     const newKey = (await accountKey()).spki;
     expect(devices.admits(newKey)).toBe(false);
@@ -100,7 +99,7 @@ describe("one final admission guard (G3, rule R1)", () => {
     // a lock admits nobody remote, a key no freeze names included
     const locked = pc();
     const keep = await member(locked.devices);
-    locked.log.append({ record: { id: pcRecordId(), kind: "lock", account: ACCOUNT, target: null, signer: "pc", signed_at: new Date().toISOString(), sig: "" }, got: "pc" });
+    locked.log.append({ record: { v: 1, id: pcRecordId(), kind: "lock", account: ACCOUNT, target: null, signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
     expect(locked.devices.admits(keep.key.spki)).toBe(false);
     expect(locked.devices.pairRelay(locked.devices.startPairing().code, "Phone", (await accountKey()).spki)).toBeNull();
   });
