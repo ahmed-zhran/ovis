@@ -150,6 +150,16 @@ export class PcAccountState {
 
   clears(): readonly AccountClear[] { return this.doc.clears; }
 
+  /** The first-device fact (T67): the key that bound the PC, and its proved sign-in key or null. */
+  first(): { readonly key: string; readonly list_key: string | null } | null { return this.doc.first; }
+
+  othersEver(): boolean { return this.doc.others_ever; }
+
+  /** The first admission of another account row sets it; nothing unsets it (H2). */
+  setOthersEver(): void {
+    if (!this.doc.others_ever) this.write({ ...this.doc, others_ever: true });
+  }
+
   /** The first link binds the PC; returns what takes this write back, should the row it belongs to not be written. */
   bind(account: string, key: string): () => void {
     if (this.doc.binding !== null) throw new Error("This PC is already in an account");
