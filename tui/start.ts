@@ -64,7 +64,7 @@ export function insideOwnCore(env: Env, target: string, envCore: string, same: (
 /** Where `ovis tui` hands the screen the folder it was typed in: the screen itself runs in the install's folder. */
 export const SCREEN_FOLDER = "OVIS_TUI_CWD";
 
-/** The folder the screen offers a new workspace in: the one the launcher names, else the screen's own working folder. */
+/** The folder a new workspace starts in, the first one too: the one the launcher names, else the screen's own working folder. */
 export function screenFolder(env: Env, cwd: string): string {
   return env[SCREEN_FOLDER] || cwd;
 }
