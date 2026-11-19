@@ -67,7 +67,7 @@ export interface AccountRowPorts {
   /** Every admission guard of the commit turn (G2 to G15) for this key, now. */
   admits(key: string, account: string): boolean;
   /** Puts the admission's notice in the unseen set of every older row, on disk; throws when it could not. */
-  publish(entry: JournalEntry): void;
+  publish(entry: JournalEntry & { readonly accountNo: number }): void;
   now(): number;
   /**
    * Numbers one admission on this PC and returns its origin (PcAccountState.admit in pc-binding.ts, P12, P22): its
@@ -289,7 +289,7 @@ export class AccountDeviceStore implements AccountRowSource {
   }
 
   private publish(row: AccountRow): void {
-    try { this.ports.publish({ kind: "admit", key: row.key, row: row.id, account: this.file.account, no: row.origin.admit_no, label: row.label }); } catch (error) {
+    try { this.ports.publish({ kind: "admit", key: row.key, row: row.id, account: this.file.account, no: row.origin.admit_no, accountNo: row.no, label: row.label }); } catch (error) {
       // the row stays held with no deadline: republish() starts its ten seconds once the notice is out
       console.error(`[account] the notice of ${row.id} was not published: ${error instanceof Error ? error.message : String(error)}`);
       return;
