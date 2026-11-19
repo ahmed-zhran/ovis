@@ -1292,6 +1292,37 @@ describe("another server on the same state directory", () => {
     expect(savedFile(stateDir).settings).toBeNull();
   });
 
+  test("a write made while another server's off is marked but not written keeps that off's counter", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    const observer = setup({ stateDir, grace: 60_000 });
+    const snapshot = settingsSnapshot({ theme: "light" });
+    observer.telemetry.change({ notice_seen: true, notice_version: NOTICE_VERSION, settings: snapshot, generation: 0 });
+    const generation = telemetry.status().counts_generation;
+    // the other server's off marked, and its server went before it wrote telemetry.json
+    writeFileSync(join(stateDir, "telemetry-off"), "an off never written");
+    observer.telemetry.change({ settings: snapshot, generation });
+    clock.now += 60_000;
+    // a page that never heard the off turns the counts on with the counter from before it
+    telemetry.change({ enabled: true, settings: snapshot, generation });
+    await telemetry.report();
+    observer.telemetry.stop();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test("a server started while another server's off is marked but not written keeps that off's counter", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    const snapshot = settingsSnapshot({ theme: "light" });
+    telemetry.change({ notice_seen: true, notice_version: NOTICE_VERSION, settings: snapshot, generation: 0 });
+    const generation = telemetry.status().counts_generation;
+    writeFileSync(join(stateDir, "telemetry-off"), "an off never written");
+    // its start writes telemetry.json without the settings the off dropped
+    setup({ stateDir, grace: 60_000 });
+    clock.now += 60_000;
+    telemetry.change({ enabled: true, settings: snapshot, generation });
+    await telemetry.report();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
   test("an on asked before a status read marks an older build's off still turns the counts on", () => {
     const { telemetry, stateDir } = setup();
     const other = setup({ stateDir });

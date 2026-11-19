@@ -507,7 +507,7 @@ export class Telemetry {
       this.saved.counts = [];
       this.saved.settings = null;
       this.saved.replaced_forgotten = true;
-    }
+    } else this.forgetUnwrittenOff(onDisk);
     const temp = `${this.file}.${process.pid}.tmp`;
     writeFileSync(temp, JSON.stringify(this.saved), { mode: 0o600 });
     // inside a section, right before the rename: a lock that no longer holds this section's stamp was taken over (this
@@ -616,6 +616,8 @@ export class Telemetry {
       let markAtStart = offMark(this.offFile);
       if (clean.enabled === true && markAtStart !== markAsked && !(markAsked === null && markAtStart?.startsWith(MIGRATED_MARK))) return "superseded";
       this.refresh();
+      // an off counts itself below, so it is not counted twice
+      if (clean.enabled !== false) this.forgetUnwrittenOff(this.saved);
       // the read just now marked an older build's off: that mark is the one this change found
       if (markAtStart === null) {
         const migrated = offMark(this.offFile);
@@ -623,8 +625,6 @@ export class Telemetry {
       }
       // the counter as the request found it: settings told with the generation the page heard last are from now
       const heard = this.saved.forgotten;
-      // an off another server marked and has not written yet: no page heard it, so settings told now may be from before it
-      const offUnwritten = !this.saved.enabled && fileSaysOn(this.file);
       // off is marked before FILE is written, whatever another server writes to FILE meanwhile
       if (clean.enabled === false) this.markOff();
       // nothing kept before an off is sent after it: the off, and an on after an off (one another server marked), drop every
@@ -642,7 +642,7 @@ export class Telemetry {
       // acknowledgement) and while the counts are on; telling it sends nothing by itself
       // a request that names no generation, or one from before an off the page had not heard, keeps none: they may be from
       // before it (a request delayed while another page turned the counts off and on)
-      if (clean.settings !== undefined && clean.generation === heard && !offUnwritten && this.saved.notice_seen_at !== null && this.saved.enabled && !this.blocked()) this.saved.settings = clean.settings;
+      if (clean.settings !== undefined && clean.generation === heard && this.saved.notice_seen_at !== null && this.saved.enabled && !this.blocked()) this.saved.settings = clean.settings;
       if (clean.enabled !== false && offMark(this.offFile) !== markAtStart) return "superseded";
       if (!this.persist()) throw new FileBusyError(CHANGE_BUSY);
       // and again after: an on from another server between the two writes cannot leave this off without its mark
@@ -690,6 +690,15 @@ export class Telemetry {
     this.saved.settings = null;
     this.saved.replaced_forgotten = true;
     this.saved.forgotten += 1;
+  }
+
+  /**
+   * An off another server marked and never wrote to FILE (its server went in between) dropped nothing and counted nothing,
+   * yet it happened: whoever writes FILE first after it, or a change that finds it, drops and counts for it, once. `onDisk`
+   * is FILE as just read; a server's own off has counted already, so it holds a counter past the one FILE says.
+   */
+  private forgetUnwrittenOff(onDisk: Saved | null): void {
+    if (!this.saved.enabled && onDisk !== null && onDisk.forgotten === this.saved.forgotten && fileSaysOn(this.file)) this.forgetUnsent();
   }
 
   /** Whether a browser visit is recorded at all: never while the switch is off or the environment forbids sending. */
