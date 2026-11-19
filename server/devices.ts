@@ -90,6 +90,11 @@ export class DeviceReadOnlyError extends Error {
  * joins a PC that has members by signing in to their account, with a member's approval (docs/account.md).
  */
 /** The final admission guard refused (G3): the PC is locked or closed to the key. Nothing was written. */
+/** What a key confirm proves to the admission guard: that code's reserved key, confirmed on this PC's screen or by ovis recover. */
+export interface ConfirmProof { readonly codeId: string; readonly key: string; readonly source: "screen" | "recover" }
+/** The proofs admitConfirmed made from a live reservation; admits() honours no other. */
+const MINTED_PROOFS = new WeakSet<ConfirmProof>();
+
 export type KeyRemovedCause = "revoke" | "remove" | "block" | "revoke_all";
 
 export class AdmissionRefusedError extends Error {
@@ -740,14 +745,17 @@ export class DeviceStore {
    * the PC fails closed or is locked, and while a block or a freeze stands that `key` is newer than. Newer is decided
    * on this PC by admission order: a key with no row here, or a row with no place in the order, counts as newer.
    */
-  admits(key: string | undefined, confirm?: { readonly codeId: string; readonly key: string }): boolean {
+  admits(key: string | undefined, confirm?: ConfirmProof): boolean {
     if (this.failsClosed) return false;
     const state = this.safety?.state();
     if (state === undefined) return true;
-    if (state.locked) return false;
+    // only a proof admitConfirmed minted from a live reservation counts: a hand-built one passes nothing
+    const confirmed = confirm !== undefined && MINTED_PROOFS.has(confirm) && key !== undefined && confirm.key === key;
+    // a locked PC admits only the key approved on its own screen (P11); a recover admit is ended by the lock (P22)
+    if (state.locked && !(confirmed && confirm.source === "screen")) return false;
     if (state.freezes.length === 0) return true;
     // a key confirm on this PC's own screen, or ovis recover --admit, of this very key passes a freeze (P23, rule R1)
-    if (confirm !== undefined && key !== undefined && confirm.key === key) return true;
+    if (confirmed) return true;
     const row = key === undefined ? undefined : this.devices.find((d) => d.relay_public_key === key);
     const admitNo = row?.origin?.admit_no;
     if (admitNo === undefined) return false;
@@ -788,7 +796,8 @@ export class DeviceStore {
   admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover"; unrevokes?: readonly string[] }, now = Date.now()): DeviceMatch | null {
     const pending = this.pending;
     if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || pending.reserved?.key !== confirm.key || this.codeOver(pending, now)) return null;
-    const proof = { codeId: confirm.codeId, key: confirm.key };
+    const proof: ConfirmProof = { codeId: confirm.codeId, key: confirm.key, source: confirm.source };
+    MINTED_PROOFS.add(proof);
     if (!this.admits(confirm.key, proof)) return null;
     // a Revoke that stands keeps the key out unless this confirm names it (P13)
     const revokes = this.evidence?.standingRevokes(confirm.key) ?? [];
@@ -1469,7 +1478,7 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: { readonly codeId: string; readonly key: string } } = {}): void {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof } = {}): void {
     // the final guard, in the commit turn: nothing waits between it and the write
     if (!this.admits(admitting.relay_public_key, path.confirm)) throw new AdmissionRefusedError();
     const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
