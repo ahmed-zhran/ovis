@@ -43,10 +43,18 @@ const rows = (dir: string): StoredDevice[] => {
 };
 const removal = () => ({ id: newRecordId(), issuedAt: new Date().toISOString() });
 
+/** A pairing on this PC; a key under a local Revoke comes back only by a key confirm on this PC's screen naming it (P13). */
 function pairHere(devices: DeviceStore, publicKey: string): string {
-  const paired = devices.pairRelay(devices.startPairing().code, "Phone", publicKey);
-  if (!paired) throw new Error("pairing failed");
-  return paired.device.id;
+  const revokes = (devices as unknown as { evidence: RemovalEvidence }).evidence.standingRevokes(publicKey);
+  if (revokes.length === 0) {
+    const paired = devices.pairRelay(devices.startPairing().code, "Phone", publicKey);
+    if (!paired) throw new Error("pairing failed");
+    return paired.device.id;
+  }
+  const { codeId } = devices.redeemCode(devices.startPairing().code, "code", publicKey) as { codeId: string };
+  const confirmed = devices.admitConfirmed({ codeId, key: publicKey, label: "Phone", source: "screen", unrevokes: revokes.map((revoke) => revoke.id) });
+  if (!confirmed) throw new Error("confirm failed");
+  return confirmed.id;
 }
 
 describe("account removals and local Revokes kept apart (account-removed.json)", () => {
