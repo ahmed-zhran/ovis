@@ -409,6 +409,10 @@ describe("key proof (device-row-states T71, T72; S2-13 wire)", () => {
     const decoded = decodeFrame(wire(FrameType.KEY_PENDING, JSON.stringify({ fingerprint: "AAAA-BBBB" }), 0, 0));
     expect(decoded).toEqual({ ...session, type: FrameType.KEY_PENDING, payload: {} });
   });
+  it("T71: a decoder that does not know a frame type refuses it as a protocol error the session reports", () => {
+    expect(() => decodeFrame(wire(0x43, "{}", 0, 0))).toThrow(MuxProtocolError);
+    try { decodeFrame(wire(0x43, "{}", 0, 0)); } catch (error) { expect((error as MuxProtocolError).code).toBe("protocol_error"); }
+  });
   it("T71: the proof frames are session frames only", () => {
     rejects(() => decodeFrame(wire(FrameType.KEY_PENDING, "{}", 0, 1)));
   });
