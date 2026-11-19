@@ -49,6 +49,20 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.list(null).map((row) => row.id)).toEqual([admitted!.id]);
     // the use is spent: the same reservation admits nobody again
     expect(devices.admitConfirmed({ codeId, key: named, label: "Phone", source: "screen" })).toBeNull();
+    // a late release of a reservation already taken frees nothing: the next code is the only way in again
+    devices.releaseRedemption(codeId, named);
+    expect(devices.redeemCode(code, "code", other)).toMatchObject({ ok: false });
+    // a release must name both the code and the key; a second release of the same one is a no-op
+    const next = devices.startPairing();
+    const { codeId: nextId } = devices.redeemCode(next.code, "code", other) as { codeId: string };
+    devices.releaseRedemption(nextId, named);
+    expect(devices.redeemCode(next.code, "code", named)).toMatchObject({ ok: false, reason: "in_use" });
+    devices.releaseRedemption(nextId, other);
+    devices.releaseRedemption(nextId, other);
+    const third = await key();
+    const { codeId: thirdId } = devices.redeemCode(next.code, "code", third) as { codeId: string };
+    devices.releaseRedemption(nextId, other);
+    expect(devices.admitConfirmed({ codeId: thirdId, key: third, label: "Tablet", source: "screen" })).not.toBeNull();
   });
 
   test("T72: a released or restarted reservation admits nobody, and a removed key is refused at commit", async () => {
