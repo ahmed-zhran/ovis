@@ -768,7 +768,7 @@ export class DeviceStore {
    * the signer's row, by this PC's own admission order: the record's numbers are claims and decide nothing (P21). A
    * target this PC has no row of waits for the order table (S2-10) and applies nothing.
    */
-  async applyBlock(value: unknown, got: SafetyGot): Promise<BlockReceipt> {
+  async applyBlock(value: unknown, got: SafetyGot, onRaise?: () => void): Promise<BlockReceipt> {
     const refused = (id: string, reason: Extract<BlockReceipt, { outcome: "refused" }>["reason"]): BlockReceipt => ({ outcome: "refused", id, reason });
     let record: SafetyRecord;
     try { record = parseSafetyRecord(value); } catch (error) {
@@ -779,7 +779,7 @@ export class DeviceStore {
     const known = this.safety.receipt(record.id);
     if (known !== null && known.outcome !== "refused") return known;
     if (!await verifySafetyRecord(record)) return refused(record.id, "record_invalid");
-    return this.commitBlock(record, got);
+    return this.commitBlock(record, got, onRaise);
   }
 
   /** Every block in force gives its target a marker and takes its rows, as its commit turn would have (P24). */
@@ -795,7 +795,7 @@ export class DeviceStore {
   }
 
   /** The commit turn of a verified block, in P8's order, with no wait inside. */
-  private commitBlock(record: BlockRecord, got: SafetyGot): BlockReceipt {
+  private commitBlock(record: BlockRecord, got: SafetyGot, onRaise?: () => void): BlockReceipt {
     const refused = (reason: Extract<BlockReceipt, { outcome: "refused" }>["reason"]): BlockReceipt => ({ outcome: "refused", id: record.id, reason });
     if (this.safety === null || this.evidence === null || this.failsClosed || record.account !== this.account()) return refused("record_invalid");
     const signers = this.devices.filter((d) => d.relay_public_key === record.signer && d.role === "drive" && d.account === record.account && d.origin !== undefined && !this.coveredByEvidence(d));
@@ -818,10 +818,11 @@ export class DeviceStore {
       this.drop(targets, "pc");
       return refused("record_invalid");
     }
-    this.deny(() => {
+    const failed = this.deny(() => {
       this.evidence!.addRemoval(record.target, record.account, { id: record.id, at: new Date().toISOString(), records: [record] });
       this.refreshTombstones();
     });
+    if (failed === null && this.pc !== null) onRaise?.();
     // (2, 3) the newer rows frozen in place, their sessions ended; the target's rows out, theirs ended too (T64)
     for (const device of this.devices.filter((d) => !targets.includes(d) && this.frozen(d))) {
       const listeners = this.revocations.get(device.id);
