@@ -501,7 +501,7 @@ export function createServer(
   // a port file an earlier run left names a port anyone may have taken since
   try { rmSync(join(stateDir, LOCAL_CONFIRM_FILE), { force: true }); }
   catch (error) { console.error(`${LOCAL_CONFIRM_FILE} could not be removed: ${error instanceof Error ? error.message : String(error)}`); }
-  const localConfirms = (options.accountOpensAll ?? process.env["OVIS_ACCOUNT_OPENS_ALL"] === "1") ? new LocalConfirms() : undefined;
+  const localConfirms = (options.accountOpensAll ?? accountOpensAll()) ? new LocalConfirms() : undefined;
   // a page that cannot open leaves acts waiting for the desktop app's channel; it never fails the start
   const confirmListener = (() => {
     if (!localConfirms) return null;
