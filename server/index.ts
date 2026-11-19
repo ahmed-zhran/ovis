@@ -301,7 +301,9 @@ export function createServer(
   // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
   const serverIdNow = () => ovisRelay.currentIdentity()?.server_id ?? null;
   // Step 2 (S2-25): the rows the account's list admits, kept apart from devices.json and judged by the device store
-  const accountRows = safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
+  const opened: { rows: ReturnType<typeof accountRowsFor> | null } = { rows: null };
+  // Recovery can use row ports inside the DeviceStore constructor, before its caller has a reference.
+  const rowsForDevices = (devices: DeviceStore) => opened.rows = safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
     evidence: removals,
     ...listNotices(journal, removals, (entry) => devices.publish(entry)),
     closeSessions: (id) => { devices.closeAccountSessions(id); },
@@ -319,7 +321,8 @@ export function createServer(
       },
     },
   }) : null;
-  const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal, joinedRows: accountRows });
+  const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal, joinedRows: rowsForDevices });
+  const accountRows = opened.rows;
   // a row dropped because its copies held different keys is gone from both folders; the journal says so (T27, T48)
   if (merge?.devicesBlocked === null) for (const device of conflicts) devices.journalEvent({ kind: "drop", how: "merge_conflict", key: device.relay_public_key ?? null, no: null, row: device.id, label: device.label, by: null, account: device.account ?? null });
   // Device migration creates the journal's companions. Recover interrupted notices before their whole records fold.

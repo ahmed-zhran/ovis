@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AccountDeviceStore, type AccountRowPorts } from "./account-devices.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { listNotices } from "./list-notices.ts";
+import { RemovalEvidence } from "./removal-evidence.ts";
 import { keyOf, listOrigins, snapshotList as list, nameOf, SERVER } from "./account-devices.test-helpers.ts";
 import { ITS_ME_MIN_AGE_MS, JOIN_HOLD_MS, type Sayer } from "./join-hold.ts";
 
@@ -54,7 +55,7 @@ describe("S2-29 the join hold and the first device (T34, T53, T67)", () => {
     if (!row || !obsolete) throw new Error("Missing pre-fix admission");
     clock.now += JOIN_HOLD_MS * 2;
     const disk = DeviceJournal.open(dir);
-    const reopened = new AccountDeviceStore(dir, SERVER, { ...ports, ...listNotices(disk, () => read.account, () => {}) });
+    const reopened = new AccountDeviceStore(dir, SERVER, { ...ports, ...listNotices(disk, RemovalEvidence.open(dir, null), () => {}) });
     reopened.commitList(read);
     expect(reopened.access(row.id)).toEqual({ refused: "join_hold", seconds: 10 });
     const replay = disk.replay("older-member", (entry) => entry.no !== null && 5 < entry.no);

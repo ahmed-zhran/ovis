@@ -527,8 +527,8 @@ export class DeviceStore {
   /** A deny that could not reach the disk (P8 step 1): only this PC itself gets in until one is written. */
   private denyProblem: string | null = null;
   private readonly revokeAllIntent: RevokeAllIntent | null;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; joinedRows?: AccountRowSource | null } = {}) {
-    this.joinedRows = account.joinedRows ?? null;
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null } = {}) {
+    this.joinedRows = typeof account.joinedRows === "function" ? account.joinedRows(this) : account.joinedRows ?? null;
     this.safety = account.safety ?? null;
     this.handedLifts = new HandedLifts(stateDir);
     this.pc = account.pc ?? null;
