@@ -740,12 +740,14 @@ export class DeviceStore {
    * the PC fails closed or is locked, and while a block or a freeze stands that `key` is newer than. Newer is decided
    * on this PC by admission order: a key with no row here, or a row with no place in the order, counts as newer.
    */
-  admits(key: string | undefined): boolean {
+  admits(key: string | undefined, confirm?: { readonly codeId: string; readonly key: string }): boolean {
     if (this.failsClosed) return false;
     const state = this.safety?.state();
     if (state === undefined) return true;
     if (state.locked) return false;
     if (state.freezes.length === 0) return true;
+    // a key confirm on this PC's own screen, or ovis recover --admit, of this very key passes a freeze (P23, rule R1)
+    if (confirm !== undefined && key !== undefined && confirm.key === key) return true;
     const row = key === undefined ? undefined : this.devices.find((d) => d.relay_public_key === key);
     const admitNo = row?.origin?.admit_no;
     if (admitNo === undefined) return false;
@@ -783,10 +785,14 @@ export class DeviceStore {
    * (`recover`). Every guard is asked again in this turn, and only the very key and code reserved commit. A key a row
    * already holds gives that row the new origin and makes no second row (T5 in 2d).
    */
-  admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover" }, now = Date.now()): DeviceMatch | null {
+  admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover"; unrevokes?: readonly string[] }, now = Date.now()): DeviceMatch | null {
     const pending = this.pending;
     if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || pending.reserved?.key !== confirm.key || this.codeOver(pending, now)) return null;
-    if (!this.admits(confirm.key)) return null;
+    const proof = { codeId: confirm.codeId, key: confirm.key };
+    if (!this.admits(confirm.key, proof)) return null;
+    // a Revoke that stands keeps the key out unless this confirm names it (P13)
+    const revokes = this.evidence?.standingRevokes(confirm.key) ?? [];
+    if (revokes.some((revoke) => !(confirm.unrevokes ?? []).includes(revoke.id))) return null;
     const origin = this.pc.admit(confirm.source === "screen" ? "pc" : "recover", pending.reserved.how, null, now);
     const existing = this.devices.find((d) => d.relay_public_key === confirm.key);
     if (existing !== undefined) {
@@ -797,8 +803,8 @@ export class DeviceStore {
       return { id: existing.id, label: existing.label, role: existing.role };
     }
     const device: StoredDevice = { id: randomBytes(8).toString("hex"), label: normalizeLabel(confirm.label, "Device"), role: "drive", token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: confirm.key, created_at: new Date(now).toISOString(), last_seen_at: null, origin };
-    this.enroll(device, now, [], true);
-    this.clearTombstone(confirm.key);
+    this.enroll(device, now, [], true, { confirm: proof });
+    if (revokes.length > 0) this.clearTombstone(confirm.key);
     return { id: device.id, label: device.label, role: device.role };
   }
 
@@ -1463,9 +1469,9 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean } = {}): void {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: { readonly codeId: string; readonly key: string } } = {}): void {
     // the final guard, in the commit turn: nothing waits between it and the write
-    if (!this.admits(admitting.relay_public_key)) throw new AdmissionRefusedError();
+    if (!this.admits(admitting.relay_public_key, path.confirm)) throw new AdmissionRefusedError();
     const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
     // with the flag on a row is stamped after everything this store ordered before it (T26, P13)
     const device = this.evidence === null ? admitted : { ...admitted, created_at: this.nextStamp(Date.parse(admitted.created_at)) };
