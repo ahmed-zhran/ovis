@@ -28,6 +28,8 @@ interface PcDoc {
   first: { key: string; list_key: string | null } | null;
   /** set by the first admission of another account row and never unset (H2) */
   others_ever: boolean;
+  /** P14: raised by every denial and policy change; a decision that widens commits only at the gen it noted */
+  gen: number;
 }
 
 const REASONS: ReadonlySet<string> = new Set(["revoke_all", "identity_reset", "left_on_pc"]);
@@ -46,6 +48,8 @@ function parseDoc(value: unknown): PcDoc | string {
   const first = doc.first;
   if (first !== null && !(typeof first === "object" && first !== undefined && typeof first.key === "string" && (first.list_key === null || typeof first.list_key === "string"))) return "invalid first";
   if (typeof doc.others_ever !== "boolean") return "invalid others_ever";
+  if (doc.gen === undefined) return { ...doc, gen: 0 } as PcDoc;
+  if (!Number.isSafeInteger(doc.gen) || doc.gen < 0) return "invalid gen";
   return doc as PcDoc;
 }
 
@@ -58,7 +62,7 @@ function realFolder(stateDir: string): string {
 const HANDLES = new Map<string, PcAccountState>();
 
 export class PcAccountState {
-  private doc: PcDoc = { v: 1, next_admit: 1, binding: null, clears: [], first: null, others_ever: false };
+  private doc: PcDoc = { v: 1, next_admit: 1, binding: null, clears: [], first: null, others_ever: false, gen: 0 };
   private problem: string | null = null;
   /** no file and no journal: this folder's rows predate the release, and are migrated once (T50) */
   private fresh = false;
@@ -150,6 +154,11 @@ export class PcAccountState {
 
   clears(): readonly AccountClear[] { return this.doc.clears; }
 
+  gen(): number { return this.doc.gen; }
+
+  /** A denial or a policy change reached the disk (P14): a decision that noted the old gen does not commit. */
+  raiseGen(): void { this.write({ ...this.doc, gen: this.doc.gen + 1 }); }
+
   /** The first-device fact (T67): the key that bound the PC, and its proved sign-in key or null. */
   first(): { readonly key: string; readonly list_key: string | null } | null { return this.doc.first; }
 
@@ -172,7 +181,7 @@ export class PcAccountState {
   clear(reason: ClearReason, by: string): boolean {
     const binding = this.doc.binding;
     if (binding === null) return false;
-    this.write({ ...this.doc, binding: null, clears: [...this.doc.clears, { bind_id: binding.bind_id, reason, by }] });
+    this.write({ ...this.doc, binding: null, clears: [...this.doc.clears, { bind_id: binding.bind_id, reason, by }], gen: this.doc.gen + 1 });
     return true;
   }
 
