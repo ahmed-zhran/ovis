@@ -57,6 +57,7 @@ import { accountOpensAll } from "../shared/account-devices-api.ts";
 import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
 import { PcAccountState } from "./account/pc-binding.ts";
 import { RemovalEvidence } from "./account/removal-evidence.ts";
+import { DeviceJournal } from "./account/device-journal.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
@@ -272,8 +273,10 @@ export function createServer(
   try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
   const pcAccount = opensAll ? PcAccountState.open(stateDir) : null;
   const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
-  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount, removals });
-  for (const strict of [safetyLog?.strict, pcAccount?.strict, removals?.strict]) if (strict) console.error(strict);
+  // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
+  const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
+  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal });
+  for (const strict of [safetyLog?.strict, pcAccount?.strict, removals?.strict, journal?.strict]) if (strict) console.error(strict);
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
   if (options.profile === "machine") devices.closeGate();
   const preferences = new PreferenceStore(stateDir);
