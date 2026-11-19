@@ -1484,7 +1484,7 @@ describe("carrier loss never resends", () => {
 describe("S2-25 a held refusal reaches the app with its hold state (S25)", () => {
   it("S25: the server's held failure arrives as the client's error, hold and all", async () => {
     const mux = pair();
-    mux.server.fail("held", "This device waits for its join hold", { reason: "join_hold", until: "2026-11-20T05:00:10.000Z" });
+    mux.server.fail("held", "This device waits for its join hold", undefined, { reason: "join_hold", until: "2026-11-20T05:00:10.000Z" });
     await mux.flush();
     const received = mux.errors.find((error) => error.code === "held");
     expect(received?.hold).toEqual({ reason: "join_hold", until: "2026-11-20T05:00:10.000Z" });

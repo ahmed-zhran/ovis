@@ -1267,7 +1267,7 @@ export class MuxEngine {
     for (const stream of this.streams) this.reset(stream, "upstream_lost", false);
     this.urgent.length = 0;
     this.controlQueued = 0;
-    this.timer(() => this.shutdown(this.fatal ?? new MuxProtocolError(code, message, hold)), 5000);
+    this.timer(() => this.shutdown(this.fatal ?? new MuxProtocolError(code, message, receipts, hold)), 5000);
     this.kick();
   }
   carrierLost(error = new MuxProtocolError("internal_error", "Carrier lost")): void { this.shutdown(error); }

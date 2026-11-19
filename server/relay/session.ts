@@ -8,7 +8,6 @@ import { ACCOUNT_FEATURE, ACCOUNT_OPENS_ALL_FEATURE, AUTH_RECEIPTS_MAX, DIRECT_C
 import type { HeaderList, SessionError } from "../../shared/relay-mux.ts";
 import type { BlockReceipt } from "../../shared/account-devices-api.ts";
 import { PairingRateLimitedError, type DeviceMatch, type PairingPath } from "../devices.ts";
-import { ACCOUNT_OPENS_ALL_MUX_FEATURE } from "../../shared/account-devices-api.ts";
 import { accountDeviceId } from "../../shared/account-records.ts";
 import { SIGN_IN_WAIT_MS } from "../account/mailbox.ts";
 import { accountSignInRefusal } from "../account/account-signin.ts";
