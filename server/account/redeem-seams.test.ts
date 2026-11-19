@@ -93,4 +93,36 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.redeemCode(code, "code", named)).toMatchObject({ ok: false });
     expect(devices.pairRelay(code, "Phone", named)).not.toBeNull();
   });
+
+  test("P23: a confirm on this PC's screen lets in its own frozen key only, and never past a lock or a Revoke", async () => {
+    const at = dir();
+    const devices = store(at);
+    const internals = devices as unknown as { safety: SafetyLog; evidence: RemovalEvidence };
+    // a Revoke made before the freeze, then a freeze the service states: every key with no place here is held out
+    const revoked = await key();
+    const revokedRow = devices.pairRelay(devices.startPairing().code, "Gone", revoked)!.device.id;
+    devices.revoke(revokedRow);
+    internals.safety.append({ record: { v: 1, id: "f:" + "a".repeat(64), kind: "freeze", account: "acct_1", target: await key(), after: 2, signer: "service", signed_at: new Date().toISOString(), signature: "" }, got: "snapshot" });
+    const [frozen, other] = [await key(), await key()];
+    expect(devices.admits(frozen)).toBe(false);
+    // (c) a redemption alone lets nobody in; (b) the confirm of one key proves nothing for another
+    const first = devices.startPairing();
+    const { codeId } = devices.redeemCode(first.code, "code", frozen) as { codeId: string };
+    expect(devices.list(null).some((row) => row.label === "Mine")).toBe(false);
+    expect(devices.admits(other, { codeId, key: frozen })).toBe(false);
+    // (a) the confirmed key itself comes in, past the freeze
+    expect(devices.admitConfirmed({ codeId, key: frozen, label: "Mine", source: "screen" })).not.toBeNull();
+    // (d) a key under a standing Revoke stays out unless the confirm names that Revoke
+    const again = devices.startPairing();
+    const { codeId: id2 } = devices.redeemCode(again.code, "code", revoked) as { codeId: string };
+    expect(devices.admitConfirmed({ codeId: id2, key: revoked, label: "Back", source: "screen" })).toBeNull();
+    const revokeId = internals.evidence.standingRevokes(revoked)[0]!.id;
+    expect(devices.admitConfirmed({ codeId: id2, key: revoked, label: "Back", source: "screen", unrevokes: [revokeId] })).not.toBeNull();
+    // a lock still holds out even a confirmed key
+    internals.safety.append({ record: { v: 1, id: "1".repeat(32), kind: "lock", account: "acct_1", target: null, signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
+    const third = devices.startPairing();
+    const locked = await key();
+    const { codeId: id3 } = devices.redeemCode(third.code, "code", locked) as { codeId: string };
+    expect(devices.admitConfirmed({ codeId: id3, key: locked, label: "Locked", source: "screen" })).toBeNull();
+  });
 });
