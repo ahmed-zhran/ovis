@@ -333,6 +333,16 @@ function offMark(offFile: string): string | null | undefined {
   } catch { return undefined; }
 }
 
+/**
+ * The counter an off brings `forgotten` to, which its mark names, so the off is counted even when its server goes before it
+ * writes FILE, FILE cannot be read, or a late write takes FILE's counter back. Null for a mark that names none (an older
+ * build's, a migrated or an empty one).
+ */
+function markCounter(mark: string | null | undefined): number | null {
+  const counter = Number(mark && /^[0-9a-f-]{36} (\d+)$/.exec(mark)?.[1]);
+  return Number.isSafeInteger(counter) && counter > 0 ? counter : null;
+}
+
 /** Whether FILE itself says on, whatever the mark says; false when it cannot be read. */
 function fileSaysOn(file: string): boolean {
   try {
@@ -485,11 +495,16 @@ export class Telemetry {
     else if (offMark(this.offFile) !== this.saved.enabled_mark) this.saved.enabled = false;
   }
 
-  private markOff(): void {
+  /** the counter an off asked now brings `forgotten` to: one past any this server, FILE or the mark knows */
+  private offCounter(): number {
+    return Math.max(this.saved.forgotten, readSaved(this.file, this.offFile)?.forgotten ?? 0, markCounter(offMark(this.offFile)) ?? 0) + 1;
+  }
+
+  private markOff(counter: number): void {
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
-    const mark = randomUUID();
-    const temp = `${this.offFile}.${mark}.tmp`;
-    writeFileSync(temp, mark, { mode: 0o600 });
+    const id = randomUUID();
+    const temp = `${this.offFile}.${id}.tmp`;
+    writeFileSync(temp, `${id} ${counter}`, { mode: 0o600 });
     try { renameSync(temp, this.offFile); } catch (error) {
       rmSync(temp, { force: true });
       throw error;
@@ -507,7 +522,8 @@ export class Telemetry {
       this.saved.counts = [];
       this.saved.settings = null;
       this.saved.replaced_forgotten = true;
-    } else this.forgetUnwrittenOff(onDisk);
+    }
+    this.forgetUnwrittenOff(onDisk);
     const temp = `${this.file}.${process.pid}.tmp`;
     writeFileSync(temp, JSON.stringify(this.saved), { mode: 0o600 });
     // inside a section, right before the rename: a lock that no longer holds this section's stamp was taken over (this
@@ -604,11 +620,13 @@ export class Telemetry {
     if (!clean) throw new TypeError("Invalid telemetry change");
     // turned off while an event is on its way: stop it before anything is read or written (a read may write the mark), and
     // even if OFF_FILE cannot be written
+    let offAt = 0;
     if (clean.enabled === false) {
       this.abort?.abort(); this.activeAbort?.abort(); this.countsAbort?.abort();
       // marked before the lock is even asked for: another server's send checks the mark right before it goes, so an off
       // stops it at once, whatever the wait for the lock
-      this.markOff();
+      offAt = this.offCounter();
+      this.markOff(offAt);
     }
     // the off mark an on was asked against: an off marked after it, even one done before this server gets the lock, wins
     const markAsked = clean.enabled === true ? offMark(this.offFile) : null;
@@ -616,6 +634,8 @@ export class Telemetry {
       let markAtStart = offMark(this.offFile);
       if (clean.enabled === true && markAtStart !== markAsked && !(markAsked === null && markAtStart?.startsWith(MIGRATED_MARK))) return "superseded";
       this.refresh();
+      // the counter this off brings `forgotten` to: one more than any off counted while it waited for the lock
+      const counter = Math.max(offAt, this.saved.forgotten + 1);
       // an off counts itself below, so it is not counted twice
       if (clean.enabled !== false) this.forgetUnwrittenOff(this.saved);
       // the read just now marked an older build's off: that mark is the one this change found
@@ -626,10 +646,11 @@ export class Telemetry {
       // the counter as the request found it: settings told with the generation the page heard last are from now
       const heard = this.saved.forgotten;
       // off is marked before FILE is written, whatever another server writes to FILE meanwhile
-      if (clean.enabled === false) this.markOff();
+      if (clean.enabled === false) this.markOff(counter);
       // nothing kept before an off is sent after it: the off, and an on after an off (one another server marked), drop every
       // visit day and count day not yet delivered
-      if (clean.enabled === false || (clean.enabled === true && !this.saved.enabled)) this.forgetUnsent();
+      if (clean.enabled === false) this.forgetUnsent(counter);
+      else if (clean.enabled === true && !this.saved.enabled) this.forgetUnsent();
       if (clean.enabled === true) {
         if (markAtStart === undefined) return "superseded";
         this.saved.enabled_mark = markAtStart;
@@ -646,17 +667,18 @@ export class Telemetry {
       if (clean.enabled !== false && offMark(this.offFile) !== markAtStart) return "superseded";
       if (!this.persist()) throw new FileBusyError(CHANGE_BUSY);
       // and again after: an on from another server between the two writes cannot leave this off without its mark
-      if (clean.enabled === false) this.markOff();
+      if (clean.enabled === false) this.markOff(counter);
       return "applied";
     }, (): "applied" | "superseded" | "busy" => {
       // another server holds the lock: an off still goes, with its mark and without what was not sent; anything else waits
       if (clean.enabled !== false) return "busy";
-      this.markOff();
+      this.markOff(offAt);
       this.refresh();
-      this.forgetUnsent();
+      const counter = Math.max(offAt, this.saved.forgotten + 1);
+      this.forgetUnsent(counter);
       this.saved.enabled = false;
       try { this.persist(); } catch (error) { console.error(`telemetry: ${this.file} could not be written (${message(error)})`); }
-      this.markOff();
+      this.markOff(counter);
       return "applied";
     });
     let applied = apply();
@@ -684,21 +706,25 @@ export class Telemetry {
    * install or update event may still go once the counts are on, built from what holds then: no settings until a page
    * tells them again, and no version it replaced (known only from before the off).
    */
-  private forgetUnsent(): void {
+  private forgetUnsent(counter = this.saved.forgotten + 1): void {
     this.saved.active = [];
     this.saved.counts = [];
     this.saved.settings = null;
     this.saved.replaced_forgotten = true;
-    this.saved.forgotten += 1;
+    this.saved.forgotten = counter;
   }
 
   /**
-   * An off another server marked and never wrote to FILE (its server went in between) dropped nothing and counted nothing,
-   * yet it happened: whoever writes FILE first after it, or a change that finds it, drops and counts for it, once. `onDisk`
-   * is FILE as just read; a server's own off has counted already, so it holds a counter past the one FILE says.
+   * An off another server marked and did not count in FILE (its server went in between, or a late write took FILE's counter
+   * back) happened all the same: whoever writes FILE after it, or a change that finds it, drops and counts for it, once.
+   * Its mark names its counter. A mark that names none (an older build's) is taken as such an off only while FILE still
+   * says on with the counter this server holds (`onDisk` is FILE as just read): a server's own off holds one past it.
    */
   private forgetUnwrittenOff(onDisk: Saved | null): void {
-    if (!this.saved.enabled && onDisk !== null && onDisk.forgotten === this.saved.forgotten && fileSaysOn(this.file)) this.forgetUnsent();
+    if (this.saved.enabled) return;
+    const counter = markCounter(offMark(this.offFile));
+    if (counter !== null) { if (counter > this.saved.forgotten) this.forgetUnsent(counter); }
+    else if (onDisk !== null && onDisk.forgotten === this.saved.forgotten && fileSaysOn(this.file)) this.forgetUnsent();
   }
 
   /** Whether a browser visit is recorded at all: never while the switch is off or the environment forbids sending. */

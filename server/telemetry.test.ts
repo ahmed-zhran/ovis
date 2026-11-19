@@ -72,6 +72,18 @@ function seen(telemetry: Telemetry) {
   telemetry.change({ notice_seen: true, notice_version: NOTICE_VERSION });
 }
 
+/** `server`'s off as if its server went between marking it and writing telemetry.json */
+function offNeverWritten(server: Telemetry, stateDir: string) {
+  const file = join(stateDir, "telemetry.json");
+  const renameSync = fs.renameSync;
+  const rename = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+    if (to === file) throw new Error("the server went");
+    renameSync(from, to);
+  });
+  try { expect(() => server.change({ enabled: false })).toThrow("the server went"); }
+  finally { rename.mockRestore(); }
+}
+
 function settingsSnapshot(overrides: Partial<Settings> = {}): TelemetrySettings {
   return telemetrySettingsSnapshot({ ...DEFAULT_SETTINGS, ...overrides });
 }
@@ -1319,6 +1331,60 @@ describe("another server on the same state directory", () => {
     setup({ stateDir, grace: 60_000 });
     clock.now += 60_000;
     telemetry.change({ enabled: true, settings: snapshot, generation });
+    await telemetry.report();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test("an off another server marked and never wrote is counted though the file already says off", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    seen(telemetry);
+    const generation = telemetry.change({ enabled: false }).counts_generation;
+    offNeverWritten(setup({ stateDir }).telemetry, stateDir);
+    // a page that heard the first off and not the second turns the counts on
+    telemetry.change({ enabled: true, settings: settingsSnapshot({ theme: "light" }), generation });
+    clock.now += 60_000;
+    await telemetry.report();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a write while telemetry.json cannot be read keeps the counter of an off another server marked and never wrote", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    const observer = setup({ stateDir, grace: 60_000 });
+    const snapshot = settingsSnapshot({ theme: "light" });
+    observer.telemetry.change({ notice_seen: true, notice_version: NOTICE_VERSION, settings: snapshot, generation: 0 });
+    const generation = telemetry.status().counts_generation;
+    offNeverWritten(setup({ stateDir }).telemetry, stateDir);
+    chmodSync(join(stateDir, "telemetry.json"), 0o000);
+    observer.telemetry.change({ settings: snapshot, generation });
+    clock.now += 60_000;
+    telemetry.change({ enabled: true, settings: snapshot, generation });
+    await telemetry.report();
+    observer.telemetry.stop();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test("a write that lands after another server's lockless off cannot take that off's counter back", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    const other = setup({ stateDir });
+    seen(telemetry);
+    const generation = telemetry.change({ enabled: false }).counts_generation;
+    const file = join(stateDir, "telemetry.json");
+    const renameSync = fs.renameSync;
+    let stalled = false;
+    const rename = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (to !== file || stalled) return renameSync(from, to);
+      stalled = true;
+      const held = readFileSync(from, "utf8");
+      // this server stalls holding the lock: the other's off waits it out, goes without it, and this write lands after
+      other.telemetry.change({ enabled: false });
+      writeFileSync(file, held);
+      rmSync(from, { force: true });
+    });
+    try { telemetry.change({ settings: settingsSnapshot(), generation }); }
+    finally { rename.mockRestore(); }
+    expect(stalled).toBe(true);
+    telemetry.change({ enabled: true, settings: settingsSnapshot({ theme: "light" }), generation });
+    clock.now += 60_000;
     await telemetry.report();
     expect(sent.map((event) => event.settings)).toEqual([null]);
   });
