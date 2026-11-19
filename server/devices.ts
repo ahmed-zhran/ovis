@@ -15,6 +15,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isRowOrigin, legacyOrigin, type RowOrigin } from "./account/admission-order.ts";
 import type { ClearReason, PcAccountState } from "./account/pc-binding.ts";
+import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import { AccountRecordError, parseAccountRecord, type AddRecord, type RemoveRecord } from "../shared/account-records.ts";
 import { type AccountPairing, type AccountPairingEnd, type AccountPairingState, type AccountPairingTurnedAway, type DevicePairedEvent, type DeviceRemovedEvent, type DevicePairToken, type DeviceRole, type DevicesRevokedAll, type PairedDevice, type DeviceConnection, STREAM_COOKIE_PREFIX } from "../shared/protocol.ts";
 import type { MuxClock } from "../shared/relay-mux-engine.ts";
@@ -166,6 +167,8 @@ export interface StoredDevice {
   joined_by?: JoinedBy;
   /** where this PC admitted the row from, and its place in this PC's own order (server/account/admission-order.ts) */
   origin?: RowOrigin;
+  /** the account removals of its key that its pairing on this PC knew, and stands over (P13) */
+  paired_over?: string[];
 }
 
 /**
@@ -306,7 +309,8 @@ export function readDeviceRegistry(path: string): DeviceRegistry {
       && (d.linked_at === undefined || typeof d.linked_at === "string")
       && (d.link_moved_key === undefined || typeof d.link_moved_key === "boolean")
       && (d.account_add === undefined || isJsonObject(d.account_add))
-      && (d.origin === undefined || isRowOrigin(d.origin)))) return { kind: "bad" };
+      && (d.origin === undefined || isRowOrigin(d.origin))
+      && (d.paired_over === undefined || (Array.isArray(d.paired_over) && d.paired_over.every((id) => typeof id === "string"))))) return { kind: "bad" };
   return { kind: "ok", gateClosedAt: parsed.gate_closed_at, devices: parsed.devices as StoredDevice[], placeholder: parsed.placeholder === true && parsed.devices.length === 0 };
 }
 
@@ -471,9 +475,11 @@ export class DeviceStore {
    */
   private readonly safety: { readonly strict: string | null } | null;
   private readonly pc: PcAccountState | null;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null } = {}) {
+  private readonly evidence: RemovalEvidence | null;
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null } = {}) {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
+    this.evidence = account.removals ?? null;
     this.path = join(stateDir, "devices.json");
     this.tombstonePath = join(stateDir, "account-tombstones.json");
     this.pendingTombstonePath = join(stateDir, "account-tombstones.pending.json");
@@ -500,13 +506,56 @@ export class DeviceStore {
     }
     // the tombstone files' own repair asks only whether they could be read: a strict safety log is a separate refusal
     if (this.error === null && this.accountProblem === null) {
-      if (pending.length) {
-        this.writeTombstones(this.tombstones);
-        rmSync(this.pendingTombstonePath, { force: true });
+      if (this.evidence !== null) this.takeInEvidence([...tombstones ?? [], ...pending]);
+      else {
+        if (pending.length) {
+          this.writeTombstones(this.tombstones);
+          rmSync(this.pendingTombstonePath, { force: true });
+        }
+        this.finishInterruptedWrites();
       }
-      this.finishInterruptedWrites();
       this.migrate();
     }
+  }
+
+  /**
+   * At load (T26, P13): every tombstone of both files, the pending one's included, is taken in as evidence before
+   * anything is coalesced; the tombstone file is written again from the evidence; the pending file goes; and every row
+   * the evidence covers goes. Nothing of it is told to anyone: no session is open yet.
+   */
+  private takeInEvidence(found: readonly AccountTombstone[]): void {
+    this.evidence!.takeIn(found, this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
+    this.refreshTombstones();
+    rmSync(this.pendingTombstonePath, { force: true });
+    const kept = this.devices.filter((d) => !this.coveredByEvidence(d));
+    if (kept.length !== this.devices.length) {
+      const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? null;
+      this.save(kept, gate);
+      this.devices = kept;
+      this.gateClosedAt = gate;
+    }
+  }
+
+  /** The tombstone file as the evidence writes it (P13), written only when it changed. */
+  private refreshTombstones(): void {
+    const next = this.evidence!.tombstones();
+    if (JSON.stringify(next) !== JSON.stringify(this.tombstones)) this.writeTombstones(next);
+  }
+
+  /**
+   * Whether the evidence keeps this row out (P13): a Revoke of its key stands, or a standing marker of its key covers
+   * it. A marker covers a row of its account, or one that names no account while this PC is in that account, unless
+   * that row names no account and was paired here knowing every standing removal of the marker (`paired_over`).
+   */
+  private coveredByEvidence(device: StoredDevice): boolean {
+    const key = device.relay_public_key;
+    if (key === undefined || this.evidence === null) return false;
+    if (this.evidence.standingRevokes(key).length > 0) return true;
+    return this.evidence.standingMarkers(key).some(({ marker, standing }) => {
+      const ofAccount = device.account === marker.account || (device.account === undefined && this.account() === marker.account);
+      if (!ofAccount) return false;
+      return !(device.account === undefined && standing.every((removal) => device.paired_over?.includes(removal.id)));
+    });
   }
 
   /**
@@ -532,17 +581,18 @@ export class DeviceStore {
 
   /** A row whose key was removed at or after the row was made: revoked, whether or not its own write happened yet. */
   private stale(device: StoredDevice): boolean {
+    if (this.evidence !== null) return this.coveredByEvidence(device);
     return device.relay_public_key !== undefined
       && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || t.removed_at >= device.created_at));
   }
 
   get accountError(): string | null {
-    return this.safety?.strict ?? this.pc?.strict ?? this.accountProblem;
+    return this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.accountProblem;
   }
 
   /** The safety log or the admission order fails closed: no device gets in by a row or a code. */
   get failsClosed(): boolean {
-    return (this.safety?.strict ?? this.pc?.strict ?? null) !== null;
+    return (this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? null) !== null;
   }
 
   /**
@@ -1180,7 +1230,7 @@ export class DeviceStore {
 
   /** One authorization write precedes every state change and enrollment announcement. */
   private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true): void {
-    const device = this.admitted(admitting, now);
+    const device = this.knowingRemovals(this.admitted(admitting, now));
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
     this.save(next, gate);
@@ -1655,6 +1705,16 @@ export class DeviceStore {
    */
   removeAccountKey(key: string, account: string, record: { id: string; issuedAt: string; by?: { device_id: string; label: string }; signed?: RemoveRecord }, now = Date.now()): boolean {
     this.assertAccountWritable();
+    if (this.evidence !== null) {
+      // account-scoped evidence first, whatever rows this PC holds and with no time compared (T16 in 2d); every row
+      // it covers goes, row by row, and a Revoke this PC made is never coalesced into it (T22)
+      const added = this.evidence.addRemoval(key, account, { id: record.id, at: new Date(now).toISOString(), ...(record.signed ? { records: [record.signed] } : {}) });
+      this.refreshTombstones();
+      this.dropWaiting([key]);
+      const gone = this.devices.filter((d) => d.relay_public_key === key && this.coveredByEvidence(d));
+      if (gone.length) this.drop(gone, record.by);
+      return added || gone.length > 0;
+    }
     // a pairing of this key made on this PC after the removal was signed wins: a replayed or late remove
     // leaves it and its key be, and takes only the key's other rows. Any other row goes, however late the remove
     // arrives (pairedHere).
@@ -1708,8 +1768,24 @@ export class DeviceStore {
     return this.list(null).find((d) => d.id === deviceId) ?? null;
   }
 
-  /** A pairing made on this PC (a code, or a comparison approved here) lets a removed key back in. */
+  /** A pairing of a key on this PC names the account removals it knew (`paired_over`), and stands over them (P13, T23). */
+  private knowingRemovals(device: StoredDevice): StoredDevice {
+    if (this.evidence === null || device.relay_public_key === undefined || !pairedHere(device)) return device;
+    const over = this.evidence.pairedOver(device.relay_public_key);
+    return over.length ? { ...device, paired_over: over } : device;
+  }
+
+  /**
+   * A pairing made on this PC (a code, or a comparison approved here) lets a removed key back in. With removal
+   * evidence it ends the Revokes of the key by name and leaves the account's markers standing (T21, T23).
+   */
   private clearTombstone(key: string): void {
+    if (this.evidence !== null) {
+      if (this.accountError !== null) return;
+      this.evidence.unrevoke(key, "pc", Date.now());
+      this.refreshTombstones();
+      return;
+    }
     if (this.accountError !== null || !this.isTombstoned(key)) return;
     this.writeTombstones(this.tombstones.filter((t) => t.key !== key));
   }
@@ -1719,6 +1795,13 @@ export class DeviceStore {
    * link with one of those keys go next, before the revoke as well (dropWaiting).
    */
   private tombstone(rows: readonly StoredDevice[], now: number): void {
+    if (this.evidence !== null && this.accountError === null) {
+      // each Revoke is its own evidence, also of a key that already has a tombstone (P13)
+      for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
+      this.refreshTombstones();
+      this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
+      return;
+    }
     const keys = [...new Set(rows.flatMap((d) => d.relay_public_key === undefined || this.isTombstoned(d.relay_public_key) ? [] : [d.relay_public_key]))];
     const removedAt = new Date(now).toISOString();
     const next = [...this.tombstones,
