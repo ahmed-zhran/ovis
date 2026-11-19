@@ -951,7 +951,10 @@ export class DeviceStore {
   }
 
   /** Step 2 (S2-24): the account's order as this PC's whole reads saw it; set only with OVIS_ACCOUNT_OPENS_ALL=1. */
-  attachAccountOrder(order: AccountOrder | null): void { this.accountOrder = order; }
+  attachAccountOrder(order: AccountOrder | null): void {
+    order?.recordJoins(this.devices);
+    this.accountOrder = order;
+  }
 
   /** Whether the account-opens-all release flag is on for this store. */
   opensAll(): boolean { return this.safety !== null; }
@@ -1605,6 +1608,7 @@ export class DeviceStore {
     this.save(next, gate);
     this.devices = next;
     this.gateClosedAt = gate;
+    this.accountOrder?.recordJoins([device]);
     if (codeSpent) this.voidPending();
     if (device.account !== undefined) this.endNoAccountCode();
     // A relay enrollment closes the gate immediately, invalidating every first-cookie candidate.
@@ -2336,6 +2340,7 @@ export class DeviceStore {
     const next = this.devices.map((d) => d === device ? updated : d);
     this.bindingWith(account, key, () => this.save(next));
     this.devices = next;
+    this.accountOrder?.recordJoins([updated]);
     this.endNoAccountCode();
     for (const listener of [...this.relinks.get(deviceId) ?? []]) listener(sessionId);
     return this.list(null).find((d) => d.id === deviceId) ?? null;
