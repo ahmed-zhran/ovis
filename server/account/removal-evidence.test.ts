@@ -106,6 +106,12 @@ describe("account removals and local Revokes kept apart (account-removed.json)",
     expect(tombstones(dir)).toEqual([expect.objectContaining({ key: k, record_id: "local" })]);
     expect(reopened.isTombstoned(k)).toBe(true);
     expect(reopened.removedByAccount(k)).toBe(false);
+    // folding the forget record into the log's base keeps it held: the forgotten removal does not stand again (P13, T61)
+    expect(SafetyLog.open(dir).fold()).toBeGreaterThan(0);
+    expect(SafetyLog.open(dir).entries().some((entry) => entry.record.kind === "forget")).toBe(false);
+    const folded = store(dir);
+    expect(folded.removedByAccount(k)).toBe(false);
+    expect(folded.isTombstoned(k)).toBe(true);
   });
 
   test("T23: re-pair over an account marker admits only an unlinked row", async () => {
