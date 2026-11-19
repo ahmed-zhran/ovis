@@ -36,6 +36,13 @@ describe("the relay-only warning", () => {
     expect(shown).toContain("older device");
   });
 
+  it("T65: says a removal made while this PC was off applies once it reads the account again, with no deadline promised", async () => {
+    await act(async () => { renderer = create(<SettingsProvider><RelayOnlyWarning opensAll /></SettingsProvider>); });
+    const shown = text(renderer!.root);
+    expect(shown).toContain("after it restarts");
+    expect(shown).not.toMatch(/\d+ (second|minute)/);
+  });
+
   it("G5: says nothing on a PC with the release off", async () => {
     await act(async () => { renderer = create(<SettingsProvider><RelayOnlyWarning opensAll={false} /></SettingsProvider>); });
     expect(renderer!.toJSON()).toBeNull();
