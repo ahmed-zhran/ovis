@@ -19,7 +19,7 @@ import type { SafetyGot, SafetyLog } from "./account/safety-log.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import type { DeviceJournal, JournalEntry } from "./account/device-journal.ts";
 import type { DeviceNotice, NoticeReplay } from "../shared/account-devices-api.ts";
-import { AccountRecordError, parseAccountRecord, parseSafetyRecord, verifySafetyRecord, type AddRecord, type BlockRecord, type RemoveRecord, type SafetyRecord } from "../shared/account-records.ts";
+import { AccountRecordError, parseAccountRecord, parseSafetyRecord, verifySafetyRecord, type AddRecord, type BlockRecord, type DeviceSafetyRecord, type RemoveRecord, type SafetyRecord } from "../shared/account-records.ts";
 import type { BlockReceipt } from "../shared/account-devices-api.ts";
 import { type AccountPairing, type AccountPairingEnd, type AccountPairingState, type AccountPairingTurnedAway, type DevicePairedEvent, type DeviceRemovedEvent, type DevicePairToken, type DeviceRole, type DevicesRevokedAll, type PairedDevice, type DeviceConnection, STREAM_COOKIE_PREFIX } from "../shared/protocol.ts";
 import type { MuxClock } from "../shared/relay-mux-engine.ts";
@@ -550,6 +550,7 @@ export class DeviceStore {
         this.takeInEvidence([...tombstones ?? [], ...pending]);
         // the log is the truth (P24): a block in force whose marker never reached the disk gets it before anything is served
         this.markBlockTargets();
+        this.liftOrphanedBlocks();
       } else {
         if (pending.length) {
           this.writeTombstones(this.tombstones);
@@ -789,7 +790,11 @@ export class DeviceStore {
     if (signers.length === 0) return refused("signer_not_member");
     if (signers.some((d) => this.frozen(d))) return refused("frozen");
     const targets = this.devices.filter((d) => d.relay_public_key === record.target);
-    if (targets.length === 0) return refused("unknown_target");
+    // a target this PC has no row of: the block waits, ends nobody, and is judged when its target is here (P19)
+    if (targets.length === 0) {
+      this.safety.wait({ record, got, signer_removed: false });
+      return refused("unknown_target");
+    }
     // every row of the target, duplicates included, joined after every row of the signer: else nothing applies
     if (!targets.every((target) => signers.every((signer) => compareAdmission(signer, target) === "older"))) return refused("signer_not_older");
     const joined = Math.min(...targets.map((d) => d.origin!.admit_no));
@@ -812,10 +817,69 @@ export class DeviceStore {
       for (const close of listeners ?? []) close();
     }
     this.dropWaiting([record.target], "block");
+    this.safety.unwait(record.id);
     try { this.drop(targets, "pc"); }
     catch (error) { console.error(`[devices] the registry write of a block failed after its deny; the next start finishes it: ${error instanceof Error ? error.message : String(error)}`); }
     return appended;
   }
+
+  /** The drive member rows of `key` in `account` that stand here: what a signer of the account is on this PC. */
+  private memberRows(key: string, account: string): StoredDevice[] {
+    return this.devices.filter((d) => d.relay_public_key === key && d.role === "drive" && d.account === account && d.origin !== undefined && !this.coveredByEvidence(d));
+  }
+
+  /**
+   * The waiting blocks judged again (P19, T51): one whose signer is no member here any more is dropped and writes
+   * nothing; one whose target is here now applies, or is refused for good; the rest wait. Returns the receipts given.
+   */
+  applyWaitingBlocks(): BlockReceipt[] {
+    if (this.safety === null) return [];
+    const receipts: BlockReceipt[] = [];
+    for (const { record, got, signer_removed: signerRemoved } of [...this.safety.waitingBlocks()]) {
+      if (signerRemoved || this.memberRows(record.signer, record.account).length === 0) { this.safety.unwait(record.id); continue; }
+      if (!this.devices.some((d) => d.relay_public_key === record.target)) continue;
+      const receipt = this.commitBlock(record, got);
+      if (receipt.outcome !== "refused" || receipt.reason !== "unknown_target") this.safety.unwait(record.id);
+      receipts.push(receipt);
+    }
+    return receipts;
+  }
+
+  /**
+   * A block holds only while its signer is a member here (P16, T73): for every block in force whose signer has no
+   * member row here, a lift signed `pc` is appended, which ends that block and its freeze. Its marker, every local
+   * Revoke and every lock stay. Asked after every removal and at every load, before anything is served.
+   */
+  private liftOrphanedBlocks(): void {
+    if (this.safety === null || this.safety.strict !== null) return;
+    for (const entry of this.safety.state().blocks) {
+      const record = entry.record as BlockRecord;
+      if (this.memberRows(record.signer, record.account).length > 0) continue;
+      this.safety.append({ record: { v: 1, id: randomBytes(16).toString("hex"), kind: "lift", account: record.account, target: record.id, signer: "pc", signed_at: new Date().toISOString(), forget: false, signature: "" }, got: "pc" });
+    }
+  }
+
+  /**
+   * Whether a device's lift may end a block here (P23 way 1, T52): its signature is its signer's, the block is in this
+   * log, and the signer is a member here whose every row joined this PC before the blocked key did.
+   */
+  async liftAuthority(value: unknown): Promise<boolean> {
+    let record: SafetyRecord;
+    try { record = parseSafetyRecord(value); } catch (error) {
+      if (error instanceof AccountRecordError) return false;
+      throw error;
+    }
+    if (record.kind !== "lift" || record.signer === "pc" || this.safety === null) return false;
+    if (!await verifySafetyRecord(record as DeviceSafetyRecord)) return false;
+    const blocked = this.safety.state().blocks.find((entry) => entry.record.id === record.target);
+    const joined = blocked?.asof?.joined;
+    if (blocked === undefined || joined === null || joined === undefined) return false;
+    const signers = this.memberRows(record.signer, record.account);
+    return signers.length > 0 && signers.every((d) => d.origin!.admit_no < joined && !this.frozen(d));
+  }
+
+  /** Whether the account-opens-all release flag is on for this store. */
+  opensAll(): boolean { return this.safety !== null; }
 
   /** P14: this PC's denial counter, 0 while the release flag is off. */
   gen(): number { return this.pc?.gen() ?? 0; }
@@ -1923,6 +1987,8 @@ export class DeviceStore {
     }
     for (const device of gone) this.announceRemoval(device, by);
     for (const device of gone) this.journalRemoval(device, by);
+    // a signer removed here takes the blocks it signed with it (T73), whether or not the registry write below works
+    this.liftOrphanedBlocks();
     this.save(next, gate);
   }
 
@@ -1946,6 +2012,7 @@ export class DeviceStore {
     for (const listener of [...this.revokeAllListeners]) listener();
     for (const device of gone) this.announceRemoval(device, "pc");
     for (const device of gone) this.journalRemoval(device, "pc");
+    this.liftOrphanedBlocks();
     if (denied !== null) throw denied;
     this.finishRevokeAll(gone, gate);
     return gone.map((device) => device.id);
