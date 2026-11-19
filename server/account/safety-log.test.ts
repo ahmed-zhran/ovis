@@ -140,13 +140,14 @@ describe("the PC safety log (account-log.json)", () => {
     log.append({ record: pcRecord("unlock", lock2.id), got: "pc" });
     expect(replayed(SafetyLog.open(dir).state())).toEqual({ ...expected, locked: false, locks: [], freezes: [blockC.id] });
 
-    // the server replays it in createServer, before any listener answers
+    // the server replays it in createServer, before any listener answers; its signer is no member of this PC, so that
+    // same load lifts the block it signed (T73): the lift ends it and its freeze, and its marker stays
     const fixture = relayFixture(false, { stateDir: dir, accountOpensAll: true });
     fixtures.push(fixture);
     dirs.splice(dirs.indexOf(dir), 1);
     const served = fixture.app.context.services.safetyLog;
     expect(served).not.toBeNull();
-    expect(replayed(served!.state())).toEqual({ ...expected, locked: false, locks: [], freezes: [blockC.id] });
+    expect(replayed(served!.state())).toEqual({ ...expected, locked: false, locks: [], blocks: [], freezes: [] });
   });
 
   test("T28: missing or invalid log fails closed once journal exists", async () => {
