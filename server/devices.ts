@@ -789,7 +789,7 @@ export class DeviceStore {
   private commitBlock(record: BlockRecord, got: SafetyGot, onRaise?: () => void): BlockReceipt {
     const refused = (reason: Extract<BlockReceipt, { outcome: "refused" }>["reason"]): BlockReceipt => ({ outcome: "refused", id: record.id, reason });
     if (this.safety === null || this.evidence === null || this.failsClosed || record.account !== this.account()) return refused("record_invalid");
-    const signers = this.memberRows(record.signer, record.account);
+    const signers = this.signingRows(record.signer, record.account);
     if (signers.length === 0) return refused("signer_not_member");
     if (signers.some((d) => this.frozen(d))) return refused("frozen");
     // the target's rows in both stores: the account rows (S2-25) are targets as devices.json rows are
@@ -844,6 +844,11 @@ export class DeviceStore {
     return this.rowsOfKey(key).filter((d) => d.role === "drive" && d.account === account && d.origin !== undefined && !this.coveredByEvidence(d));
   }
 
+  /** A held row is still a member (its existing blocks stand), but it cannot sign a new block or lift. */
+  private signingRows(key: string, account: string): StoredDevice[] {
+    return this.memberRows(key, account).filter((row) => this.devices.includes(row) || this.joinedRows?.row(row.id)?.state === "live");
+  }
+
   /**
    * The waiting blocks judged again (P19, T51): one whose signer is no member here any more is dropped and writes
    * nothing; one whose target is here now applies, or is refused for good; the rest wait. Returns the receipts given.
@@ -894,13 +899,13 @@ export class DeviceStore {
       const signerNo = order.no(record.signer);
       const targetNo = order.no(line.target);
       return signerNo !== null && targetNo !== null && signerNo < Math.min(targetNo, line.after)
-        && this.memberRows(record.signer, record.account).some((row) => !this.frozen(row));
+        && this.signingRows(record.signer, record.account).some((row) => !this.frozen(row));
     }
     const joined = blocked.asof?.joined;
     if (joined === null || joined === undefined) return false;
     // a key the account's order marks late is not trusted as older than the key it would free (P21, T52)
     if (order?.late(record.signer) ?? false) return false;
-    const signers = this.memberRows(record.signer, record.account);
+    const signers = this.signingRows(record.signer, record.account);
     return signers.length > 0 && signers.every((d) => d.origin!.admit_no < joined && !this.frozen(d));
   }
 
