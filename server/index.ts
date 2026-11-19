@@ -56,6 +56,7 @@ import { AccountMailbox, accountServiceUrl, passAccountService } from "./account
 import { accountOpensAll } from "../shared/account-devices-api.ts";
 import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
 import { PcAccountState } from "./account/pc-binding.ts";
+import { snapshotPorts } from "./account/snapshot-ports.ts";
 import { RemovalEvidence } from "./account/removal-evidence.ts";
 import { DeviceJournal } from "./account/device-journal.ts";
 import { mergeAccountState } from "./account/account-merge.ts";
@@ -484,8 +485,13 @@ export function createServer(
   })();
   const desktopOwner = localConfirms && options.desktopOwner ? desktopOwnerChannel(localConfirms, options.desktopOwner) : null;
   const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
+  // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
+  const readPorts = safetyLog !== null && pcAccount !== null && journal !== null
+    ? snapshotPorts({ devices, safetyLog, pc: pcAccount, journal, serverId: () => ovisRelay.currentIdentity()?.server_id ?? null, requestRead: () => { void accountMailbox.pull(); } })
+    : null;
   const accountMailbox = new AccountMailbox({
     pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
+    ...(readPorts === null ? {} : { snapshot: { account: () => devices.account(), ports: () => readPorts } }),
     devices, identity: () => ovisRelay.currentIdentity(),
     service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
   });
