@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -118,11 +118,27 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.admitConfirmed({ codeId: id2, key: revoked, label: "Back", source: "screen" })).toBeNull();
     const revokeId = internals.evidence.standingRevokes(revoked)[0]!.id;
     expect(devices.admitConfirmed({ codeId: id2, key: revoked, label: "Back", source: "screen", unrevokes: [revokeId] })).not.toBeNull();
-    // a lock still holds out even a confirmed key
+    // (e) a locked PC still admits a key confirmed on its own screen, with origin pc; (f) never one from ovis recover
     internals.safety.append({ record: { v: 1, id: "1".repeat(32), kind: "lock", account: "acct_1", target: null, signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
+    const fourth = devices.startPairing();
+    const viaRecover = await key();
+    const { codeId: id4 } = devices.redeemCode(fourth.code, "code", viaRecover) as { codeId: string };
+    expect(devices.admitConfirmed({ codeId: id4, key: viaRecover, label: "Recovered", source: "recover" })).toBeNull();
+    devices.releaseRedemption(id4, viaRecover);
     const third = devices.startPairing();
-    const locked = await key();
-    const { codeId: id3 } = devices.redeemCode(third.code, "code", locked) as { codeId: string };
-    expect(devices.admitConfirmed({ codeId: id3, key: locked, label: "Locked", source: "screen" })).toBeNull();
+    const onScreen = await key();
+    const { codeId: id3 } = devices.redeemCode(third.code, "code", onScreen) as { codeId: string };
+    const admitted = devices.admitConfirmed({ codeId: id3, key: onScreen, label: "Screen", source: "screen" });
+    expect(admitted).not.toBeNull();
+    const rows = JSON.parse(readFileSync(join(at, "devices.json"), "utf8")) as { devices: { id: string; origin?: { from: string } }[] };
+    expect(rows.devices.find((row) => row.id === admitted!.id)?.origin?.from).toBe("pc");
+    // (g) a PC that fails closed admits nobody, a screen confirm included
+    const fifth = devices.startPairing();
+    const late = await key();
+    const { codeId: id5 } = devices.redeemCode(fifth.code, "code", late) as { codeId: string };
+    rmSync(join(at, "account-log.json"));
+    mkdirSync(join(at, "account-log.json"));
+    internals.safety.append({ record: { v: 1, id: "2".repeat(32), kind: "unlock", account: "acct_1", target: "1".repeat(32), signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
+    expect(devices.admitConfirmed({ codeId: id5, key: late, label: "Late", source: "screen" })).toBeNull();
   });
 });
