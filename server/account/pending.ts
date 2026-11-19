@@ -5,6 +5,7 @@
  * approves that one key by its fingerprint, declines it, or it runs out. A restart ends them all.
  */
 import { randomBytes } from "node:crypto";
+import type { PendingKey } from "../../shared/machines.ts";
 import { pairChallenge, pairFingerprint, verifyPairProof } from "../../shared/pair-fingerprint.ts";
 
 export const PENDING_MS = 5 * 60_000;
@@ -29,15 +30,17 @@ interface Named { code: string; label: string; key: string; via: PendingVia; at:
 export class PendingLimitError extends Error {}
 
 export class PendingRedemptions {
-  readonly #serverId: string;
+  readonly #serverId: () => string | null;
   readonly #now: () => number;
   readonly #journalDrop: (entry: { key: string; label: string; reason: string }) => void;
   /** challenges sent and not yet answered, each for the one key named before it was made */
   readonly #named = new Map<string, Named>();
   readonly #waiting = new Map<string, PendingRedemption>();
+  readonly #listeners = new Set<() => void>();
 
-  constructor(options: { serverId: string; now?: () => number; journalDrop(entry: { key: string; label: string; reason: string }): void }) {
-    this.#serverId = options.serverId;
+  constructor(options: { serverId: string | (() => string | null); now?: () => number; journalDrop(entry: { key: string; label: string; reason: string }): void }) {
+    const serverId = options.serverId;
+    this.#serverId = typeof serverId === "string" ? () => serverId : serverId;
     this.#now = options.now ?? Date.now;
     this.#journalDrop = options.journalDrop;
   }
@@ -62,12 +65,14 @@ export class PendingRedemptions {
     this.#sweep();
     const named = this.#named.get(challenge);
     this.#named.delete(challenge);
-    if (named === undefined || !await verifyPairProof(this.#serverId, challenge, named.key, signature)) return null;
+    const serverId = this.#serverId();
+    if (named === undefined || serverId === null || !await verifyPairProof(serverId, challenge, named.key, signature)) return null;
     const entry: PendingRedemption = Object.freeze({
       id: randomBytes(16).toString("hex"), code: named.code, label: named.label, key: named.key, via: named.via, redeemedAt: this.#now(),
-      fingerprint: await pairFingerprint(this.#serverId, challenge, named.key),
+      fingerprint: await pairFingerprint(serverId, challenge, named.key),
     });
     this.#waiting.set(entry.id, entry);
+    this.#changed();
     return entry;
   }
 
@@ -76,12 +81,33 @@ export class PendingRedemptions {
     return [...this.#waiting.values()];
   }
 
+  /** The list as the PC's windows show it, each with how many of its code's slots are taken. */
+  view(): PendingKey[] {
+    const waiting = this.list();
+    return waiting.map((entry) => ({
+      id: entry.id, label: entry.label, fingerprint: entry.fingerprint, via: entry.via, redeemed_at: new Date(entry.redeemedAt).toISOString(),
+      slots: { used: waiting.filter((other) => other.code === entry.code).length, of: PENDING_PER_CODE },
+    }));
+  }
+
+  onChange(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => { this.#listeners.delete(listener); };
+  }
+
+  #changed(): void {
+    for (const listener of [...this.#listeners]) {
+      try { listener(); } catch (error) { console.error(`A pending-redemption listener failed: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+  }
+
   /** The screen's approval of `id` by the fingerprint it showed: the redemption, taken out, or null. */
   take(id: string, fingerprint: string): PendingRedemption | null {
     this.#sweep();
     const entry = this.#waiting.get(id);
     if (entry === undefined || entry.fingerprint !== fingerprint) return null;
     this.#waiting.delete(id);
+    this.#changed();
     return entry;
   }
 
@@ -100,11 +126,14 @@ export class PendingRedemptions {
   }
 
   #drop(which: (entry: PendingRedemption) => boolean, reason: string): void {
+    let dropped = false;
     for (const entry of [...this.#waiting.values()]) {
       if (!which(entry)) continue;
       this.#waiting.delete(entry.id);
       this.#journalDrop({ key: entry.key, label: entry.label, reason });
+      dropped = true;
     }
+    if (dropped) this.#changed();
   }
 
   #sweep(): void {
