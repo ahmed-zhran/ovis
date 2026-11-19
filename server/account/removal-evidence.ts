@@ -16,7 +16,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateState } from "../private-state.ts";
-import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
 export const REMOVAL_FILE = "account-removed.json";
 /** Removals kept per marker; past it one that no longer stands goes first, the oldest first. */
@@ -67,7 +67,7 @@ export class RemovalEvidence {
     let text: string;
     try { text = readFileSync(evidence.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") evidence.problem = `Cannot read ${evidence.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
-      else if (existsSync(join(stateDir, ACCOUNT_JOURNAL_FILE))) evidence.problem = `${evidence.path} is missing beside the device journal`;
+      else if (existsSync(join(stateDir, DEVICE_JOURNAL_FILE))) evidence.problem = `${evidence.path} is missing beside the device journal`;
       return evidence;
     }
     let value: unknown;
