@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1387,6 +1388,59 @@ describe("another server on the same state directory", () => {
     clock.now += 60_000;
     await telemetry.report();
     expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test("an older off's mark that lands late over a newer unwritten one still counts that newer off", async () => {
+    const { telemetry, sent, clock, stateDir } = setup({ grace: 60_000 });
+    seen(telemetry);
+    const off = join(stateDir, "telemetry-off");
+    // a server's off writes its first mark and goes before the rename lands
+    let late = "";
+    const renameSync = fs.renameSync;
+    const rename = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (to !== off) return renameSync(from, to);
+      late = readFileSync(from, "utf8");
+      throw new Error("the server went");
+    });
+    try { expect(() => setup({ stateDir }).telemetry.change({ enabled: false })).toThrow("the server went"); }
+    finally { rename.mockRestore(); }
+    telemetry.change({ enabled: false });
+    const generation = telemetry.change({ enabled: true }).counts_generation;
+    offNeverWritten(setup({ stateDir }).telemetry, stateDir);
+    writeFileSync(off, late);
+    // a page that heard the on and not the off after it turns the counts on again
+    telemetry.change({ enabled: true, settings: settingsSnapshot({ theme: "light" }), generation });
+    clock.now += 60_000;
+    await telemetry.report();
+    expect(sent.map((event) => event.settings)).toEqual([null]);
+  });
+
+  test("an off that another server's write counts while it waits for the lock is counted once", () => {
+    const { telemetry, stateDir } = setup();
+    const other = setup({ stateDir });
+    const before = telemetry.change({ enabled: false }).counts_generation ?? 0;
+    const lock = join(stateDir, "telemetry.lock");
+    const openSync = fs.openSync;
+    let between: number | undefined;
+    const open = spyOn(fs, "openSync").mockImplementation(((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode) => {
+      if (path === lock && between === undefined) {
+        between = -1;
+        // the off has marked and has not taken the lock: another server's write counts it first
+        between = other.telemetry.change({}).counts_generation;
+      }
+      return openSync(path, flags ?? "r", mode);
+    }) as typeof fs.openSync);
+    let after: number | undefined;
+    try { after = telemetry.change({ enabled: false }).counts_generation; }
+    finally { open.mockRestore(); }
+    expect([between, after]).toEqual([before + 1, before + 1]);
+  });
+
+  test("a mark naming the largest counter is not taken as one", () => {
+    const { telemetry, stateDir } = setup();
+    const before = telemetry.change({ enabled: false }).counts_generation ?? 0;
+    writeFileSync(join(stateDir, "telemetry-off"), `${randomUUID()} ${Number.MAX_SAFE_INTEGER}`);
+    expect(telemetry.change({ enabled: false }).counts_generation).toBe(before + 1);
   });
 
   test("an on asked before a status read marks an older build's off still turns the counts on", () => {
