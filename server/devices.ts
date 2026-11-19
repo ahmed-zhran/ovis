@@ -509,11 +509,19 @@ export class DeviceStore {
       console.error(this.error);
     }
     // the tombstone files' own repair asks only whether they could be read: a strict safety log is a separate refusal
+    // a Revoke all that stopped half way is finished before anything is served, whatever else could not be read (P8, T41)
+    if (this.error === null && this.evidence !== null && existsSync(this.revokeAllPath)) {
+      const gate = this.gateClosedAt ?? new Date().toISOString();
+      try { this.finishRevokeAll(this.devices, gate); } catch (error) {
+        // what could not be finished on disk is finished in memory, and the PC fails closed until a start finishes it
+        this.devices = [];
+        this.gateClosedAt = gate;
+        this.denyProblem = `Revoke all could not be finished (${error instanceof Error ? error.message : String(error)}): only this PC itself gets in until it is.`;
+      }
+    }
     if (this.error === null && this.accountProblem === null) {
       if (this.evidence !== null) {
         this.takeInEvidence([...tombstones ?? [], ...pending]);
-        // a Revoke all that stopped half way is finished before anything is served (P8, T41)
-        if (existsSync(this.revokeAllPath)) this.finishRevokeAll(this.devices, this.gateClosedAt ?? new Date().toISOString());
       } else {
         if (pending.length) {
           this.writeTombstones(this.tombstones);
@@ -1106,8 +1114,9 @@ export class DeviceStore {
    */
   sessionRow(id: string): { role: DeviceRole; key: string | undefined; provisional: boolean } | null {
     const device = this.devices.find((d) => d.id === id);
-    // a row its evidence covers serves no request, whatever session it holds (S14)
-    if (device && this.evidence !== null && this.stale(device)) return null;
+    // a row its evidence covers serves no request, whatever session it holds (S14); while the PC fails closed no
+    // session opens another stream either: only this PC itself gets in (S19, P8)
+    if (this.evidence !== null && (this.failsClosed || (device !== undefined && this.stale(device)))) return null;
     if (device) return { role: device.role, key: device.relay_public_key, provisional: false };
     const waiting = this.pending?.waiting?.rows.get(id);
     return waiting ? { role: "watch", key: waiting.key, provisional: true } : null;
