@@ -470,7 +470,7 @@ export class AccountMailbox {
       progress = false;
       for (let start = 0; start < early.length;) {
         const batch = early.slice(start, start + ACCOUNT_RECORDS_MAX);
-        const outcomes = await applyAccountRecords(this.options.devices, batch, serverId, Date.now(), { ...this.gates(), deferAdds: this.options.devices.opensAll() });
+        const outcomes = await applyAccountRecords(this.options.devices, batch, serverId, Date.now(), { ...this.gates(), deferAdd: this.options.devices.opensAll() ? () => true : undefined });
         const keep = batch.filter((_record, index) => waits(outcomes[index]));
         applied += outcomes.filter(({ outcome }) => outcome === "applied").length;
         if (keep.length !== batch.length) progress = true;
@@ -496,6 +496,7 @@ export class AccountMailbox {
     const next = [...this.pending, record];
     // full: a waiting add makes room (it can come again); with none, the remove is undecided and its sender tries again
     if (waiting.length >= PENDING_MAX) {
+      if (removedKey(record) === null) return false;
       const add = next.findIndex((kept) => removedKey(kept) === null);
       if (add === -1) {
         // nowhere to keep it: its key stays out of every add until a pairing here settles it
@@ -556,7 +557,7 @@ export class AccountMailbox {
             if (!early.some((kept) => JSON.stringify(kept) === text)) early.push(record);
             return true;
           };
-          const outcomes = await applyAccountRecords(this.options.devices, batch, identity.server_id, Date.now(), { ...this.gates(), deferAdds: this.options.devices.opensAll() }, keep);
+          const outcomes = await applyAccountRecords(this.options.devices, batch, identity.server_id, Date.now(), { ...this.gates(), deferAdd: this.options.devices.opensAll() ? () => true : undefined }, keep);
           applied += outcomes.filter(({ outcome }) => outcome === "applied").length;
           outcomes.forEach((outcome, index) => { if (waits(outcome)) keep(batch[index]); });
         }
