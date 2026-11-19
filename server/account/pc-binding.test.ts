@@ -46,7 +46,7 @@ async function linked(devices: DeviceStore, account = ACCOUNT): Promise<{ id: st
 
 function memberRow(account: string): StoredDevice {
   return { id: randomBytes(8).toString("hex"), label: "Old phone", role: "drive", token_hash: randomBytes(32).toString("hex"),
-    relay_public_key: randomBytes(8).toString("hex"), account, created_at: "2026-10-01T00:00:00.000Z", last_seen_at: null };
+    account, created_at: "2026-10-01T00:00:00.000Z", last_seen_at: null };
 }
 
 describe("the PC's account binding (account-pc.json)", () => {
