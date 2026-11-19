@@ -295,4 +295,6 @@ export const DEVICES_ZH: Record<string, string> = {
   "{pc} is checking your account first": "{pc}：正在先检查你的账户",
   "Your other devices are told first. One of them can let this device in now.": "会先通知你的其他设备。其他设备也可以立即放行。",
   "{pc} is telling your other devices first": "{pc}：正在先通知你的其他设备",
+  "Revoke all is done at that PC.": "全部撤销需在那台 PC 上进行。",
+  "Remove it at that PC or from an older device.": "请在那台 PC 或更早的设备上移除。",
 };

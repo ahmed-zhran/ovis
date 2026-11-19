@@ -295,4 +295,6 @@ export const DEVICES_KO: Record<string, string> = {
   "{pc} is checking your account first": "{pc}: 계정을 먼저 확인하는 중",
   "Your other devices are told first. One of them can let this device in now.": "다른 기기에 먼저 알려요. 다른 기기에서 바로 들여보낼 수도 있어요.",
   "{pc} is telling your other devices first": "{pc}: 다른 기기에 먼저 알리는 중",
+  "Revoke all is done at that PC.": "전체 폐기는 그 PC에서 해요.",
+  "Remove it at that PC or from an older device.": "그 PC나 더 오래된 기기에서 지우세요.",
 };

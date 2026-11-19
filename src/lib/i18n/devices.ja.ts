@@ -295,4 +295,6 @@ export const DEVICES_JA: Record<string, string> = {
   "{pc} is checking your account first": "{pc}: 先にアカウントを確認しています",
   "Your other devices are told first. One of them can let this device in now.": "先にほかのデバイスに知らせます。ほかのデバイスからすぐに入れることもできます。",
   "{pc} is telling your other devices first": "{pc}: 先にほかのデバイスに知らせています",
+  "Revoke all is done at that PC.": "すべての取り消しはその PC で行います。",
+  "Remove it at that PC or from an older device.": "その PC か、より古いデバイスから削除してください。",
 };

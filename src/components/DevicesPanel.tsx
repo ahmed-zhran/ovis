@@ -4,7 +4,7 @@ import { Check, Pencil, Trash2, X } from "lucide-react";
 
 import "./DevicesPanel.css";
 
-import { ApiError, fetchDevices, renameDevice, revokeAllDevices, revokeDevice } from "../lib/api.ts";
+import { ApiError, fetchDeviceList, fetchDevices, renameDevice, revokeAllDevices, revokeDevice } from "../lib/api.ts";
 import { methodName } from "../lib/portalAuth.ts";
 import { DEVICES_CHANGED_EVENT, PAIRING_CODE_EVENT } from "../lib/useRelay.ts";
 import type { HealthAuth, PairedDevice, PairingCode } from "../../shared/protocol.ts";
@@ -60,6 +60,15 @@ export function offersAccountRemove(devices: readonly PairedDevice[], row: Paire
     && devices.some((d) => d.account === account && d.account_key === key && d.role === "drive");
 }
 
+/**
+ * Device table T19 (Track A S2-11): a remote caller may Revoke only itself or a row that joined this PC after it; an
+ * older or unorderable row is removed at that PC or from an older device. A local caller gets no limit.
+ */
+export function canRevokeHere(device: PairedDevice): boolean {
+  const limit = (device as PairedDevice & { readonly remote_revoke?: string }).remote_revoke;
+  return limit === undefined || limit === "allowed";
+}
+
 export function DevicesPanel({ onDevicePaired, auth, onPaired, onRevokedAll, kindOf, currentAction = null, more = null, checkSlot = null }: DevicesPanelProps) {
   const t = useT();
   const [devices, setDevices] = useState<PairedDevice[] | null>(null);
@@ -68,6 +77,7 @@ export function DevicesPanel({ onDevicePaired, auth, onPaired, onRevokedAll, kin
   const [renaming, setRenaming] = useState<{ id: string; label: string } | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [confirmingAll, setConfirmingAll] = useState(false);
+  const [revokeAllHere, setRevokeAllHere] = useState(true);
   const [revokedAll, setRevokedAll] = useState(false);
   const [justPaired, setJustPaired] = useState<string | null>(null);
   const [pairingSelf, setPairingSelf] = useState(false);
@@ -84,10 +94,11 @@ export function DevicesPanel({ onDevicePaired, auth, onPaired, onRevokedAll, kin
     const stale = () => started !== generation.current || read < reads.current.landed;
     inFlight.current++;
     try {
-      const list = await fetchDevices(check);
+      const { devices: list, revokeAll } = await fetchDeviceList(check);
       if (stale()) return;
       reads.current.landed = read;
       setDevices(list);
+      setRevokeAllHere(revokeAll !== "local_only");
       if (!quiet) setError(null);
       const fresh = list.filter((d) => !known.current.has(d.id));
       if (loaded.current && fresh.length > 0) {
@@ -260,7 +271,8 @@ export function DevicesPanel({ onDevicePaired, auth, onPaired, onRevokedAll, kin
           <SettingsRow label={t("Revoke every device")} description={t(watching
             ? "Every paired device, this one included, would lose its pairing access at once. A device that only watches cannot do it: use the PC or a device that can drive."
             : "Every paired device, this one included, loses its pairing access at once. The access token, this PC and its Tailscale login are not affected.")}>
-            {!watching && <button type="button" className="btn" onClick={() => setConfirmingAll(true)}>{t("Revoke all")}</button>}
+            {!watching && revokeAllHere && <button type="button" className="btn" onClick={() => setConfirmingAll(true)}>{t("Revoke all")}</button>}
+            {!revokeAllHere && <span className="settings-hint">{t("Revoke all is done at that PC.")}</span>}
           </SettingsRow>
         </div>
       )}
@@ -307,9 +319,11 @@ export function DevicesPanel({ onDevicePaired, auth, onPaired, onRevokedAll, kin
                           {disconnecting === d.id ? t("Disconnect everywhere?") : t("Disconnect from all PCs")}
                         </button>
                       )}
-                      <button type="button" className={confirming === d.id ? "btn btn-danger" : "icon-button"} aria-label={confirming === d.id ? undefined : t("Revoke {name}", { name: d.label })} onClick={() => void revoke(d.id)}>
-                        <Trash2 aria-hidden="true" />{confirming === d.id && t("Revoke?")}
-                      </button>
+                      {canRevokeHere(d) ? (
+                        <button type="button" className={confirming === d.id ? "btn btn-danger" : "icon-button"} aria-label={confirming === d.id ? undefined : t("Revoke {name}", { name: d.label })} onClick={() => void revoke(d.id)}>
+                          <Trash2 aria-hidden="true" />{confirming === d.id && t("Revoke?")}
+                        </button>
+                      ) : <span className="settings-hint">{t("Remove it at that PC or from an older device.")}</span>}
                     </div>
                   )}
                 </>

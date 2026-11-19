@@ -839,8 +839,14 @@ export async function pairDevice(code: string, label: string): Promise<void> {
   resumeConnectionTraces();
 }
 
+/** The paired devices, and `revokeAll: "local_only"` when this caller is not the PC itself (device table T20, Track A S2-11). */
+export async function fetchDeviceList(check = false): Promise<{ devices: PairedDevice[]; revokeAll: "local_only" | null }> {
+  const list = await getJson<{ devices: PairedDevice[]; revoke_all?: string }>(check ? "/api/devices?check=1" : "/api/devices");
+  return { devices: list.devices, revokeAll: list.revoke_all === "local_only" ? "local_only" : null };
+}
+
 export async function fetchDevices(check = false): Promise<PairedDevice[]> {
-  return (await getJson<{ devices: PairedDevice[] }>(check ? "/api/devices?check=1" : "/api/devices")).devices;
+  return (await fetchDeviceList(check)).devices;
 }
 
 export async function startPairing(): Promise<PairingCode> {
