@@ -153,6 +153,34 @@ export class AccountMailbox {
     const pending = readPending(options.pendingPath);
     this.pending = pending ?? [];
     this.pendingError = pending === null ? `Cannot read ${options.pendingPath}: account adds wait until it is restored or fixed.` : null;
+    // with the release flag on, a signer that loses its standing here takes its waiting removes with it (T18)
+    if (options.devices.opensAll()) options.devices.onRemoved(() => this.dropUnauthorized());
+  }
+
+  /**
+   * Whether a waiting remove may hold its key back (P19): with the release flag on, only one the key signed of itself
+   * or that a drive member of the account here signed; any other holds nothing. Without the flag, every one does.
+   */
+  private authorized(record: unknown): boolean {
+    if (!this.options.devices.opensAll()) return true;
+    const { key, signer, account } = record as { key?: unknown; signer?: unknown; account?: unknown };
+    if (signer === key) return true;
+    return typeof signer === "string" && typeof account === "string" && this.options.devices.accountSigner(signer, account) !== null;
+  }
+
+  private holdsKey(key: string): boolean {
+    return this.waiting().some((record) => removedKey(record) === key && this.authorized(record));
+  }
+
+  /** What holds a key back from the account's list (P19): authorized waiting removes only; a full queue gates nothing there. */
+  listHeld(key: string): boolean { return this.pendingError !== null || this.holdsKey(key); }
+
+  private dropUnauthorized(): void {
+    if (this.pendingError !== null) return;
+    const kept = this.pending.filter((record) => removedKey(record) === null || this.authorized(record));
+    if (kept.length === this.pending.length) return;
+    if (this.options.pendingPath) writePrivateState(this.options.pendingPath, [...this.draining, ...kept]);
+    this.pending = kept;
   }
 
   /**
@@ -162,8 +190,8 @@ export class AccountMailbox {
   gates(): AddGates {
     return {
       enrolling: () => this.options.holds?.enrolling() ?? false,
-      held: (key) => this.pendingError !== null || this.waiting().some((record) => removedKey(record) === key) || (this.options.holds?.holds(key) ?? false),
-      removing: (key) => this.pendingError !== null || this.waiting().some((record) => removedKey(record) === key),
+      held: (key) => this.pendingError !== null || this.holdsKey(key) || (this.options.holds?.holds(key) ?? false),
+      removing: (key) => this.pendingError !== null || this.holdsKey(key),
     };
   }
 
@@ -172,7 +200,7 @@ export class AccountMailbox {
 
   /** The keys of the removes waiting here: /api/account/status lists them as `blocked`. */
   waitingRemoveKeys(): string[] {
-    return [...new Set(this.waiting().flatMap((record) => removedKey(record) ?? []))];
+    return [...new Set(this.waiting().flatMap((record) => this.authorized(record) ? removedKey(record) ?? [] : []))];
   }
 
   private waiting(): unknown[] { return [...this.draining, ...this.pending]; }
