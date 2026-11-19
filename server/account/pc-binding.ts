@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateState } from "../private-state.ts";
 import { ADMISSION_FILE, type OriginFrom, type OriginHow, type RowOrigin } from "./admission-order.ts";
-import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
 export type ClearReason = "revoke_all" | "identity_reset" | "left_on_pc";
 export interface AccountClear { readonly bind_id: string; readonly reason: ClearReason; readonly by: string }
@@ -62,7 +62,7 @@ export class PcAccountState {
     let text: string;
     try { text = readFileSync(state.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") state.problem = `Cannot read ${state.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
-      else if (existsSync(join(stateDir, ACCOUNT_JOURNAL_FILE))) state.problem = `${state.path} is missing beside the device journal`;
+      else if (existsSync(join(stateDir, DEVICE_JOURNAL_FILE))) state.problem = `${state.path} is missing beside the device journal`;
       else state.fresh = true;
       return state;
     }
