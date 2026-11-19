@@ -72,7 +72,7 @@ export function createSocket({ clients, present, stopped, admit, setRole, watcha
   drainOutput: (client: Client) => void;
   frames: Omit<FrameHandlers, ConnectionFrame>;
   /** the device journal's notices for a paired device (server/devices.ts), with OVIS_ACCOUNT_OPENS_ALL on */
-  notices?: { replay(deviceId: string): NoticeReplay | null; seen(deviceId: string, seq: number): void; block(record: unknown): Promise<BlockReceipt>; decide(id: string): void; itsMe(deviceId: string, id: string): boolean };
+  notices?: { replay(deviceId: string): NoticeReplay | null; seen(deviceId: string, seq: number): void; block(record: unknown): Promise<BlockReceipt>; decide(id: string): void; itsMe(deviceId: string, id: string, provedKey: string): boolean };
 }): SocketHandler {
   const websocketDiagnostics = new ConnectionDiagnostics("websocket");
   const connectionFrames = {
@@ -202,7 +202,7 @@ export function createSocket({ clients, present, stopped, admit, setRole, watcha
         // "Not me": each block applies at once and is answered with its receipt; one that applied decides the notice (T51).
         // "It's me" is the join hold's to judge (T53) and decides nothing here
         // with the release flag off the store refuses every block, so nothing applies
-        if (notices !== undefined && message.answer === "its_me" && client.data.deviceId !== undefined) { notices.itsMe(client.data.deviceId, message.id); return; }
+        if (notices !== undefined && message.answer === "its_me" && client.data.deviceId !== undefined && client.data.provedKey) { notices.itsMe(client.data.deviceId, message.id, client.data.provedKey); return; }
         if (notices === undefined || message.answer !== "not_me" || !Array.isArray(message.blocks) || message.blocks.length > 2) return;
         const receipts: BlockReceipt[] = [];
         for (const block of message.blocks) receipts.push(await notices.block(block));
