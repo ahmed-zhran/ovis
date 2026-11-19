@@ -265,7 +265,7 @@ export class AccountDeviceStore implements AccountRowSource {
     const expired = this.file.devices.find((row) => row.key === key && row.state === "expired");
     const entry = list.devices.find((candidate) => candidate.key === key && candidate.eligible);
     if (!expired || !entry || list.removed.some((gone) => gone.key === key) || list.account !== this.file.account) return false;
-    if (this.ports.heldByDevicesJson(key) || !this.ports.admits(key)) return false;
+    if (this.ports.heldByDevicesJson(key) || !this.ports.admits(key, list.account)) return false;
     this.file = { ...this.file, devices: this.file.devices.filter((row) => row !== expired) };
     this.admit(entry, false);
     return true;
