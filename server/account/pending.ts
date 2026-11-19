@@ -27,7 +27,7 @@ export interface PendingRedemption {
   readonly codeId?: string;
 }
 
-interface Named { code: string; label: string; key: string; via: PendingVia; at: number; codeId?: string }
+interface Named { code: string; label: string; key: string; via: PendingVia; at: number; codeId?: string; serverId?: string }
 
 export class PendingLimitError extends Error {}
 
@@ -59,14 +59,15 @@ export class PendingRedemptions {
    * A device named its key for `code`: a fresh challenge for that key alone. Naming a key again (`previous`) spends the
    * challenge it had, so a key changed after a challenge was seen starts over with a new one.
    */
-  name(code: string, label: string, key: string, via: PendingVia, previous?: string, codeId?: string): { challenge: string } {
+  /** `serverId`: the relay identity the device paired to, which its proof and fingerprint name; this PC's own by default. */
+  name(code: string, label: string, key: string, via: PendingVia, previous?: string, codeId?: string, serverId?: string): { challenge: string } {
     this.#sweep();
     if (previous !== undefined) this.#forgetNamed(previous);
     const forCode = [...this.#waiting.values(), ...this.#named.values()].filter((entry) => entry.code === code).length;
     if (forCode >= PENDING_PER_CODE) throw new PendingLimitError("This code has as many devices waiting as it may");
     if (this.#waiting.size + this.#named.size >= PENDING_TOTAL) throw new PendingLimitError("As many devices wait for this PC's screen as may");
     const challenge = pairChallenge();
-    this.#named.set(challenge, { code, label, key, via, at: this.#now(), ...(codeId === undefined ? {} : { codeId }) });
+    this.#named.set(challenge, { code, label, key, via, at: this.#now(), ...(codeId === undefined ? {} : { codeId }), ...(serverId === undefined ? {} : { serverId }) });
     return { challenge };
   }
 
@@ -76,7 +77,7 @@ export class PendingRedemptions {
     const named = this.#named.get(challenge);
     this.#named.delete(challenge);
     if (named === undefined) return null;
-    const serverId = this.#serverId();
+    const serverId = named.serverId ?? this.#serverId();
     if (serverId === null || !await verifyPairProof(serverId, challenge, named.key, signature)) {
       if (named.codeId !== undefined) this.#release(named.codeId, named.key);
       return null;

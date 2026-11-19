@@ -6,6 +6,7 @@
  * from where the approval came. Every other ending gives the held use back.
  */
 import type { DeviceMatch } from "../devices.ts";
+import type { LocalConfirms } from "./local-confirm.ts";
 import type { PendingRedemption, PendingRedemptions, PendingVia } from "./pending.ts";
 
 /** The admission seams of server/devices.ts this flow uses (Track A, S2-08). */
@@ -34,12 +35,12 @@ export class KeyProofPairings {
   }
 
   /** A PAIR on a PC that needs the proof. A device that did not offer key-proof-1 is refused, never left waiting. */
-  pair(request: { code: string; label: string; publicKey: string; how: "code" | "qr"; via: PendingVia; keyProof: boolean }): PairStart {
+  pair(request: { code: string; label: string; publicKey: string; how: "code" | "qr"; via: PendingVia; keyProof: boolean; serverId?: string }): PairStart {
     if (!request.keyProof) return { refuse: "key_proof_required" };
     const redeemed = this.#seams.redeemCode(request.code, request.how, request.publicKey);
     if (!redeemed.ok) return { refuse: "auth_failed" };
     let named: { challenge: string };
-    try { named = this.#pending.name(request.code, request.label, request.publicKey, request.via, undefined, redeemed.codeId); }
+    try { named = this.#pending.name(request.code, request.label, request.publicKey, request.via, undefined, redeemed.codeId, request.serverId); }
     catch {
       this.#seams.releaseRedemption(redeemed.codeId, request.publicKey);
       return { refuse: "auth_failed" };
@@ -121,4 +122,23 @@ export class KeyProofPairings {
     const waiting = new Set(this.#pending.list().map((entry) => entry.id));
     for (const [pendingId, sessionId] of [...this.#byPending]) if (!waiting.has(pendingId)) this.#finish(sessionId, null);
   }
+}
+
+/**
+ * Puts a waiting key on this PC's screen. Only the screen's approval of exactly that key, used up once, admits it;
+ * a decline, or a confirm that runs out, ends the wait.
+ */
+export function askScreenForKey(confirms: LocalConfirms, pairings: KeyProofPairings, entry: PendingRedemption): void {
+  const action = { kind: "approve_key" as const, pending: entry.id, fingerprint: entry.fingerprint };
+  let id: string;
+  try {
+    id = confirms.request(action, { title: "Approve this device", lines: [`${entry.label} (the name it gives itself)`, "Compare these characters with the ones shown on the device you mean to add."], fingerprint: entry.fingerprint }).id;
+  } catch {
+    pairings.decline(entry.id);
+    return;
+  }
+  void confirms.answer(id).then((answer) => {
+    if (answer === "approved" && confirms.consume(id, action)) pairings.approve(entry.id, entry.fingerprint, "screen");
+    else pairings.decline(entry.id);
+  });
 }
