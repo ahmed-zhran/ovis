@@ -797,7 +797,7 @@ export class DeviceStore {
     const pending = this.pending;
     if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || pending.reserved?.key !== confirm.key || this.codeOver(pending, now)) return null;
     const proof: ConfirmProof = { codeId: confirm.codeId, key: confirm.key, source: confirm.source };
-    MINTED_PROOFS.add(proof);
+    MINTED_PROOFS.add(Object.freeze(proof));
     if (!this.admits(confirm.key, proof)) return null;
     // a Revoke that stands keeps the key out unless this confirm names it (P13)
     const revokes = this.evidence?.standingRevokes(confirm.key) ?? [];
@@ -1520,6 +1520,8 @@ export class DeviceStore {
     // On a PC in no account such a code may bring back a key this PC revoked itself, as before account linking;
     // never one the account removed
     const accountless = this.account() === null;
+    // with the release flag on only a key confirm on this PC's screen naming it ends a local Revoke (P13): no code does
+    if (this.evidence !== null && this.evidence.standingRevokes(publicKey).length > 0) { this.noteRelayFailure("code", now); return null; }
     const refusedKey = accountless ? this.removedByAccount(publicKey) : this.isTombstoned(publicKey);
     if ((remote && (this.accountError !== null || refusedKey)) || (this.pending?.memberRequired && (startedBy === null || !this.isAccountApprover(startedBy)))) {
       this.noteRelayFailure("code", now);
