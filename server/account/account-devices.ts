@@ -44,6 +44,8 @@ export interface AccountRowSource {
   removeRows(ids: readonly string[], reason: Exclude<DropReason, "list">, close?: (id: string) => void): void;
   /** An eligible "It's me" answers the notice, ending the hold if one remains. */
   itsMe(id: string, sayer: Sayer): boolean;
+  /** Authenticated use of the row on this PC (P9): a proved sign-in, or a request of its session. */
+  seen(id: string): void;
 }
 
 export type AccountRow = AccountJoinedRow;
@@ -408,5 +410,6 @@ export function accountRowsFor(stateDir: string, serverId: () => string | null, 
     pruneDenied: (evidence, legacyRevoke) => { store()?.pruneDenied(evidence, legacyRevoke); },
     removeRows: (ids, reason, close) => { store()?.removeRows(ids, reason, close); },
     itsMe: (id, sayer) => store()?.itsMe(id, sayer) ?? false,
+    seen: (id) => { store()?.seen(id); },
   };
 }

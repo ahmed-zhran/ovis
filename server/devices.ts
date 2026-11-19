@@ -1532,6 +1532,8 @@ export class DeviceStore {
     // an account-joined row serves while it is usable here: out of its hold and its waits, and not covered or frozen
     const row = this.joinedRows?.row(id) ?? null;
     if (row === null || this.accountRowStale(row) || !("ok" in this.joinedRows!.access(id))) return null;
+    // every request of its session is use this PC sees (P9, T54); the store writes the day at most once
+    this.joinedRows!.seen(id);
     return { role: "drive", key: row.key, provisional: false };
   }
 
@@ -1583,7 +1585,11 @@ export class DeviceStore {
     const current = this.joinedRows.row(deviceId);
     if (currentMember || !current || current.key !== key || this.accountRowStale(current)) return null;
     const answer = this.joinedRows.access(deviceId);
-    return "ok" in answer ? { match: { id: current.id, label: current.label, role: "drive" } } : { refused: answer, holdUntil: this.joinedRows.row(deviceId)?.hold_until ?? null };
+    if ("ok" in answer) {
+      this.joinedRows.seen(deviceId);
+      return { match: { id: current.id, label: current.label, role: "drive" } };
+    }
+    return { refused: answer, holdUntil: this.joinedRows.row(deviceId)?.hold_until ?? null };
   }
 
 
