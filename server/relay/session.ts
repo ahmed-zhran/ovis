@@ -8,6 +8,7 @@ import { ACCOUNT_FEATURE, ACCOUNT_OPENS_ALL_FEATURE, AUTH_RECEIPTS_MAX, DIRECT_C
 import type { HeaderList, SessionError } from "../../shared/relay-mux.ts";
 import type { BlockReceipt } from "../../shared/account-devices-api.ts";
 import { PairingRateLimitedError, type DeviceMatch, type PairingPath } from "../devices.ts";
+import { ACCOUNT_OPENS_ALL_MUX_FEATURE, accountOpensAll } from "../../shared/account-devices-api.ts";
 import { accountDeviceId } from "../../shared/account-records.ts";
 import { SIGN_IN_WAIT_MS } from "../account/mailbox.ts";
 import { handleRequest } from "../dispatch.ts";
@@ -127,6 +128,8 @@ export class RelaySession {
   private keyProven = false;
   private authReceipts = false;
   private hinting = false;
+  /** The app offered the account-opens-all mux feature on a PC with OVIS_ACCOUNT_OPENS_ALL=1: it reads the account refusal codes. */
+  private accountCodes = false;
   private directing = false;
   private tailnet = false;
   /** the phone offered SERVER_TIME_HEADER: one that did not refuses the header */
@@ -297,6 +300,7 @@ export class RelaySession {
         const selected = [...this.sasBinding ? [PAIR_SAS_FEATURE, ...intents] : [], ...frame.payload.features.includes(ACCOUNT_FEATURE) ? [ACCOUNT_FEATURE] : []];
         this.authReceipts = this.options.services.devices.opensAll() && frame.payload.features.includes(ACCOUNT_OPENS_ALL_FEATURE);
         if (this.authReceipts) selected.push(ACCOUNT_OPENS_ALL_FEATURE);
+        this.accountCodes = this.authReceipts;
         if (frame.payload.required_features.some((feature) => !selected.includes(feature) && !(feature === RELAY_HINTS && this.hinting) && !(feature === DIRECT_CARRIER && this.directing) && !(feature === DIRECT_TAILNET && this.tailnet) && !(feature === LARGE_WS_MESSAGES && large))) { this.close("unsupported_extension"); return; }
         this.state = "auth";
         if (this.sasBinding && intents[0] === PAIR_INTENT_ACCOUNT) this.intent = "account";
