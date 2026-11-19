@@ -11,9 +11,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DeviceNotice, NoticeKind, NoticeReplay } from "../../shared/account-devices-api.ts";
 import { writePrivateState } from "../private-state.ts";
-import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
-export const JOURNAL_FILE = ACCOUNT_JOURNAL_FILE;
+export const JOURNAL_FILE = DEVICE_JOURNAL_FILE;
 export const JOURNAL_MAX = 1_000;
 export const OPEN_NOTICES_MAX = 64;
 
