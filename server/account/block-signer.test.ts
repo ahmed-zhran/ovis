@@ -182,5 +182,13 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     (other.devices as unknown as { devices: { id: string; origin?: unknown }[] }).devices.find((row) => row.id === s2.id)!.origin = undefined;
     expect(await other.devices.liftAuthority(await lift(record.id, s2))).toBe(false);
   });
+
+  test("P23: a lift from a key with no member row here, of a block whose target has no number here, lifts nothing", async () => {
+    const { devices, log } = pc();
+    const [stranger, target] = [await key(), await key()];
+    const record = await block(target.spki, stranger);
+    log.append({ record, got: "handed", asof: { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false } });
+    expect(await devices.liftAuthority(await lift(record.id, stranger))).toBe(false);
+  });
 });
 
