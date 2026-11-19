@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { mock, spyOn } from "bun:test";
+import { fetchDeviceList } from "../lib/api.ts";
+import { canRevokeHere } from "./DevicesPanel.tsx";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -63,5 +66,18 @@ describe("how this browser got in", () => {
     const html = render({ required: false, authenticated: true, via: "token", role: "drive" });
     expect(html).toContain("You are in with the access token.");
     expect(html).not.toContain("Signed in as");
+  });
+});
+
+describe("remote limits on Revoke (account-opens-all/1)", () => {
+  it("T19: a remote caller revokes only itself or a newer row; an older or unorderable row is done at that PC", () => {
+    const row = (remote_revoke?: "allowed" | "older" | "unorderable") => ({ remote_revoke }) as never;
+    expect([row(), row("allowed"), row("older"), row("unorderable")].map(canRevokeHere)).toEqual([true, true, false, false]);
+  });
+
+  it("T20: the list says when Revoke all is done at that PC only", async () => {
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ devices: [], revoke_all: "local_only" }), { preconnect: globalThis.fetch.preconnect }));
+    try { expect(await fetchDeviceList()).toEqual({ devices: [], revokeAll: "local_only" }); }
+    finally { mock.restore(); }
   });
 });
