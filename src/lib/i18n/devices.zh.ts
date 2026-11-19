@@ -295,4 +295,8 @@ export const DEVICES_ZH: Record<string, string> = {
   "{pc} is checking your account first": "{pc}：正在先检查你的账户",
   "Your other devices are told first. One of them can let this device in now.": "会先通知你的其他设备。其他设备也可以立即放行。",
   "{pc} is telling your other devices first": "{pc}：正在先通知你的其他设备",
+  "Waiting for this PC's screen. Approve only a key whose fingerprint your device shows too.": "正在等待这台 PC 的屏幕确认。只有设备上显示相同指纹时才批准。",
+  "Says it is {name}": "自称 {name}",
+  "Approve this device on {pc}'s screen": "请在 {pc} 的屏幕上批准此设备",
+  "The PC shows the same code.": "PC 上会显示相同的代码。",
 };
