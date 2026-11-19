@@ -15,6 +15,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isRowOrigin, legacyOrigin, type RowOrigin } from "./account/admission-order.ts";
 import type { ClearReason, PcAccountState } from "./account/pc-binding.ts";
+import type { SafetyLog } from "./account/safety-log.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import type { DeviceJournal, JournalEntry } from "./account/device-journal.ts";
 import type { DeviceNotice, NoticeReplay } from "../shared/account-devices-api.ts";
@@ -88,6 +89,11 @@ export class DeviceReadOnlyError extends Error {
  * This PC is in an account, so no code is made that would put it in one (DeviceStore.pairingForNoAccount): a device
  * joins a PC that has members by signing in to their account, with a member's approval (docs/account.md).
  */
+/** The final admission guard refused (G3): the PC is locked or closed to the key. Nothing was written. */
+export class AdmissionRefusedError extends Error {
+  constructor() { super("This PC admits no new device while a lock, a block or a freeze stands"); }
+}
+
 export class PcInAccountError extends Error {
   readonly code = "in_account";
   constructor() {
@@ -475,7 +481,7 @@ export class DeviceStore {
    * fails closed no device signs in or pairs and account records are refused, so only this PC itself gets in. With
    * `pc`, every row admitted gets its origin and the PC's account is its binding, not its rows.
    */
-  private readonly safety: { readonly strict: string | null } | null;
+  private readonly safety: SafetyLog | null;
   private readonly pc: PcAccountState | null;
   private readonly evidence: RemovalEvidence | null;
   private readonly journal: DeviceJournal | null;
@@ -483,7 +489,7 @@ export class DeviceStore {
   /** A deny that could not reach the disk (P8 step 1): only this PC itself gets in until one is written. */
   private denyProblem: string | null = null;
   private readonly revokeAllPath: string;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null } = {}) {
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null } = {}) {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
     this.evidence = account.removals ?? null;
@@ -632,6 +638,23 @@ export class DeviceStore {
       this.devices = next;
     }
     this.pc.migrate(account, this.devices.length > 0);
+  }
+
+  /**
+   * The one final admission guard (G3, rule R1), asked in the commit turn of every admission and widening: false while
+   * the PC fails closed or is locked, and while a block or a freeze stands that `key` is newer than. Newer is decided
+   * on this PC by admission order: a key with no row here, or a row with no place in the order, counts as newer.
+   */
+  admits(key: string | undefined): boolean {
+    if (this.failsClosed) return false;
+    const state = this.safety?.state();
+    if (state === undefined) return true;
+    if (state.locked) return false;
+    if (state.freezes.length === 0) return true;
+    const row = key === undefined ? undefined : this.devices.find((d) => d.relay_public_key === key);
+    const admitNo = row?.origin?.admit_no;
+    if (admitNo === undefined) return false;
+    return state.freezes.every((freeze) => freeze.asof?.joined != null && admitNo < freeze.asof.joined);
   }
 
   /** P14: this PC's denial counter, 0 while the release flag is off. */
@@ -1176,7 +1199,7 @@ export class DeviceStore {
   private promote(id: string, link: { oldKey: string; key: string; account: string }, sessionId: string, vouched: boolean): PairedDevice | null {
     const row = this.provisional(id);
     const waiting = this.pending?.waiting;
-    if (!row || !waiting || row.key !== link.oldKey || this.account() !== null || this.removedByAccount(link.key)) return null;
+    if (!row || !waiting || row.key !== link.oldKey || this.account() !== null || this.removedByAccount(link.key) || !this.admits(link.key)) return null;
     const now = Date.now();
     const at = new Date(now).toISOString();
     // the removal of a key the row keeps, by this PC (removedByAccount refused the account's above)
@@ -1208,7 +1231,7 @@ export class DeviceStore {
   }
 
   pair(code: string, label: string, role: DeviceRole, now = Date.now(), origin: readonly string[] = [], localCodeOnly = false): { token: string; device: DeviceMatch } | null {
-    if (this.failsClosed) return null;
+    if (!this.admits(undefined)) return null;
     this.assertWritable();
     this.pruneUnconfirmedFirstPairs(now);
     // a code started through the relay is never redeemed on the LAN listener, nor are its guesses spent there:
@@ -1261,6 +1284,8 @@ export class DeviceStore {
 
   /** One authorization write precedes every state change and enrollment announcement. */
   private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true): void {
+    // the final guard, in the commit turn: nothing waits between it and the write
+    if (!this.admits(admitting.relay_public_key)) throw new AdmissionRefusedError();
     const device = this.knowingRemovals(this.admitted(admitting, now));
     this.journalAdmission(device);
     const next = [...this.devices, device];
@@ -1282,7 +1307,7 @@ export class DeviceStore {
    * key new to this PC (isNewKey).
    */
   pairRelay(code: string, label: string, publicKey: string, now = Date.now(), admit?: () => boolean): { device: DeviceMatch } | null {
-    if (this.failsClosed) return null;
+    if (!this.admits(publicKey)) return null;
     this.assertRelayPairing("code", now);
     // a code made for a PC in no account makes no device: the one that pairs with it waits to link
     const waiting = this.pending?.waiting;
@@ -1360,7 +1385,7 @@ export class DeviceStore {
    * a key new to this PC, false makes no device and counts no failure.
    */
   pairRelayApproved(label: string, publicKey: string, approval: { path: PairingPath; addedBy?: string; id?: string }, now = Date.now(), admit?: () => boolean): { device: DeviceMatch } | null {
-    if (this.failsClosed) return null;
+    if (!this.admits(publicKey)) return null;
     this.assertRelayPairing(approval.path, now);
     if (!isRelayPublicKey(publicKey)) { this.noteRelayFailure(approval.path, now); return null; }
     // an approver revoked or demoted while the device waited approves nothing
@@ -1468,6 +1493,7 @@ export class DeviceStore {
     const candidateIndex = this.unconfirmedFirstPairs.findIndex(({ device }) => same(digest, device.token_hash));
     if (candidateIndex !== -1) {
       const { device: candidate, origin } = this.unconfirmedFirstPairs[candidateIndex]!;
+      if (!this.admits(undefined)) return null;
       const confirmed = this.admitted({ ...candidate, last_seen_at: new Date(now).toISOString() }, now);
       this.journalAdmission(confirmed);
       const next = [...this.devices, confirmed];
@@ -1936,6 +1962,7 @@ export class DeviceStore {
     const ownWord = device.account === undefined && device.member_approved_in !== account;
     const linked: StoredDevice = { ...device, relay_public_key: key, account, linked_at: new Date().toISOString(), link_moved_key: moved, ...(ownWord ? { joined_by: vouched ? "service" as const : "word" as const } : {}) };
     // a link that moves the key admits a key: a new place in this PC's order, never the old row's (P22, T11 in 2d)
+    if (key !== oldKey && !this.admits(key)) return null;
     const updated = key !== oldKey ? this.admitted(linked, Date.now()) : linked;
     const next = this.devices.map((d) => d === device ? updated : d);
     this.bindingWith(account, key, () => this.save(next));
