@@ -788,24 +788,28 @@ export class DeviceStore {
   private commitBlock(record: BlockRecord, got: SafetyGot, onRaise?: () => void): BlockReceipt {
     const refused = (reason: Extract<BlockReceipt, { outcome: "refused" }>["reason"]): BlockReceipt => ({ outcome: "refused", id: record.id, reason });
     if (this.safety === null || this.evidence === null || this.failsClosed || record.account !== this.account()) return refused("record_invalid");
-    const signers = this.devices.filter((d) => d.relay_public_key === record.signer && d.role === "drive" && d.account === record.account && d.origin !== undefined && !this.coveredByEvidence(d));
+    const signers = this.memberRows(record.signer, record.account);
     if (signers.length === 0) return refused("signer_not_member");
     if (signers.some((d) => this.frozen(d))) return refused("frozen");
+    // the target's rows in both stores: the account rows (S2-25) are targets as devices.json rows are
+    const allTargets = this.rowsOfKey(record.target);
     const targets = this.devices.filter((d) => d.relay_public_key === record.target);
+    const joinedTargets = allTargets.filter((d) => !targets.includes(d));
     // a target this PC has no row of: the block waits, ends nobody, and is judged when its target is here (P19)
-    if (targets.length === 0) {
+    if (allTargets.length === 0) {
       this.safety.wait({ record, got, signer_removed: false });
       return refused("unknown_target");
     }
     // every row of the target, duplicates included, joined after every row of the signer: else nothing applies
-    if (!targets.every((target) => signers.every((signer) => compareAdmission(signer, target) === "older"))) return refused("signer_not_older");
-    const joined = Math.min(...targets.map((d) => d.origin!.admit_no));
+    if (!allTargets.every((target) => signers.every((signer) => compareAdmission(signer, target) === "older"))) return refused("signer_not_older");
+    const joined = Math.min(...allTargets.map((d) => d.origin!.admit_no));
     const signerNo = Math.min(...signers.map((d) => d.origin!.admit_no));
     // (1) the deny: the block in the log, gen raised, the target's marker
     const appended = this.safety.append({ record, got, asof: { signer_no: signerNo, target_no: joined, after: joined, joined, signer_removed: false } });
     if (appended.outcome !== "applied") {
       this.denyProblem = `A block could not be written to the safety log: only this PC itself gets in until one is.`;
       this.drop(targets, "pc");
+      for (const target of joinedTargets) this.closeAccountSessions(target.id);
       return refused("record_invalid");
     }
     const failed = this.deny(() => {
@@ -819,6 +823,14 @@ export class DeviceStore {
       this.revocations.delete(device.id);
       for (const close of listeners ?? []) close();
     }
+    // the account rows it freezes end their sessions in this turn too; its account-row targets end and leave their store
+    const joinedIds = new Set(joinedTargets.map((d) => d.id));
+    for (const row of this.joinedRows?.rows() ?? []) if (!joinedIds.has(row.id) && this.frozen(this.joinedAsStored(row))) this.closeAccountSessions(row.id);
+    for (const id of joinedIds) this.closeAccountSessions(id);
+    if (joinedIds.size > 0) {
+      try { this.joinedRows!.removeRows([...joinedIds], "block"); }
+      catch (error) { console.error(`[devices] the account rows of a blocked key could not be written after its deny; they stay denied by its marker: ${error instanceof Error ? error.message : String(error)}`); }
+    }
     this.dropWaiting([record.target], "block");
     this.safety.unwait(record.id);
     try { this.drop(targets, "pc"); }
@@ -828,7 +840,7 @@ export class DeviceStore {
 
   /** The drive member rows of `key` in `account` that stand here: what a signer of the account is on this PC. */
   private memberRows(key: string, account: string): StoredDevice[] {
-    return this.devices.filter((d) => d.relay_public_key === key && d.role === "drive" && d.account === account && d.origin !== undefined && !this.coveredByEvidence(d));
+    return this.rowsOfKey(key).filter((d) => d.role === "drive" && d.account === account && d.origin !== undefined && !this.coveredByEvidence(d));
   }
 
   /**
@@ -840,7 +852,7 @@ export class DeviceStore {
     const receipts: BlockReceipt[] = [];
     for (const { record, got, signer_removed: signerRemoved } of [...this.safety.waitingBlocks()]) {
       if (signerRemoved || this.memberRows(record.signer, record.account).length === 0) { this.safety.unwait(record.id); continue; }
-      if (!this.devices.some((d) => d.relay_public_key === record.target)) continue;
+      if (this.rowsOfKey(record.target).length === 0) continue;
       const receipt = this.commitBlock(record, got);
       if (receipt.outcome !== "refused" || receipt.reason !== "unknown_target") this.safety.unwait(record.id);
       receipts.push(receipt);
@@ -897,11 +909,11 @@ export class DeviceStore {
    * with no row here. The answer covers every row of the target's key, duplicates included.
    */
   remoteRevoke(callerId: string | null, targetId: string): "allowed" | "older" | "unorderable" {
-    const caller = callerId === null ? undefined : this.devices.find((d) => d.id === callerId);
-    const target = this.devices.find((d) => d.id === targetId);
+    const caller = callerId === null ? undefined : this.anyRow(callerId);
+    const target = this.anyRow(targetId);
     if (caller === undefined || target === undefined) return "unorderable";
     if (caller.id === target.id) return "allowed";
-    const rows = target.relay_public_key === undefined ? [target] : this.devices.filter((d) => d.relay_public_key === target.relay_public_key);
+    const rows = target.relay_public_key === undefined ? [target] : this.rowsOfKey(target.relay_public_key);
     const verdicts = rows.map((row) => row.id === caller.id ? "older" : compareAdmission(caller, row));
     if (verdicts.every((verdict) => verdict === "older")) return "allowed";
     return verdicts.includes("newer") ? "older" : "unorderable";
@@ -914,7 +926,7 @@ export class DeviceStore {
   removeAuthority(signer: string, key: string, account: string): boolean {
     if (signer === key) return true;
     const signers = this.memberRows(signer, account);
-    const targets = this.devices.filter((d) => d.relay_public_key === key);
+    const targets = this.rowsOfKey(key);
     return signers.length > 0 && targets.every((target) => signers.every((row) => compareAdmission(row, target) === "older"));
   }
 
@@ -1457,11 +1469,26 @@ export class DeviceStore {
    */
   attachAccountRows(source: AccountRowSource | null): void { this.joinedRows = source; }
 
-  /** An account row as the evidence and freeze checks see a row: its key, this PC's account, its admission order. */
+  /** An account row as the order, evidence and freeze checks see a row: its key, this PC's account, its admission order. */
+  private joinedAsStored(row: AccountRow): StoredDevice {
+    return { id: row.id, label: row.label, role: "drive", token_hash: "", relay_public_key: row.key, created_at: row.confirmed_at, last_seen_at: null, account: this.account() ?? undefined, origin: row.origin };
+  }
+
   private accountRowStale(row: AccountRow): boolean {
     if (this.evidence === null) return false;
-    const stored: StoredDevice = { id: row.id, label: row.label, role: "drive", token_hash: "", relay_public_key: row.key, created_at: row.confirmed_at, last_seen_at: null, account: this.account() ?? undefined, origin: row.origin };
+    const stored = this.joinedAsStored(row);
     return this.coveredByEvidence(stored) || this.frozen(stored);
+  }
+
+  /** A row of either store by id, an account row as the order checks see it. */
+  private anyRow(id: string): StoredDevice | undefined {
+    const row = this.joinedRows?.row(id) ?? null;
+    return this.devices.find((d) => d.id === id) ?? (row === null ? undefined : this.joinedAsStored(row));
+  }
+
+  /** Every row of `key` in either store, the account rows as the order checks see them. */
+  private rowsOfKey(key: string): StoredDevice[] {
+    return [...this.devices.filter((d) => d.relay_public_key === key), ...(this.joinedRows?.rowsByKey(key) ?? []).map((row) => this.joinedAsStored(row))];
   }
 
   /**
