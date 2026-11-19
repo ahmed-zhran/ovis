@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DeviceStore, readDeviceRegistry, type StoredDevice } from "../devices.ts";
 import { mergeRegistries } from "../state-merge.ts";
 import { relayFixture } from "../relay/test-helpers.ts";
-import { ADMISSION_FILE, AdmissionOrder, compareAdmission, remoteReach } from "./admission-order.ts";
+import { ADMISSION_FILE, AdmissionOrder, compareAdmission, isRowOrigin, remoteReach } from "./admission-order.ts";
 import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
 
 const dirs: string[] = [];
@@ -152,5 +152,30 @@ describe("one admission order per PC (origin and admit_no)", () => {
     const onDevices = on.app.context.services.devices;
     const onId = onDevices.pairRelay(onDevices.startPairing().code, "Phone", await key())!.device.id;
     expect(row(on.stateDir, onId).origin).toMatchObject({ from: "remote", how: "code", admit_no: 1 });
+  });
+
+  test("T50: only this PC's one-time upgrade pass stamps a row legacy", async () => {
+    // (a) the stamp is admit_no 0 with from legacy, and only that
+    const at = "2026-10-01T00:00:00.000Z";
+    expect(isRowOrigin({ from: "legacy", how: "legacy", by: null, admit_no: 0, at })).toBe(true);
+    expect(isRowOrigin({ from: "remote", how: "code", by: null, admit_no: 0, at })).toBe(false);
+    expect(isRowOrigin({ from: "legacy", how: "legacy", by: null, admit_no: 1, at })).toBe(false);
+    // (b) a row the other dir alone holds, or whose copies disagree, claims legacy for nothing after a merge
+    const ours = { ...legacyRow(at), origin: { from: "remote" as const, how: "code" as const, by: null, admit_no: 3, at } };
+    const claimed = { ...ours, origin: { from: "legacy" as const, how: "legacy" as const, by: null, admit_no: 0, at } };
+    const stranger = { ...legacyRow(at), origin: claimed.origin };
+    const merged = mergeRegistries({ gate_closed_at: null, devices: [ours] }, { gate_closed_at: null, devices: [claimed, stranger] }, { own: null, other: null });
+    expect(merged.devices.find((d) => d.id === ours.id)?.origin).toBeUndefined();
+    expect(merged.devices.find((d) => d.id === stranger.id)?.origin).toBeUndefined();
+    // (c) after the pass every admission takes a number of its own, and a row added by hand later is never stamped
+    const dir = stateDir();
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ gate_closed_at: at, devices: [legacyRow(at)] }), { mode: 0o600 });
+    const devices = store(dir);
+    const added = await pairRelay(devices, Date.now());
+    expect(row(dir, added).origin).toMatchObject({ from: "remote", admit_no: 1 });
+    const late = legacyRow(at);
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ gate_closed_at: at, devices: [...rows(dir), late] }), { mode: 0o600 });
+    store(dir);
+    expect(row(dir, late.id).origin).toBeUndefined();
   });
 });
