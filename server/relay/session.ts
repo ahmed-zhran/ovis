@@ -325,7 +325,7 @@ export class RelaySession {
           // Step 2 (S2-27): a row not paired at this PC waits for the first whole read after a start (T41)
           if (!this.mux.active) return;
           const refusal = accountSignInRefusal({ refused: "catching_up" }, null, this.accountCodes);
-          this.mux.fail(refusal.code, refusal.message, refusal.hold);
+          this.mux.fail(refusal.code, refusal.message, undefined, refusal.hold);
           return;
         }
         if (frame.type === FrameType.AUTH && device === null) {

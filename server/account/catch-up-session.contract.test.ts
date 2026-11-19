@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { ACCOUNT_OPENS_ALL_MUX_FEATURE } from "../../shared/account-devices-api.ts";
 import { FakeAccountService } from "../../shared/account-service-fake.ts";
 import { importPublicKey } from "../../shared/relay-e2ee.ts";
-import { FrameType, type MuxFrame } from "../../shared/relay-mux.ts";
+import { FrameType, type MuxFrame, ACCOUNT_OPENS_ALL_FEATURE } from "../../shared/relay-mux.ts";
 import { rotateRelayIdentity } from "../relay/identity.ts";
 import { bounded, relayAccountFixture, relayConnection } from "../relay/test-helpers.ts";
 
@@ -39,7 +38,7 @@ async function signIn(pc: Awaited<ReturnType<typeof startedPc>>, features: reado
 describe("S2-27 a devices.json row not paired at this PC waits for the first whole read after a start (T41, T42)", () => {
   test("T41: a legacy row's proved sign-in is refused catching_up until a whole read; an old app gets today's code", async () => {
     const pc = await startedPc();
-    expect(await signIn(pc, [ACCOUNT_OPENS_ALL_MUX_FEATURE])).toEqual({ code: "held", message: "This PC waits for the account's list before letting this device in", hold: { reason: "catching_up" } });
+    expect(await signIn(pc, [ACCOUNT_OPENS_ALL_FEATURE])).toEqual({ code: "held", message: "This PC waits for the account's list before letting this device in", hold: { reason: "catching_up" } });
     expect(await signIn(pc, [])).toEqual({ code: "auth_failed", message: "auth_failed" });
     expect(pc.fixture.app.context.services.devices.sessionRow(pc.member.id)).toBeNull();
   });
@@ -48,6 +47,6 @@ describe("S2-27 a devices.json row not paired at this PC waits for the first who
     const pc = await startedPc();
     pc.service.opensAll = true;
     expect(await pc.fixture.app.context.services.accountMailbox.readSnapshot()).toMatchObject({ committed: true });
-    expect(await signIn(pc, [ACCOUNT_OPENS_ALL_MUX_FEATURE])).toBe("ok");
+    expect(await signIn(pc, [ACCOUNT_OPENS_ALL_FEATURE])).toBe("ok");
   });
 });
