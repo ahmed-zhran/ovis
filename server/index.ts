@@ -286,7 +286,9 @@ export function createServer(
   // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
   const serverIdNow = () => ovisRelay.currentIdentity()?.server_id ?? null;
   // Step 2 (S2-25): the rows the account's list admits, kept apart from devices.json and judged by the device store
-  const accountRows = safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
+  const opened: { rows: ReturnType<typeof accountRowsFor> | null } = { rows: null };
+  // Recovery can use row ports inside the DeviceStore constructor, before its caller has a reference.
+  const rowsForDevices = (devices: DeviceStore) => opened.rows = safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
     evidence: removals,
     ...listNotices(journal, removals, (entry) => devices.publish(entry)),
     closeSessions: (id) => { devices.closeAccountSessions(id); },
@@ -304,7 +306,8 @@ export function createServer(
       },
     },
   }) : null;
-  const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal, joinedRows: accountRows });
+  const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal, joinedRows: rowsForDevices });
+  const accountRows = opened.rows;
   // Device migration creates the journal's companions. Recover interrupted notices before their whole records fold.
   if (devices.error === null && devices.accountError === null && safetyLog && journal) {
     journal.recordSnapshotLifts(safetyLog);

@@ -213,7 +213,7 @@ export class AccountDeviceStore implements AccountRowSource {
 
   /** Publishes again every notice that could not be published: until it is, its row stays held. */
   republish(): void {
-    for (const row of this.rows()) if (row.state === "hold" && row.hold_until === null && this.ports.admits(row.key)) this.publish(row);
+    for (const row of this.rows()) if (row.state === "hold" && row.hold_until === null && this.file.account !== null && this.ports.admits(row.key, this.file.account)) this.publish(row);
   }
 
   /** Applies a whole read's list: drops what it no longer names, then admits what it newly names and the guards let in. */
