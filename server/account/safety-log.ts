@@ -15,136 +15,21 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { AccountRecordError, parseSafetyRecord, type BlockRecord, type PcLiftRecord, type SafetyRecord, type SafetyRecordKind } from "../../shared/account-records.ts";
+import type { DeviceLiftRecord, PcLiftRecord, SafetyRecord, SafetyRecordKind } from "../../shared/account-records.ts";
+import { parseLog, sameRecord, stageAppend, WAITING_MAX, type FoldedRecord, type LogFile, type SafetyAppend, type SafetyEntry, type SafetyReceipt, type SafetyState, type WaitingBlock, type WaitingRecord } from "./safety-log-file.ts";
+export { WAITING_MAX, type BlockAsOf, type FoldedRecord, type SafetyEntry, type SafetyGot, type SafetyReceipt, type SafetyState, type WaitingBlock } from "./safety-log-file.ts";
 import { privateStateRefusal, writePrivateState } from "../private-state.ts";
 
 export const SAFETY_LOG_FILE = "account-log.json";
 /** The device journal (P15, S2-07). A state folder that has one has had a log since, so a missing log there is damage. */
 export const DEVICE_JOURNAL_FILE = "device-journal.json";
 
-/** How the record reached this PC; noted once and never compared (P24). */
-export type SafetyGot = "handed" | "mailbox" | "snapshot" | "pc" | "session" | "merge";
-
-/** What this PC's own table said when a block arrived (P21), kept with the entry and never changed. */
-export interface BlockAsOf {
-  readonly signer_no: number | null;
-  readonly target_no: number | null;
-  readonly after: number | null;
-  readonly joined: number | null;
-  readonly signer_removed: boolean;
-}
-
-/**
- * An entry: the record whole as shared/account-records.ts parses it (a device-signed one with its signature, so its
- * signed bytes are those of the record and its id is their hash), and what this PC added once and never changes.
- */
-export interface SafetyEntry {
-  readonly n: number;
-  readonly got: SafetyGot;
-  readonly record: SafetyRecord;
-  readonly asof?: BlockAsOf;
-}
-
-export type SafetyReceipt =
-  | { outcome: "applied"; id: string; n: number }
-  | { outcome: "already_applied"; id: string }
-  | { outcome: "refused"; id: string; code: "record_invalid" | "conflict" | "log_unavailable" };
-
-/** A block whose target this PC cannot place yet (P19): it ends nobody and waits for a read that names its target. */
-export interface WaitingBlock { readonly record: BlockRecord; readonly got: SafetyGot; readonly signer_removed: boolean }
-export const WAITING_MAX = 64;
-
-export interface SafetyState {
-  readonly locked: boolean;
-  readonly locks: readonly SafetyEntry[];
-  readonly blocks: readonly SafetyEntry[];
-  /** service freezes and blocks in force: each closes this PC to the keys newer than its target (P23) */
-  readonly freezes: readonly SafetyEntry[];
-  /** blocks whose marker stands: no lift that says `forget` names them, whether or not they are in force */
-  readonly markers: readonly SafetyEntry[];
-}
-
-/** A folded record: known and ended, its signed bytes dropped, its id never forgotten (P24). */
-export interface FoldedRecord {
-  readonly id: string;
-  readonly kind: SafetyRecordKind;
-  readonly account: string | null;
-  readonly target: string | null;
-  readonly ended_by: readonly string[];
-}
-
-interface LogFile {
-  v: 1;
-  next: number;
-  /** folded records, one line each with no number: an id in it is known and ended (P24) */
-  base: FoldedRecord[];
-  entries: SafetyEntry[];
-  /** P19's waiting blocks, at most WAITING_MAX: each with what this PC knew of its signer when it arrived */
-  waiting: WaitingBlock[];
-}
-
-const GOTS: ReadonlySet<string> = new Set(["handed", "mailbox", "snapshot", "pc", "session", "merge"]);
 
 /** The id of a record this PC writes: random, made then, in the form shared/account-records.ts accepts. */
 export function pcRecordId(): string {
   return randomBytes(16).toString("hex");
 }
 
-const isNo = (value: unknown): boolean => value === null || (Number.isSafeInteger(value) && (value as number) >= 0);
-
-/** Why `record` is no record of the log, or null: the shared parser decides, and a block keeps what this PC knew. */
-function recordProblem(record: unknown, asof: BlockAsOf | undefined): string | null {
-  let parsed: SafetyRecord;
-  try { parsed = parseSafetyRecord(record); } catch (error) {
-    if (error instanceof AccountRecordError) return error.message;
-    throw error;
-  }
-  if (parsed.kind === "block") {
-    if (asof === undefined) return "a block keeps what this PC knew when it arrived";
-    const a = asof as unknown as Record<string, unknown>;
-    if (typeof a !== "object" || a === null || Object.keys(a).length !== 5 || !isNo(a.signer_no) || !isNo(a.target_no) || !isNo(a.after) || !isNo(a.joined) || typeof a.signer_removed !== "boolean") return "invalid asof";
-  } else if (asof !== undefined) return "only a block keeps asof";
-  return null;
-}
-
-/** Two copies of one record: the same fields with the same values, whatever order JSON kept them in. */
-function sameRecord(a: SafetyRecord, b: SafetyRecord): boolean {
-  const canonical = (record: SafetyRecord) => JSON.stringify(Object.entries(record).sort(([x], [y]) => x < y ? -1 : x > y ? 1 : 0));
-  return canonical(a) === canonical(b);
-}
-
-function parseLog(value: unknown): LogFile | string {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not a log";
-  const file = value as Partial<LogFile>;
-  if (file.v !== 1) return "unknown version";
-  if (!Number.isSafeInteger(file.next) || file.next! < 1) return "invalid next";
-  if (!Array.isArray(file.base) || !file.base.every((line) => typeof line === "object" && line !== null && typeof line.id === "string")) return "invalid base";
-  if (!Array.isArray(file.entries) || !Array.isArray(file.waiting)) return "invalid entries";
-  if (file.waiting.length > WAITING_MAX || !file.waiting.every((item) => typeof item === "object" && item !== null && GOTS.has(item.got) && typeof item.signer_removed === "boolean"
-    && recordProblem(item.record, { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false }) === null && item.record.kind === "block")) return "invalid waiting blocks";
-  const seen = new Map<string, SafetyRecord>();
-  const numbers = new Set<number>();
-  for (const id of file.base.map((line) => line.id)) {
-    if (seen.has(id)) return `the folded id ${id} is held twice`;
-    seen.set(id, { id } as SafetyRecord);
-  }
-  // every number this log gave is a whole entry or a folded line: a history with numbers that account for nothing
-  // is none this writer made (P24)
-  if (file.next! - 1 > file.entries.length + file.base.length) return `next ${String(file.next)} accounts for more records than the log holds`;
-  for (const entry of file.entries as SafetyEntry[]) {
-    if (typeof entry !== "object" || entry === null) return "an entry is an object";
-    if (!Number.isSafeInteger(entry.n) || entry.n < 1 || entry.n >= file.next! || numbers.has(entry.n)) return `entry number ${String(entry.n)} is taken twice or past next`;
-    numbers.add(entry.n);
-    if (!GOTS.has(entry.got)) return "invalid got";
-    const problem = recordProblem(entry.record, entry.asof);
-    if (problem !== null) return `entry ${entry.n}: ${problem}`;
-    const known = seen.get(entry.record.id);
-    // one id with two records is a damaged log; the same record twice is one record that was written twice
-    if (known !== undefined) return `the id ${entry.record.id} is held ${sameRecord(known, entry.record) ? "twice" : "by two different records"}`;
-    seen.set(entry.record.id, entry.record);
-  }
-  return file as LogFile;
-}
 
 /**
  * Why another account may have written the log, or null: owned by another uid, or group- or other-writable. Such a
@@ -208,7 +93,7 @@ export class SafetyLog {
     try { text = readFileSync(this.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.readError = `Cannot read ${this.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
       else if (existsSync(join(this.stateDir, DEVICE_JOURNAL_FILE))) this.readError = `${this.path} is missing beside the device journal`;
-      else if (this.file.next !== 1) this.readError = `${this.path} is missing after this PC wrote it`;
+      else if (this.file.next !== 1 || this.file.waiting.length !== 0) this.readError = `${this.path} is missing after this PC wrote it`;
       else { this.inForce = this.state(); return true; }
       return false;
     }
@@ -288,28 +173,48 @@ export class SafetyLog {
    * Appends one record with the next number, on disk before it counts. A record this log already holds answers its
    * receipt and appends nothing; another record under a known id is refused, and the log keeps what it holds.
    */
-  append(input: { record: SafetyRecord; got: SafetyGot; asof?: BlockAsOf }): SafetyReceipt {
-    const { record, got, asof } = input;
-    const id = typeof record?.id === "string" ? record.id : "";
-    if (this.readError !== null || this.writeError !== null) return { outcome: "refused", id, code: "log_unavailable" };
-    if (!GOTS.has(got) || recordProblem(record, asof) !== null) return { outcome: "refused", id, code: "record_invalid" };
-    // what another handle of this folder appended is read first, so no number is given twice and none is lost (P24)
-    if (!this.load()) return { outcome: "refused", id, code: "log_unavailable" };
-    const held = this.file.entries.find((entry) => entry.record.id === id);
-    if (held !== undefined) return sameRecord(held.record, record) ? { outcome: "applied", id, n: held.n } : { outcome: "refused", id, code: "conflict" };
-    if (this.file.base.some((line) => line.id === id)) return { outcome: "already_applied", id };
-    const entry: SafetyEntry = { n: this.file.next, got, record: { ...record }, ...(asof === undefined ? {} : { asof: { ...asof } }) };
-    const next: LogFile = { ...this.file, next: this.file.next + 1, entries: [...this.file.entries, entry] };
-    try { writePrivateState(this.path, next); } catch (error) {
-      this.writeError = `Cannot write ${this.path} (${error instanceof Error ? error.message : String(error)})`;
-      this.inForce = STRICT_STATE;
-      return { outcome: "refused", id, code: "log_unavailable" };
-    }
-    this.file = next;
-    this.inForce = this.state();
-    return { outcome: "applied", id, n: entry.n };
+  append(input: SafetyAppend): SafetyReceipt {
+    const draft = this.draft();
+    const unavailable = { outcome: "refused", id: input.record?.id ?? "", code: "log_unavailable" } as const;
+    if (draft === null) return unavailable;
+    const receipt = stageAppend(draft, input);
+    if (draft.next !== this.file.next && !this.publish(draft)) return unavailable;
+    return receipt;
   }
 
+  /** All accepted lifts and the disposition of their waiting records share one durable replacement. */
+  commitLifts(lifts: readonly DeviceLiftRecord[], listed: readonly DeviceLiftRecord[]): number | Extract<SafetyReceipt, { outcome: "refused" }> {
+    if (listed.length === 0 && lifts.length === 0) return 0;
+    const unavailable = { outcome: "refused", id: lifts[0]?.id ?? listed[0]?.id ?? "", code: "log_unavailable" } as const;
+    const draft = this.draft();
+    if (draft === null) return unavailable;
+    for (const record of lifts) {
+      const receipt = stageAppend(draft, { record, got: "snapshot" });
+      if (receipt.outcome === "refused") return receipt;
+    }
+    const decisions = new Map(listed.map((record) => [record.id, record]));
+    draft.waiting = draft.waiting.filter(({ record }) => {
+      const decision = decisions.get(record.id);
+      return record.kind !== "lift" || !decision || !sameRecord(record, decision);
+    });
+    const added = draft.next - this.file.next;
+    if ((added || draft.waiting.length !== this.file.waiting.length) && !this.publish(draft)) return unavailable;
+    return added;
+  }
+
+  private draft(): LogFile | null {
+    return this.strict === null && this.load() ? { ...this.file, entries: [...this.file.entries] } : null;
+  }
+
+  private publish(next: LogFile): boolean {
+    try { this.writeFile(next); } catch (error) {
+      this.writeError = `Cannot write ${this.path} (${error instanceof Error ? error.message : String(error)})`;
+      this.inForce = STRICT_STATE;
+      return false;
+    }
+    this.inForce = this.state();
+    return true;
+  }
 
   /** What is in force, worked out from the log alone. Each ending ends only the record it names, and only of its kind. */
   state(): SafetyState {
@@ -385,15 +290,16 @@ export class SafetyLog {
     return folds.size;
   }
 
-  waitingBlocks(): readonly WaitingBlock[] { return this.file.waiting; }
+  waitingBlocks(): readonly WaitingBlock[] { return this.file.waiting.filter((item): item is WaitingBlock => "signer_removed" in item); }
 
-  /** Queues a block whose target this PC cannot place yet; false when the queue is full: none is pushed out (P19). */
-  wait(item: WaitingBlock): boolean {
-    if (this.readError !== null) return false;
-    if (this.file.waiting.some((kept) => kept.record.id === item.record.id)) return true;
-    if (this.file.waiting.length >= WAITING_MAX) return false;
-    this.writeFile({ ...this.file, waiting: [...this.file.waiting, item] });
-    return true;
+  /** Keep undecided evidence, not an applied receipt. A full queue never evicts another request. */
+  wait(item: WaitingRecord): boolean {
+    if (this.strict !== null || !this.load()) return false;
+    const known = this.file.waiting.find((kept) => kept.record.id === item.record.id);
+    if (known) return sameRecord(known.record, item.record);
+    // No number of handed lifts can take a waiting block's slot.
+    if (this.file.waiting.filter((kept) => kept.record.kind === item.record.kind).length >= WAITING_MAX) return false;
+    return this.publish({ ...this.file, waiting: [...this.file.waiting, item] });
   }
 
   /** A waiting block was judged: applied, or refused for good. */
@@ -408,7 +314,7 @@ export class SafetyLog {
   }
 
   /** The file as it stands, for a merge. */
-  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly WaitingBlock[] } { return this.file; }
+  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly WaitingRecord[] } { return this.file; }
 
   /** Why the log could not be trusted, without the strict tail, or null. */
   get reason(): string | null { return this.readError ?? this.writeError; }

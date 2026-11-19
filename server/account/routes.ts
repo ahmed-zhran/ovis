@@ -124,7 +124,7 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       const blocks = context.services.safetyLog === null ? [] : records.filter((record) => (record as { kind?: unknown } | null)?.kind === "block");
       const receipts = [];
       for (const block of blocks) receipts.push(await devices.applyBlock(block, "handed"));
-      const gates = { ...mailbox.gates(), deferAdd: devices.opensAll() ? (record: unknown) => mailbox.wait(record) : undefined,
+      const gates = { ...mailbox.gates(), safetyLog: context.services.safetyLog, deferAdd: devices.opensAll() ? (record: unknown) => mailbox.wait(record) : undefined,
         requestRead: devices.opensAll() ? () => { void mailbox.readSnapshot(); } : undefined };
       const results = await applyAccountRecords(devices, records.filter((record) => !blocks.includes(record)), serverId, Date.now(), gates, member ? (record) => mailbox.wait(record) : undefined);
       return reply({ results, ...(blocks.length > 0 ? { receipts } : {}) });
