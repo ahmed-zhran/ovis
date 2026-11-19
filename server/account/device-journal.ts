@@ -130,7 +130,7 @@ export class DeviceJournal {
         return;
       }
     }
-    const written = this.append({ kind: entry.kind, how: drop?.how ?? entry.reason ?? "list", key: entry.key, no: entry.no ?? null,
+    const written = this.append({ kind: entry.kind === "drop" ? "drop" : "admit", how: drop?.how ?? entry.reason ?? "list", key: entry.key, no: entry.no ?? null,
       row: entry.row, label: entry.label ?? "", by: null, account: entry.account }, drop);
     if (drop) evidence.markJournalled(drop, written.seq);
   }

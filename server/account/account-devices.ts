@@ -191,7 +191,7 @@ export class AccountDeviceStore implements AccountRowSource {
     if (row.state === "live") return { ok: true };
     const seconds = holdSecondsLeft(row.hold_until === null ? null : Date.parse(row.hold_until), this.ports.now());
     if (seconds === null || seconds > 0) return { refused: "join_hold", seconds };
-    if (!this.ports.admits(row.key)) return { refused: "admission" };
+    if (this.file.account === null || !this.ports.admits(row.key, this.file.account)) return { refused: "admission" };
     this.goLive(id);
     return { ok: true };
   }
@@ -200,8 +200,8 @@ export class AccountDeviceStore implements AccountRowSource {
   itsMe(id: string, sayer: Sayer): boolean {
     const row = this.rows().find((candidate) => candidate.id === id && candidate.state === "hold");
     if (!row || !mayEndHold(sayer, { key: row.key, no: row.no, admitNo: row.origin.admit_no }, this.ports.now())) return false;
-    if (!this.ports.admits(row.key)) return false;
-    this.ports.journal({ kind: "its_me", key: row.key, row: row.id, by: sayer.key });
+    if (this.file.account === null || !this.ports.admits(row.key, this.file.account)) return false;
+    this.ports.journal({ kind: "its_me", key: row.key, row: row.id, account: this.file.account, by: sayer.key });
     this.goLive(id);
     return true;
   }
@@ -283,7 +283,7 @@ export class AccountDeviceStore implements AccountRowSource {
   }
 
   private publish(row: AccountRow): void {
-    try { this.ports.publish({ kind: "admit", key: row.key, row: row.id, no: row.origin.admit_no, label: row.label }); } catch (error) {
+    try { this.ports.publish({ kind: "admit", key: row.key, row: row.id, account: this.file.account, no: row.origin.admit_no, label: row.label }); } catch (error) {
       // the row stays held with no deadline: republish() starts its ten seconds once the notice is out
       console.error(`[account] the notice of ${row.id} was not published: ${error instanceof Error ? error.message : String(error)}`);
       return;
