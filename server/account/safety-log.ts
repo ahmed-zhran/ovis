@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { AccountRecordError, parseSafetyRecord, type PcLiftRecord, type SafetyRecord, type SafetyRecordKind } from "../../shared/account-records.ts";
+import { AccountRecordError, parseSafetyRecord, type BlockRecord, type PcLiftRecord, type SafetyRecord, type SafetyRecordKind } from "../../shared/account-records.ts";
 import { privateStateRefusal, writePrivateState } from "../private-state.ts";
 
 export const SAFETY_LOG_FILE = "account-log.json";
@@ -51,6 +51,10 @@ export type SafetyReceipt =
   | { outcome: "already_applied"; id: string }
   | { outcome: "refused"; id: string; code: "record_invalid" | "conflict" | "log_unavailable" };
 
+/** A block whose target this PC cannot place yet (P19): it ends nobody and waits for a read that names its target. */
+export interface WaitingBlock { readonly record: BlockRecord; readonly got: SafetyGot; readonly signer_removed: boolean }
+export const WAITING_MAX = 64;
+
 export interface SafetyState {
   readonly locked: boolean;
   readonly locks: readonly SafetyEntry[];
@@ -76,8 +80,8 @@ interface LogFile {
   /** folded records, one line each with no number: an id in it is known and ended (P24) */
   base: FoldedRecord[];
   entries: SafetyEntry[];
-  /** P19's waiting blocks (S2-10) */
-  waiting: unknown[];
+  /** P19's waiting blocks, at most WAITING_MAX: each with what this PC knew of its signer when it arrived */
+  waiting: WaitingBlock[];
 }
 
 const GOTS: ReadonlySet<string> = new Set(["handed", "mailbox", "snapshot", "pc", "session", "merge"]);
@@ -120,6 +124,8 @@ function parseLog(value: unknown): LogFile | string {
   if (!Number.isSafeInteger(file.next) || file.next! < 1) return "invalid next";
   if (!Array.isArray(file.base) || !file.base.every((line) => typeof line === "object" && line !== null && typeof line.id === "string")) return "invalid base";
   if (!Array.isArray(file.entries) || !Array.isArray(file.waiting)) return "invalid entries";
+  if (file.waiting.length > WAITING_MAX || !file.waiting.every((item) => typeof item === "object" && item !== null && GOTS.has(item.got) && typeof item.signer_removed === "boolean"
+    && recordProblem(item.record, { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false }) === null && item.record.kind === "block")) return "invalid waiting blocks";
   const seen = new Map<string, SafetyRecord>();
   const numbers = new Set<number>();
   for (const id of file.base.map((line) => line.id)) {
@@ -348,8 +354,30 @@ export class SafetyLog {
     return folds.size;
   }
 
+  waitingBlocks(): readonly WaitingBlock[] { return this.file.waiting; }
+
+  /** Queues a block whose target this PC cannot place yet; false when the queue is full: none is pushed out (P19). */
+  wait(item: WaitingBlock): boolean {
+    if (this.readError !== null) return false;
+    if (this.file.waiting.some((kept) => kept.record.id === item.record.id)) return true;
+    if (this.file.waiting.length >= WAITING_MAX) return false;
+    this.writeFile({ ...this.file, waiting: [...this.file.waiting, item] });
+    return true;
+  }
+
+  /** A waiting block was judged: applied, or refused for good. */
+  unwait(id: string): void {
+    if (!this.file.waiting.some((kept) => kept.record.id === id)) return;
+    this.writeFile({ ...this.file, waiting: this.file.waiting.filter((kept) => kept.record.id !== id) });
+  }
+
+  private writeFile(next: LogFile): void {
+    writePrivateState(this.path, next);
+    this.file = next;
+  }
+
   /** The file as it stands, for a merge. */
-  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly unknown[] } { return this.file; }
+  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly WaitingBlock[] } { return this.file; }
 
   /** Why the log could not be trusted, without the strict tail, or null. */
   get reason(): string | null { return this.readError ?? this.writeError; }
