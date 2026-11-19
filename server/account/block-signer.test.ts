@@ -166,4 +166,21 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(lateRow).toBeNull();
     expect(await devices.liftAuthority(await lift(record.id, late))).toBe(false);
   });
+
+  test("P23: a lift gives no authority when this PC has no admission number for its signer or its target", async () => {
+    const { devices, log } = pc();
+    const [signer, target] = [await member(devices), await member(devices)];
+    // a block whose target has no number here (joined unknown): no lift ends it
+    const unknownTarget = await block(target.spki, signer);
+    log.append({ record: unknownTarget, got: "handed", asof: { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false } });
+    expect(await devices.liftAuthority(await lift(unknownTarget.id, signer))).toBe(false);
+    // a signer whose row has no origin here, however old its row is
+    const other = pc();
+    const [s2, t2] = [await member(other.devices), await member(other.devices)];
+    const record = await block(t2.spki, s2);
+    await other.devices.applyBlock(record, "handed");
+    (other.devices as unknown as { devices: { id: string; origin?: unknown }[] }).devices.find((row) => row.id === s2.id)!.origin = undefined;
+    expect(await other.devices.liftAuthority(await lift(record.id, s2))).toBe(false);
+  });
 });
+
