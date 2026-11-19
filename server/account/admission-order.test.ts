@@ -7,7 +7,7 @@ import { DeviceStore, readDeviceRegistry, type StoredDevice } from "../devices.t
 import { mergeRegistries } from "../state-merge.ts";
 import { relayFixture } from "../relay/test-helpers.ts";
 import { ADMISSION_FILE, AdmissionOrder, compareAdmission, isRowOrigin, remoteReach } from "./admission-order.ts";
-import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
 const dirs: string[] = [];
 const fixtures: ReturnType<typeof relayFixture>[] = [];
@@ -99,7 +99,7 @@ describe("one admission order per PC (origin and admit_no)", () => {
     // a missing order file beside a journal is damage, never a second run: the PC fails closed
     const journalled = stateDir();
     writeFileSync(join(journalled, "devices.json"), JSON.stringify({ gate_closed_at: older.created_at, devices: [older] }), { mode: 0o600 });
-    writeFileSync(join(journalled, ACCOUNT_JOURNAL_FILE), JSON.stringify({ v: 1, entries: [] }), { mode: 0o600 });
+    writeFileSync(join(journalled, DEVICE_JOURNAL_FILE), JSON.stringify({ v: 1, entries: [] }), { mode: 0o600 });
     const admissions = AdmissionOrder.open(journalled);
     expect(admissions.strict).toContain(ADMISSION_FILE);
     const closed = new DeviceStore(journalled, null, null, { admissions });

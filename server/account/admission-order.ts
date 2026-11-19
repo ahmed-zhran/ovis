@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateState } from "../private-state.ts";
 import { AccountSnapshotError, parseAdmissionOrigin, type AdmissionFrom, type AdmissionHow, type AdmissionOrigin } from "../../shared/account-snapshot.ts";
-import { ACCOUNT_JOURNAL_FILE } from "./safety-log.ts";
+import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
 /** This PC's account state (P12); S2-03 keeps only `next_admit` in it, and the binding joins it later under the same `v`. */
 export const ADMISSION_FILE = "account-pc.json";
@@ -70,7 +70,7 @@ export class AdmissionOrder {
     let text: string;
     try { text = readFileSync(order.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") order.problem = `Cannot read ${order.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
-      else if (existsSync(join(stateDir, ACCOUNT_JOURNAL_FILE))) order.problem = `${order.path} is missing beside the device journal`;
+      else if (existsSync(join(stateDir, DEVICE_JOURNAL_FILE))) order.problem = `${order.path} is missing beside the device journal`;
       else (order as { fresh: boolean }).fresh = true;
       return order;
     }
