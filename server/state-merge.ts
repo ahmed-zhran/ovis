@@ -133,6 +133,7 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     const joinedBy = word >= 0 ? marks[word] : device.account !== undefined && device.account === twin.account ? marks[0] : keptMark;
     devices.push({
       ...rest,
+      ...(twin.held && !device.held ? { held: twin.held } : {}),
       ...(joinedBy === undefined ? {} : { joined_by: joinedBy }),
       ...(origin === undefined ? {} : { origin }),
       role: device.role === "watch" || twin.role === "watch" ? "watch" : "drive",
