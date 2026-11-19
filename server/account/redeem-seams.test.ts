@@ -145,4 +145,23 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     internals.safety.append({ record: { v: 1, id: "2".repeat(32), kind: "unlock", account: "acct_1", target: "1".repeat(32), signer: "pc", signed_at: new Date().toISOString(), signature: "" }, got: "pc" });
     expect(devices.admitConfirmed({ codeId: id5, key: late, label: "Late", source: "screen" })).toBeNull();
   });
+
+  test("P13: with the flag on, only a screen confirm naming it ends a local Revoke; a relay-started code never does", async () => {
+    const devices = store(dir());
+    const internals = devices as unknown as { evidence: RemovalEvidence };
+    const gone = await key();
+    const row = devices.pairRelay(devices.startPairing().code, "Phone", gone)!.device.id;
+    devices.revoke(row);
+    // (a) a code started through the relay re-admits nobody, and the Revoke stands
+    const remote = devices.startPairing(Date.now(), { remote: true, startedBy: null, memberRequired: false, by: null });
+    expect(devices.pairRelay(remote.code, "Again", gone)).toBeNull();
+    expect(internals.evidence.standingRevokes(gone)).toHaveLength(1);
+    // (b) a key confirm on this PC's screen that names the Revoke admits it, and writes the unrevoke
+    const local = devices.startPairing();
+    const { codeId } = devices.redeemCode(local.code, "code", gone) as { codeId: string };
+    const revokeId = internals.evidence.standingRevokes(gone)[0]!.id;
+    expect(devices.admitConfirmed({ codeId, key: gone, label: "Back", source: "screen", unrevokes: [revokeId] })).not.toBeNull();
+    expect(internals.evidence.standingRevokes(gone)).toEqual([]);
+  });
 });
+
