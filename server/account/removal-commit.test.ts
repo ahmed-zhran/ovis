@@ -82,7 +82,8 @@ describe("finishing a removal before reporting it (P8)", () => {
     expect(sessionB.closed).toBe(true);
     expect(second.sessionRow(idB2)).toBeNull();
     expect(second.accountError).not.toBeNull();
-    expect(second.sessionRow(idC)).not.toBeNull();
+    // until a deny is written nothing but this PC gets in, the other rows' live sessions included (S19)
+    expect(second.sessionRow(idC)).toBeNull();
     expect(second.pair(second.startPairing().code, "New", "drive")).toBeNull();
   });
 
