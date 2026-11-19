@@ -2049,13 +2049,15 @@ export class DeviceStore {
 
   revoke(id: string, by: DeviceRemovedEvent["by"] = "pc"): boolean {
     this.assertWritable();
-    const target = this.devices.find((d) => d.id === id);
+    const target = this.anyRow(id);
     if (!target) return false;
     if (this.evidence !== null) {
       const key = target.relay_public_key;
       const denied = this.deny(() => this.tombstone([target], Date.now()));
       if (key !== undefined) this.dropWaiting([key]);
-      this.drop(this.devices.filter((d) => d === target || (key !== undefined && d.relay_public_key === key)), by);
+      const ordinary = this.devices.filter((d) => d.id === id || (key !== undefined && d.relay_public_key === key));
+      const joined = key === undefined ? [] : this.joinedRows?.rowsByKey(key) ?? [];
+      this.dropBeforeWrite(ordinary, by, undefined, { ids: joined.map((row) => row.id), reason: "revoke" });
       if (denied !== null) throw denied;
       return true;
     }
