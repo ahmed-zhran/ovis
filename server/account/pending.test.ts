@@ -107,3 +107,12 @@ test("T71: the PC's screen sees every redemption of a code side by side, with ho
   await pending.prove(challenge, await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey));
   expect(pending.list().map((open) => [open.code, open.label, open.via])).toEqual([["code1", "Phone", "relay"], ["code1", "Laptop", "address"]]);
 });
+
+test("T71: every change is told, as the list the PC's screen shows", async () => {
+  const { pending } = store();
+  const heard: number[] = [];
+  pending.onChange(() => { heard.push(pending.view().length); });
+  const { entry } = await proved(pending, "code1");
+  pending.decline(entry.id);
+  expect(heard).toEqual([1, 0]);
+});
