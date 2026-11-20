@@ -126,6 +126,11 @@ export class RemovalEvidence {
   }
 
   /** A Revoke on this PC of a row holding `key`: its own entry, the deny that goes to disk before anything else. */
+  /** Every time this evidence holds, for the store's one sequence of times (DeviceStore.nextStamp). */
+  times(): string[] {
+    return [...this.doc.revokes.map((r) => r.at), ...this.doc.unrevokes.map((u) => u.at), ...this.doc.markers.flatMap((m) => m.removals.map((r) => r.at))];
+  }
+
   addRevoke(key: string, account: string | null, now: number): void {
     const at = new Date(now).toISOString();
     // the id a later start reads this Revoke back under from the tombstone file, so it is taken in once (P13)

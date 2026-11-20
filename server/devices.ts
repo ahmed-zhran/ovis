@@ -562,6 +562,16 @@ export class DeviceStore {
     }
   }
 
+  /**
+   * The store's one sequence of times (T26, P13): never before `now`, and always after every time this store has
+   * ordered (a row's making, a Revoke, an unrevoke, a tombstone), so what is made after something is always later.
+   */
+  private nextStamp(now: number): string {
+    const times = [...this.devices.map((d) => d.created_at), ...this.tombstones.map((t) => t.removed_at), ...this.evidence?.times() ?? []];
+    const last = Math.max(Number.NEGATIVE_INFINITY, ...times.map((t) => Date.parse(t)).filter((t) => Number.isFinite(t)));
+    return new Date(Math.max(now, last + 1)).toISOString();
+  }
+
   /** The tombstone file as the evidence writes it (P13), written only when it changed. */
   private refreshTombstones(): void {
     const next = this.evidence!.tombstones();
@@ -1307,7 +1317,9 @@ export class DeviceStore {
 
   /** One authorization write precedes every state change and enrollment announcement. */
   private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean } = {}): void {
-    const device = this.knowingRemovals(this.admitted(admitting, now, path));
+    const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
+    // with the flag on a row is stamped after everything this store ordered before it (T26, P13)
+    const device = this.evidence === null ? admitted : { ...admitted, created_at: this.nextStamp(Date.parse(admitted.created_at)) };
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
     this.save(next, gate);
@@ -1886,6 +1898,8 @@ export class DeviceStore {
   private tombstone(rows: readonly StoredDevice[], now: number): void {
     // each Revoke is its own evidence, also of a key that already has a tombstone, and also while the tombstone files
     // cannot be read, so it outlives their repair (P13)
+    // a Revoke is stamped after every row this store holds, whatever the wall clock says (P13)
+    if (this.evidence !== null) now = Date.parse(this.nextStamp(now));
     if (this.evidence !== null && this.evidence.strict === null) {
       for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
     }
