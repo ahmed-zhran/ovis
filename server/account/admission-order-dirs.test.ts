@@ -151,6 +151,12 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
       // the damage holds at every later start until it is repaired: no merge took the numbered rows away meanwhile
       expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
       expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
+      // nor does the healthy sibling's own start, which merges nothing with a damaged folder
+      const healthy = start(b, a, true);
+      expect(healthy.app.context.services.devices.failsClosed).toBe(false);
+      stop(healthy, b);
+      expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
+      expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
     }
   });
 
