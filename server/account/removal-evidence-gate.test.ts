@@ -376,3 +376,20 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     expect(open(dir).removedByAccount(k)).toBe(true);
   });
 });
+
+test("S2-05 L9 (MUST-CLOSE, clock ahead): a row paired while the clock ran two days ahead does not fail the PC closed, and a Revoke after it still keeps it out", async () => {
+  const dir = stateDir();
+  const k = await key();
+  try {
+    setSystemTime(new Date("2026-10-03T00:00:00.000Z"));
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+    setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+    const reopened = open(dir);
+    expect(reopened.failsClosed).toBe(false);
+    const kept = readFileSync(join(dir, "devices.json"));
+    reopened.revoke(id);
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    expect(open(dir).has(id)).toBe(false);
+  } finally { setSystemTime(); }
+});
