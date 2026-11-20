@@ -3,9 +3,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
+import { signPairProof } from "../../shared/pair-fingerprint.ts";
+import { FrameType, KEY_PROOF_FEATURE } from "../../shared/relay-mux.ts";
 import { DeviceStore } from "../devices.ts";
 import { privateStateFs } from "../private-state.ts";
-import { bounded, relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
+import { bounded, deferred, relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { AccountHolds } from "./holds.ts";
 import { AccountMailbox } from "./mailbox.ts";
@@ -175,9 +177,13 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
       // P19: startup can find the row and the waiting block together after a merge.
       expect(log.wait({ record: queued, got: "mailbox", signer_removed: false })).toBe(true);
     }
-    const fixture = relayFixture(false, { stateDir, accountOpensAll: true });
+    const screen = new TransformStream<Uint8Array>();
+    const fixture = relayFixture(false, {
+      stateDir, accountOpensAll: true,
+      ...(path === "relay pairing" ? { platform: "linux", desktopOwner: { input: screen.readable, write() {} } } : {}),
+    });
     fixtures.push(fixture);
-    const { devices, safetyLog } = fixture.app.context.services;
+    const { devices, localConfirms, safetyLog } = fixture.app.context.services;
     if (path !== "startup") {
       const signer = await relayDevice(fixture);
       devices.linkAccountKey(signer.id, signer.publicKey, signer.publicKey, ACCOUNT);
@@ -189,10 +195,34 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
       }
     }
     const link = await relayConnection(fixture);
-    const signIn = path === "relay pairing"
-      ? link.pair(devices.startPairing().code, target.spki)
-      : link.auth({ id, keys: target.keys, publicKey: target.spki });
-    expect(await bounded(Promise.race([link.serverError, signIn.then(() => "auth_ok")]))).toBe("auth_failed");
+    let signIn: Promise<"auth_ok">;
+    if (path === "relay pairing") {
+      const challenge = deferred<string>();
+      const pending = deferred<void>();
+      const authenticated = deferred<"auth_ok">();
+      link.onFrame = (frame) => {
+        if (frame.type === FrameType.KEY_CHALLENGE) challenge.resolve(frame.payload.challenge);
+        if (frame.type === FrameType.KEY_PENDING) pending.resolve();
+        if (frame.type === FrameType.AUTH_OK) authenticated.resolve("auth_ok");
+      };
+      await link.hello([KEY_PROOF_FEATURE]);
+      link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: {
+        code: devices.startPairing().code, label: "Joining", public_key: target.spki,
+      } });
+      const signature = await signPairProof(SERVER, await bounded(challenge.promise), target.spki, target.keys.privateKey);
+      link.mux.sendSession({ type: FrameType.KEY_PROVE, flags: 0, stream_id: 0, payload: { signature } });
+      await bounded(pending.promise);
+      // The waiting block needs the target's row; approve the proved key so enrollment reaches it.
+      const prompt = localConfirms?.pending().find(({ action }) => action.kind === "approve_key");
+      if (!prompt) throw new Error("The proved key did not reach the PC screen");
+      const writer = screen.writable.getWriter();
+      await writer.write(new TextEncoder().encode(`${JSON.stringify({ approve: prompt.id })}\n`));
+      writer.releaseLock();
+      signIn = authenticated.promise;
+    } else {
+      signIn = link.auth({ id, keys: target.keys, publicKey: target.spki }).then(() => "auth_ok");
+    }
+    expect(await bounded(Promise.race([link.serverError, signIn]))).toBe("auth_failed");
     if (!queued || !safetyLog) throw new Error("Waiting block fixture did not initialize");
     expect(safetyLog.receipt(queued.id)).toMatchObject({ outcome: "applied" });
     expect(safetyLog.waitingBlocks()).toEqual([]);
