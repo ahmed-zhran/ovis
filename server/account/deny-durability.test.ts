@@ -276,4 +276,25 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     expect(PcAccountState.open(at).account()).toBeNull();
     expect(existsSync(join(at, "revoke-all.json"))).toBe(false);
   });
+
+  test("P8, T20: a Revoke all whose own file cannot be written keeps its rows, and the next Revoke all revokes them", async () => {
+    const at = dir();
+    const devices = store(at);
+    const k = await key();
+    devices.pairRelay(devices.startPairing().code, "A", k);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "revoke-all.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.hasKey(k)).toBe(false);
+    expect(devices.failsClosed).toBe(true);
+    devices.revokeAll();
+    expect(devices.isTombstoned(k)).toBe(true);
+    expect(devices.failsClosed).toBe(false);
+    const reopened = store(at);
+    expect(reopened.isTombstoned(k)).toBe(true);
+    expect(reopened.hasKey(k)).toBe(false);
+  });
 });
