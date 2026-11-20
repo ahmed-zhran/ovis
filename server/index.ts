@@ -61,7 +61,7 @@ import type { Readmission } from "./account/readmission.ts";
 import { AccountOrder } from "./account/account-order.ts";
 import { accountRowsFor } from "./account/account-devices.ts";
 import { listNotices } from "./account/list-notices.ts";
-import { CatchUpGate } from "./account/catch-up-gate.ts";
+import { AccountCatchUp } from "./account/account-catch-up.ts";
 import { RemovalEvidence } from "./account/removal-evidence.ts";
 import { DeviceJournal } from "./account/device-journal.ts";
 import { mergeAccountState } from "./account/account-merge.ts";
@@ -535,19 +535,13 @@ export function createServer(
   })();
   const desktopOwner = localConfirms && options.desktopOwner ? desktopOwnerChannel(localConfirms, options.desktopOwner) : null;
   const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
-  const catchUp = accountRows === null ? null : new CatchUpGate(() => pcAccount?.binding()?.bind_id ?? null);
-  devices.attachCatchUp(catchUp);
+  const accountCatchUp = new AccountCatchUp(devices, accountRows, pcAccount);
+  const catchUp = accountCatchUp.gate;
   const accountOrder = safetyLog !== null ? AccountOrder.open(stateDir) : null;
   devices.attachAccountOrder(accountOrder);
   const readPorts = safetyLog !== null && pcAccount !== null && journal !== null && accountOrder !== null
       // the read's commit turn: the account rows take its list, idle rows expire (T54), and the wait after a start ends
-      // for the rows the guard passes (T42)
-    ? (readmission?: Readmission) => snapshotPorts({ devices, safetyLog, pc: pcAccount, journal, order: accountOrder, serverId: serverIdNow, requestRead: () => { void accountMailbox.pull(); },
-      commitList: (snapshot) => {
-        accountRows?.store()?.commitList(snapshot, readmission);
-        accountRows?.store()?.expire();
-        catchUp?.wholeRead((row) => devices.admits(devices.relayKeyOf(row.id)));
-      } })
+      commitList: (snapshot) => accountCatchUp.commitList(snapshot) })
     : null;
   const accountMailbox = new AccountMailbox({
     pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
@@ -649,6 +643,7 @@ export function createServer(
       services.runtimeMove?.stop();
       accountMailbox.stop();
       accountRows?.stop();
+      accountCatchUp.stop();
       void ovisRelay.shutdown();
       settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });
       core.stop(() => {
