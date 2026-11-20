@@ -93,6 +93,12 @@ test("a record naming another PC is refused before the service is asked", async 
   expect(p.devices.list(null)).toEqual([]);
 });
 
+test("a sign-in whose time is a few seconds ahead of this PC's clock still proves it", async () => {
+  const p = await pc(async () => Response.json({ ...fresh(), signed_in_at: new Date(Date.now() + 20_000).toISOString() }));
+  expect((await p.claim(await p.challenge())).status).toBe(200);
+  expect(p.devices.list(null)).toHaveLength(1);
+});
+
 for (const reason of ["false", "other account", "old", "future", "malformed", "401", "404", "network", "timeout"] as const) test(`session proof fails closed: ${reason}`, async () => {
   const p = await pc(async req => {
     if (reason === "network") throw new TypeError("unreachable");
@@ -100,7 +106,7 @@ for (const reason of ["false", "other account", "old", "future", "malformed", "4
     if (reason === "401" || reason === "404") return new Response(null, { status: Number(reason) });
     const proof = fresh();
     return Response.json({ ...proof, ...(reason === "false" ? { own_sign_in: false } : reason === "other account" ? { account: "other" }
-      : { signed_in_at: reason === "malformed" ? null : new Date(Date.now() + (reason === "old" ? -600_001 : 60_000)).toISOString() }) });
+      : { signed_in_at: reason === "malformed" ? null : new Date(Date.now() + (reason === "old" ? -600_001 : 5 * 60_000)).toISOString() }) });
   });
   const nonce = await p.challenge();
   await refused(await p.claim(nonce), 403, "own_sign_in_required");

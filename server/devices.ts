@@ -2366,10 +2366,12 @@ export class DeviceStore {
   enrollFirstMember(member: { id: string; key: string; account: string; label: string }): DeviceMatch | null {
     if (this.opensAll() || this.error || this.accountError || this.devices.length !== 0 || this.isTombstoned(member.key)) return null;
     // The flag-on journal implies companion safety files. Keep the same audit format without manufacturing that state.
+    const device = this.enrollRelay(member.label, member.key, Date.now(), false, { pairingHere: true, account: member.account }, member.id)?.device ?? null;
+    if (device === null) return null;
     const journal = DeviceJournal.open(dirname(this.path), undefined, "first-member-journal.json");
     journal.append({ kind: "account", how: "first member added on this PC", key: member.key, row: member.id,
       label: normalizeLabel(member.label, "Device"), account: member.account, by: null, no: null });
-    return this.enrollRelay(member.label, member.key, Date.now(), false, { pairingHere: true, account: member.account }, member.id)?.device ?? null;
+    return device;
   }
 
   private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere, account }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean; account?: string }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {

@@ -507,7 +507,11 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
    */
   const finish = async (enrollment: FirstEnrollment): Promise<AddThisPcState> => {
     try { await enrollment.finish(); }
-    catch { return { kind: "unfinished", enrollment }; }
+    catch (error) {
+      // another sign-in, or a cancelled attempt: the offer again, not a retry that cannot succeed
+      if (error instanceof AddPcWaitOver) return { kind: "offer" };
+      return { kind: "unfinished", enrollment };
+    }
     onListed?.();
     return joinedAs(enrollment.account, false);
   };

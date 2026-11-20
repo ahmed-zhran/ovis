@@ -204,7 +204,6 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       const undecided = results.some((result) => result.outcome === "refused" && result.code === "account_unavailable");
       if (last !== false && !undecided && linker) {
         // the hand-over is journalled before the barrier ends: a journal that cannot be written keeps it (T14)
-        if (peer.kind !== "relay" && !localEnroller(context.services, request.headers.get("x-ovis-first-enroll"))) return fail("account_required", "The first member is no longer enrolling", 403);
         devices.journalEvent({ kind: "account", how: "enrolled", key: member.key, no: null, row: member.device.id, label: member.device.label, by: null, account: body.account });
         holds.endEnrolling();
         await mailbox.settle();

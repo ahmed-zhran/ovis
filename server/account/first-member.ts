@@ -48,8 +48,9 @@ async function provesOwnSignIn(services: RequestServices, account: string, token
     if (!response.ok) return false;
     const proof: unknown = await response.json();
     if (!isJsonObject(proof) || proof.account !== account || proof.own_sign_in !== true || !isIsoTime(proof.signed_in_at)) return false;
+    // a minute of clock difference between this PC and the account service either way, as a laptop just woken can have
     const age = Date.now() - Date.parse(proof.signed_in_at);
-    return age >= 0 && age <= 600_000;
+    return age >= -60_000 && age <= 600_000;
   } catch {
     // The upstream error may carry the credential. Nothing from it is returned, logged or retried.
     return false;
