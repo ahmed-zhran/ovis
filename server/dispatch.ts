@@ -7,11 +7,11 @@ import type { RequestLog } from "./request-log.ts";
 import { handlePaneRequest } from "./pane-routes.ts";
 import { handleIntegrationsRequest } from "./integrations-routes.ts";
 import type { OrderSequence } from "./order-sequence.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, ObservedIngress, PendingRedemptionsEvent, RelayPairingsEvent, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
+import type { HealthAuth, ObservedIngress, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { authClient, deviceAuthorizationValue, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { bindScope, cameThroughProxy, decideAccess, decideMachineAccess, forwardingHeaders, inTailnet, isLoopbackAddress, isServeOwnerRequest, lanExposed, machineForwardingHeaders, observedIngress, ownerAccess } from "./access.ts";
-import { type DeviceStore, handleDeviceRequest, newStreamKey, sameBrowser, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
+import { type DeviceStore, handleDeviceRequest, newStreamKey, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
 import { remoteAccess } from "./tailscale.ts";
@@ -68,6 +68,7 @@ import { BRIDGE_PROTOCOL } from "../shared/machines.ts";
 import { bridgeIdentity } from "./bridge.ts";
 import { discoverHerdrSessions } from "./herdr-discovery.ts";
 import { handleMachineRequest, nonCanonicalPath, slowMachinePath, type EventStreamBudget } from "./machine-api.ts";
+import { machinePairingEvents } from "./machine-pairing-events.ts";
 import { handleSessionHistoryRequest, handleSessionResumeRequest, SESSION_HISTORY_PATH, SESSION_RESUME_PATH } from "./session-history-routes.ts";
 import type { PiSessionReader } from "./pi-session-metadata.ts";
 import type { HerdrSidebarConfig } from "./herdr-sidebar.ts";
@@ -448,37 +449,12 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       const machinePathAsked = pathname.split("/").slice(4).join("/");
       ctx.timeout(request, pathname === "/api/machines/events" ? 0 : machinePathAsked === "runtime/move/install" ? 210 : slowMachinePath(machinePathAsked) || pathname === "/api/machines/relay/account/pair" ? 180 : 80);
       const deviceId = access.level === "full" ? access.device?.id : undefined;
-      // a device's enrollment is news to every stream but the new device's own: one the stream's
-      // device cookie names, or one this browser asked for itself (its stream key, server/devices.ts),
-      // which a stream opened before that device existed cannot know by its cookie. A browser
-      // without a key gets one with this stream; a key is a cookie of its own name, so tabs that
-      // open at once each add theirs and the pairing later carries all of them
+      // Tabs opening at once each get a cookie of their own name; a later pairing carries all of them.
       const presentedKeys = streamKeys(request);
       const issuedKey = presentedKeys.length === 0 && pathname === "/api/machines/events" ? newStreamKey() : null;
       const keys = issuedKey === null ? presentedKeys : [issuedKey];
-      // a stream that came in through the open LAN is told nothing: every enrollment follows the write
-      // that closed the gate, which ends the stream (endWithGate below), so whoever held it has no access left
-      // by the time there is news
       const openAccess = access.level === "full" && access.via === "open";
-      // a relay pairing waiting for approval reaches only a window that may approve it (server/relay/routes.ts):
-      // driving, direct to this PC, and not a Portal visitor
-      const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
-      // and through the relay to a drive account member, with three candidates instead of the digits (docs/account.md)
-      const remoteApprover = ctx.peer.kind === "relay" && devices.isAccountApproverSession(ctx.peer.device.id, ctx.peer.key);
-      const pairings = { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent | PendingRedemptionsEvent) => void) => {
-        const stopPaired = devices.onPaired((event, origin) => { if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); });
-        // removals go to streams that may drive, as the client lane's device list needs (docs/account.md)
-        const stopRemoved = !openAccess && access.level === "full" && access.role === "drive" ? devices.onRemoved(listener) : undefined;
-        // a window that may not approve is told the list is empty, so one that lost the right (drive to watch) drops its prompts
-        const stopRelay = approver ? ctx.services.relay.approvals.subscribe((list) => listener({ type: "relay-pairings", pairings: list }))
-          : remoteApprover ? ctx.services.relay.approvals.subscribeRemote((list) => listener({ type: "remote-pairings", pairings: list })) : undefined;
-        if (!approver) listener({ type: "relay-pairings", pairings: [] });
-        // the devices waiting for this PC's screen, to streams that may drive; approving stays on the screen
-        const pending = ctx.services.pendingRedemptions;
-        const stopPending = pending !== undefined && !openAccess && access.level === "full" && access.role === "drive"
-          ? pending.onChange(() => listener({ type: "pending-redemptions", pending: pending.view() })) : undefined;
-        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); stopPending?.(); };
-      } };
+      const pairings = machinePairingEvents(ctx, access, keys);
       // a stream ends with what let it in: a device's revoke, the gate closing on one the open LAN let in, Portal's recheck
       const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : openAccess ? (close) => devices.endWithGate(close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, ownerAccess(access));
       response.headers.set("cache-control", "no-store");
@@ -522,23 +498,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     const keys = issuedKey === null ? presentedKeys : [issuedKey];
     if (issuedKey !== null) headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
     const openAccess = access.level === "full" && access.via === "open";
-    // relay pairings waiting for approval reach only a window that may approve one, as on /api/machines/events
-    const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
     const machineEvents = useMachineEvents ? {
       manager: machines, preferences, herdrSidebar, seen,
-      pairings: { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void) => {
-        const stopPaired = devices.onPaired((event, origin) => {
-          if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event);
-        });
-        const stopRemoved = !openAccess && access.level === "full" && access.role === "drive" ? devices.onRemoved(listener) : undefined;
-        // and through the relay to a drive account member holding its row's current key, as on /api/machines/events
-        const remoteApprover = ctx.peer.kind === "relay" && devices.isAccountApproverSession(ctx.peer.device.id, ctx.peer.key);
-        // a window that may not approve is told the list is empty, so one that lost the right (drive to watch) drops its prompts
-        const stopRelay = approver ? ctx.services.relay.approvals.subscribe((list) => listener({ type: "relay-pairings", pairings: list }))
-          : remoteApprover ? ctx.services.relay.approvals.subscribeRemote((list) => listener({ type: "remote-pairings", pairings: list })) : undefined;
-        if (!approver) listener({ type: "relay-pairings", pairings: [] });
-        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
-      } },
+      pairings: machinePairingEvents(ctx, access, keys),
     } : undefined;
     const upgraded = ctx.upgrade(request, { headers, data: connectionData({ machineEvents, deviceId, readOnly, ...(openAccess && !bridgeAuthorized ? { open: true } : {}), bridge: bridgeAuthorized, ...(surface ? { surface } : {}), ...(ingress === undefined ? {} : { ingress }), ...recheck }) });
     if (upgraded) return undefined;
