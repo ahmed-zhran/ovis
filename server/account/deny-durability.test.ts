@@ -190,7 +190,7 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
     devices.match(cookie.token);
     const told: string[] = [];
-    devices.onRemoved((event) => told.push(event.id));
+    devices.onRemoved((event) => told.push(JSON.stringify(event)));
     const rename = privateStateFs.renameSync;
     privateStateFs.renameSync = (from, to) => {
       if (to === join(at, "devices.json")) throw new Error("simulated EIO");

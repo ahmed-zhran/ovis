@@ -658,7 +658,7 @@ export class DeviceStore {
 
   /** A row whose key was removed at or after the row was made: revoked, whether or not its own write happened yet. */
   private stale(device: StoredDevice): boolean {
-    if (this.unsavedRows.has(device.id) || (device.relay_public_key !== undefined && this.failedDenies.has(device.relay_public_key))) return true;
+    if (this.failedRows.has(device.id) || (device.relay_public_key !== undefined && this.failedDenies.has(device.relay_public_key))) return true;
     // main's own rule stays the floor under the evidence: a tombstone of this PC keeps its key out, whatever path took
     // the evidence in or skipped it (P13, rule 1)
     const tombstoned = device.relay_public_key !== undefined
@@ -1746,7 +1746,7 @@ export class DeviceStore {
       this.pc?.raiseGen();
       // only the deny of the very key that failed ends its closing, and never while a Revoke all is unfinished on disk
       for (const key of keys) this.failedDenies.delete(key);
-      if (this.failedDenies.size === 0 && !existsSync(this.revokeAllPath)) this.denyProblem = null;
+      this.settleDenies();
       return null;
     } catch (error) {
       const failed = error instanceof Error ? error : new Error(String(error));
@@ -1759,9 +1759,21 @@ export class DeviceStore {
   /** Keys whose deny could not be written this run: their rows stay on disk, out of every session here (P8). */
   private readonly failedDenies = new Set<string>();
 
-  /** A deny that did not land: its rows' sessions end and the rows are out for this run; nothing is written (P8). */
-  private keepOut(rows: readonly StoredDevice[]): void {
+  /** Rows, keyed or not (cookie rows), whose removal was not written this run: out until their own removal lands (P8). */
+  private readonly failedRows = new Set<string>();
+
+  /** The PC opens again only when no failed key, no failed row and no unfinished Revoke all is left (P8, S19). */
+  private settleDenies(): void {
+    if (this.failedDenies.size === 0 && this.failedRows.size === 0 && !existsSync(this.revokeAllPath)) this.denyProblem = null;
+  }
+
+  /**
+   * A deny that did not land: its rows' sessions end and the rows are out for this run; nothing is written (P8). An
+   * account removal's rows are kept out by their key (failedDenies) alone, since which rows it covers is not known.
+   */
+  private keepOut(rows: readonly StoredDevice[], byRow = true): void {
     for (const device of rows) {
+      if (byRow) this.failedRows.add(device.id);
       const listeners = this.revocations.get(device.id);
       this.revocations.delete(device.id);
       for (const close of listeners ?? []) close();
@@ -1786,21 +1798,16 @@ export class DeviceStore {
     }
     // the registry write is these rows' own deny when they hold no key (cookie rows): one that fails keeps them out for
     // this run and the PC closed until a write lands (P8, S19); a removal is told once the write is tried (P8 step 5)
-    try {
-      this.save(next, gate);
-      this.unsavedRows.clear();
-      if (this.failedDenies.size === 0 && !existsSync(this.revokeAllPath)) this.denyProblem = null;
-    } catch (error) {
-      for (const device of gone) this.unsavedRows.add(device.id);
+    try { this.save(next, gate); } catch (error) {
+      for (const device of gone) this.failedRows.add(device.id);
       this.denyProblem = `A removal could not be written (${error instanceof Error ? error.message : String(error)}): only this PC itself gets in until one is.`;
       throw error;
-    } finally {
-      for (const device of gone) this.announceRemoval(device, by);
     }
+    // the removal is on disk: those rows' own failures end, and only now is it told (P8 step 5)
+    for (const device of gone) this.failedRows.delete(device.id);
+    this.settleDenies();
+    for (const device of gone) this.announceRemoval(device, by);
   }
-
-  /** Rows a removal took out of memory whose registry write failed this run: still out until one lands (P8). */
-  private readonly unsavedRows = new Set<string>();
 
   /**
    * Revoke all in P8's order: `revoke-all.json` first, then the gate, the codes, the candidates and every row out of
@@ -1981,7 +1988,7 @@ export class DeviceStore {
       });
       this.dropWaiting([key]);
       // with no deny on disk the evidence cannot say which rows it covers: every row of the key goes for this run
-      if (denied !== null) { this.keepOut(this.devices.filter((d) => d.relay_public_key === key)); throw denied; }
+      if (denied !== null) { this.keepOut(this.devices.filter((d) => d.relay_public_key === key), false); throw denied; }
       const gone = this.devices.filter((d) => d.relay_public_key === key && this.coveredByEvidence(d));
       this.drop(gone, record.by);
       return added || gone.length > 0;
