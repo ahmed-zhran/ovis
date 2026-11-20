@@ -268,7 +268,7 @@ export class SafetyLog {
    * Appends one record with the next number, on disk before it counts. A record this log already holds answers its
    * receipt and appends nothing; another record under a known id is refused, and the log keeps what it holds.
    */
-  /** Hears every lift once it is on disk: the key the block it ends kept out, and why it was lifted (seam for S2-27). */
+  /** Hears a durable lift with its block or freeze target and cause (seam for S2-27). */
   onLifted(listener: (target: string, cause: LiftCause) => void): () => void {
     this.liftListeners.add(listener);
     return () => { this.liftListeners.delete(listener); };
@@ -296,8 +296,10 @@ export class SafetyLog {
     this.file = next;
     this.inForce = this.state();
     if (record.kind === "lift" && cause !== undefined) {
-      const block = this.file.entries.find((held) => held.record.kind === "block" && held.record.id === record.target);
-      const target = block?.record.kind === "block" ? block.record.target : null;
+      const held = this.file.entries.filter(({ record: candidate }) => candidate.account === record.account);
+      const block = held.find(({ record: candidate }) => candidate.kind === "block" && candidate.id === record.target);
+      const freeze = held.find(({ record: candidate }) => candidate.kind === "freeze" && candidate.id === `f:${record.target}`);
+      const target = block?.record.target ?? freeze?.record.target ?? null;
       if (target !== null) for (const listener of [...this.liftListeners]) {
         try { listener(target, cause); } catch (error) { console.warn(`[account] a lift listener failed: ${error instanceof Error ? error.message : String(error)}`); }
       }
