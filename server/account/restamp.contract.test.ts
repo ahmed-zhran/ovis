@@ -289,8 +289,10 @@ posix.each([false, true])("r1 HIGH 3: stale two-folder plan rolls back; interrup
   const [active, sibling] = [dir(), dir()];
   const first = row();
   const k = key();
-  for (const folder of [active, sibling]) registry(folder, first);
-  tombstones(active, tomb(k, REVOKED));
+  for (const folder of [active, sibling]) {
+    registry(folder, first);
+    tombstones(folder, tomb(k, REVOKED));
+  }
   const closed = start(active, sibling);
   await queue(active);
   closed.stop();
@@ -311,6 +313,7 @@ posix.each([false, true])("r1 HIGH 3: stale two-folder plan rolls back; interrup
   }
   const refused = start(active, sibling);
   expect(refused.devices.failsClosed).toBe(true);
+  expect(refused.devices.accountError).toContain("A time from elsewhere changed");
   expect(registered(active)[0]?.created_at).toBe(FUTURE);
   expect(bytes(active, "account-tombstones.json")).toContain(REVOKED);
   expect(registered(sibling)[0]?.created_at).toBe(FUTURE);
@@ -449,13 +452,12 @@ posix("r1 MEDIUM: the startup plan is read before the sibling identity and relay
   const closed = start(active, sibling);
   await queue(active);
   closed.stop();
-  const realRead = fs.readFileSync;
-  const reads: string[] = [];
-  const watch = spyOn(fs, "readFileSync").mockImplementation((...args: Parameters<typeof fs.readFileSync>) => {
-    if (typeof args[0] === "string") reads.push(args[0]);
-    return realRead(...args);
-  });
-  try { start(active, sibling); } finally { watch.mockRestore(); }
+  const watch = spyOn(fs, "readFileSync");
+  let reads: unknown[];
+  try {
+    start(active, sibling);
+    reads = watch.mock.calls.map(([path]) => path);
+  } finally { watch.mockRestore(); }
   const plan = reads.indexOf(join(active, "restamp.json"));
   const identity = reads.indexOf(join(sibling, "relay", "identity.json"));
   const relay = reads.indexOf(join(active, "relay", "pairing-window.json"));

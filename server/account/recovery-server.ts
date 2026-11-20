@@ -1,13 +1,12 @@
 import { userInfo } from "node:os";
 import type { RecoveryStanding } from "../../shared/account-devices-api.ts";
 import type { DeviceStore } from "../devices.ts";
-import { DeviceJournal } from "./device-journal.ts";
+import type { DeviceJournal } from "./device-journal.ts";
 import type { KeyProofPairings } from "./key-proof.ts";
 import type { PcAccountState } from "./pc-binding.ts";
 import type { PendingRedemptions } from "./pending.ts";
 import { recoveryActs, type RecoverySeams } from "./recovery-acts.ts";
 import { openRecoverySocket, type RecoveryReleases } from "./recovery.ts";
-import { RemovalEvidence } from "./removal-evidence.ts";
 import { pcRecordId, SafetyLog } from "./safety-log.ts";
 import { restampAct } from "./restamp.ts";
 
@@ -34,14 +33,7 @@ export function openPcRecovery(options: {
     restamp: restampAct({
       stateDir, sibling: options.sibling, journal,
       install: process.env["OVIS_DESKTOP_APP"] === "1" ? "desktop" : process.env["HERDR_PLUGIN_ROOT"] ? "plugin" : "other",
-      problem: () => {
-        const refused = devices.restampRefusal(options.retryRestamp === true) ?? SafetyLog.open(stateDir).strict;
-        if (refused !== null) return refused;
-        const evidence = RemovalEvidence.open(stateDir, safetyLog);
-        const current = DeviceJournal.open(stateDir);
-        current.checkRowReceipts(evidence.rowDrops);
-        return evidence.strict ?? current.strict;
-      },
+      problem: () => devices.restampRefusal(options.retryRestamp === true),
     }),
     pendingList: () => (pending?.list() ?? []).map(({ id, label, fingerprint }) => ({ id, label, fingerprint })),
     standing,

@@ -323,9 +323,9 @@ export function isDeviceRole(value: unknown): value is DeviceRole {
  */
 export type DeviceRegistry = { kind: "missing" } | { kind: "ok"; gateClosedAt: string | null; devices: StoredDevice[]; placeholder: boolean } | { kind: "bad" };
 
-export function readDeviceRegistry(path: string, opensAll = accountOpensAll()): DeviceRegistry {
+export function readDeviceRegistry(path: string, opensAll = accountOpensAll(), repair = true): DeviceRegistry {
   // one another account could write is as unreadable as a damaged one: the gate stays closed
-  const refused = privateStateRefusal(path);
+  const refused = privateStateRefusal(path, undefined, undefined, repair);
   if (refused !== null) {
     console.error(`devices.json is not trusted: ${refused}`);
     return { kind: "bad" };
@@ -572,7 +572,7 @@ export class DeviceStore {
   private waitingForListedRestore = false;
   private futureProblem: string | null = null;
   private readonly restampProblem: string | null;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean; restampProblem?: string | undefined } = {}) {
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean; restampProblem?: string | undefined; restampRetry?: boolean } = {}) {
     this.joinedRows = typeof account.joinedRows === "function" ? account.joinedRows(this) : account.joinedRows ?? null;
     this.safety = account.safety ?? null;
     this.handedLifts = new HandedLifts(stateDir);
@@ -599,7 +599,7 @@ export class DeviceStore {
       this.accountProblem = `Cannot read ${this.tombstonePath}: account records are refused until it is restored or fixed.`;
       this.tombstones = pending;
     } else this.tombstones = [...tombstones, ...pending.filter((t) => !tombstones.some((own) => own.key === t.key))];
-    const read = readDeviceRegistry(this.path, this.opensAll());
+    const read = readDeviceRegistry(this.path, this.opensAll(), this.restampProblem === null);
     if (read.kind === "ok") {
       this.gateClosedAt = read.gateClosedAt;
       this.devices = read.devices;
@@ -617,7 +617,14 @@ export class DeviceStore {
     // a Revoke all that stopped half way is finished before anything is served, whatever else could not be read (P8, T41)
     this.revokeAllIntent = this.evidence === null ? null : new RevokeAllIntent(stateDir, this.revokeAllRows());
     if (this.evidence) this.journal?.checkRowReceipts(this.evidence.rowDrops);
-    if (this.restampProblem !== null) return;
+    if (this.restampProblem !== null) {
+      // A sibling that finished rolling back may not yet have its own journal companions.
+      if (account.restampRetry && this.restampRefusal(true) === null) {
+        this.migrate();
+        this.prepareRestampAudit();
+      }
+      return;
+    }
     if (this.journal?.strict || this.evidence?.strict) return;
     // an account registry that will not read is not empty: every intent stays and nothing is written until it reads
     if (this.joinedRows?.blocked()) return;
@@ -673,14 +680,18 @@ export class DeviceStore {
     if (this.futureProblem !== null && this.restampRefusal(false) === null) {
       // Normally replay makes the journal's companions. A clock-blocked startup skips replay, but the first
       // restamp audit still needs both companions to exist before the recovery socket can take a request.
-      this.evidence?.recover(() => {
-        this.evidence?.ensureFile();
-        this.safety?.ensureFile();
-      });
+      this.prepareRestampAudit();
     }
     if (this.error === null && this.accountError === null) this.applyWaitingBlocks();
     // evidence on disk at start counts as written, also for a PC that wrote it before this mark existed (S19)
     if (this.error === null && this.evidence?.onDisk === true && this.evidence.strict === null) this.pc?.noteEvidenceWritten();
+  }
+
+  private prepareRestampAudit(): void {
+    this.evidence?.recover(() => {
+      this.evidence?.ensureFile();
+      this.safety?.ensureFile();
+    });
   }
 
   /**

@@ -1,5 +1,5 @@
 /** Read the restamp inputs without opening stores or running their repair and merge paths. */
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isIsoTime } from "../../shared/account-records.ts";
 import { parseAccountDevicesFile } from "../../shared/account-snapshot.ts";
@@ -8,25 +8,34 @@ import { isJsonObject } from "../http.ts";
 import { privateStateRefusal } from "../private-state.ts";
 import { ACCOUNT_DEVICES_FILE } from "./account-devices.ts";
 import { ADMISSION_FILE } from "./admission-order.ts";
+import { restampJournalProblem } from "./device-journal.ts";
 import { parsePcAccount } from "./pc-binding.ts";
-import { localRevokeId, parseEvidence, REMOVAL_FILE } from "./removal-evidence.ts";
+import { localRevokeId, parseEvidence, REMOVAL_FILE, type Unrevoke } from "./removal-evidence.ts";
 import { DEVICE_JOURNAL_FILE, parseLog, SAFETY_LOG_FILE } from "./safety-log.ts";
 
 export type RestampField = "created_at" | "confirmed_at" | "removed_at" | "at";
 export type RestampAddress = { readonly store: string; readonly ref: string; readonly field: RestampField };
 export type RestampMove = RestampAddress & { readonly old: string; readonly new: string };
+export type RestampLink = { readonly store: string; readonly ref: string; readonly old: string; readonly new: string };
 export type RestampFolders = { readonly stateDir: string; readonly sibling?: string | null | undefined };
 type Doc = Record<string, unknown>;
 type Slot = RestampAddress & { readonly value: string; readonly row: Doc };
 
 export function readRestampJson(path: string): unknown {
-  const refused = privateStateRefusal(path);
-  if (refused !== null) throw new Error(refused);
+  checkRestampFile(path);
   try { return JSON.parse(readFileSync(path, "utf8")); }
   catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
     throw new Error(`Cannot read ${path}`, { cause: error });
   }
+}
+
+/** Restamp trusts the file as found. In particular, never soften the safety log's or ledger's write-mode rule. */
+export function checkRestampFile(path: string): void {
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat && (!stat.isFile() || (stat.mode & 0o022) !== 0)) throw new Error(`${path} is not a private regular file`);
+  const refused = privateStateRefusal(path, undefined, undefined, false);
+  if (refused !== null) throw new Error(refused);
 }
 
 export function restampAddress({ store, ref, field }: RestampAddress): string {
@@ -38,6 +47,9 @@ export function readRestampState(folders: RestampFolders) {
   const docs = new Map<string, { path: string; doc: Doc }>();
   const revokes = new Set<Slot>();
   const localTombstones = new Set<Slot>();
+  const unrevokes = new Map<string, readonly Unrevoke[]>();
+  const bindings: Exclude<ReturnType<typeof parsePcAccount>, string>[] = [];
+  const journals = new Map<string, unknown>();
   let nonOwn = -Infinity;
   const floor = (value: string) => {
     if (!isIsoTime(value)) throw new Error(`A timestamp from elsewhere is not ISO: ${value}`);
@@ -77,12 +89,15 @@ export function readRestampState(folders: RestampFolders) {
     // Sibling merges share the ordinary registry and evidence; their old copies must not be imported again.
     const store = prefix + "devices.json";
     const devices = read(dir, store, "devices.json");
-    const hasJournal = existsSync(join(dir, DEVICE_JOURNAL_FILE));
+    const journal = readRestampJson(join(dir, DEVICE_JOURNAL_FILE));
+    journals.set(dir, journal);
+    const hasJournal = journal !== undefined;
     const binding = readRestampJson(join(dir, ADMISSION_FILE));
     const pc = binding === undefined ? null : parsePcAccount(binding);
     if (typeof pc === "string" || (pc === null && hasJournal)) throw new Error(`Cannot read ${prefix}${ADMISSION_FILE}`);
+    if (pc) bindings.push(pc);
     if (devices !== undefined) {
-      const registry = readDeviceRegistry(join(dir, "devices.json"), true);
+      const registry = readDeviceRegistry(join(dir, "devices.json"), true, false);
       if (registry.kind !== "ok") throw new Error(`Cannot read ${store}`);
       if (registry.devices.some(row => row.origin && row.origin.from !== "legacy" && (!pc || row.origin.admit_no >= pc.next_admit))) {
         throw new Error(`${prefix}${ADMISSION_FILE} does not account for its numbered rows`);
@@ -109,11 +124,14 @@ export function readRestampState(folders: RestampFolders) {
     const removalStore = prefix + REMOVAL_FILE;
     const evidence = read(dir, removalStore, REMOVAL_FILE);
     if (evidence === undefined && (hasJournal || pc?.evidence_written)) throw new Error(`${removalStore} is missing`);
-    if (evidence !== undefined) {
-      const parsed = parseEvidence(evidence);
-      if (parsed === null) throw new Error(`Cannot read ${removalStore}`);
+    const parsed = evidence === undefined ? undefined : parseEvidence(evidence);
+    if (parsed === null) throw new Error(`Cannot read ${removalStore}`);
+    const journalError = restampJournalProblem(journal, parsed?.row_drops ?? []);
+    if (journalError !== null) throw new Error(`${prefix}${DEVICE_JOURNAL_FILE} ${journalError}`);
+    if (evidence !== undefined && parsed !== undefined) {
       // paired_over holds IDs of these marker removals, never independent timestamps.
       for (const marker of parsed.markers) for (const removal of marker.removals) floor(removal.at);
+      unrevokes.set(removalStore, parsed.unrevokes);
       // The Revoke ID changes with its at; key, account and file position do not.
       rows(evidence.revokes, (row, index) => { revokes.add(slot(removalStore, JSON.stringify([row.key, row.account, index]), "at", row)); });
       rows(evidence.unrevokes, (row) => slot(removalStore, String(row.id), "at", row));
@@ -129,14 +147,17 @@ export function readRestampState(folders: RestampFolders) {
         // Startup replays standing signed Blocks into removal markers if their marker did not reach disk.
         if (entry.record.kind === "block") floor(entry.record.signed_at);
       }
+      for (const { record } of parsed.waiting) floor(record.signed_at);
     }
   }
-  return { own, nonOwn, docs, revokes, localTombstones };
+  const cleared = new Set(bindings.flatMap(pc => pc.clears.map(clear => clear.bind_id)));
+  const standing = bindings.flatMap(({ binding }) => binding && !binding.pending && !cleared.has(binding.bind_id) ? [binding.account] : []);
+  if (new Set(standing).size > 1) throw new Error("The two folders bind this PC to two accounts");
+  return { own, nonOwn, docs, revokes, localTombstones, unrevokes, journals };
 }
 
-/** Build replacements in memory so a collision or an invalid derived ID cannot leave partial writes. */
-export function rewriteRestamp(state: ReturnType<typeof readRestampState>, mapping: readonly RestampMove[]) {
-  const changed = new Set<string>();
+/** A definition (or its local tombstone) has one derived ID before and after the timestamp move. */
+function revokeMoves(state: ReturnType<typeof readRestampState>, mapping: readonly RestampMove[], rollback: boolean) {
   const moveBySlot = new Map(mapping.map((move) => [restampAddress(move), move]));
   const ids = new Map<string, { old: string; next: string }>();
   const oldByNew = new Map<string, string>();
@@ -152,34 +173,62 @@ export function rewriteRestamp(state: ReturnType<typeof readRestampState>, mappi
     if (!move) continue;
     const old = localRevokeId(key, account ?? "", move.old);
     const next = localRevokeId(key, account ?? "", move.new);
+    if (slot.value !== move.old && slot.value !== move.new && rollback) continue;
     if (id !== (slot.value === move.old ? old : next)) throw new Error("A Revoke does not have its derived ID");
     if (old === next || (oldByNew.has(next) && oldByNew.get(next) !== old)) throw new Error("A restamped Revoke ID would collide");
     oldByNew.set(next, old);
     ids.set(restampAddress(slot), { old, next });
   }
-  for (const { old, next } of ids.values()) {
+  if (!rollback) for (const { old, next } of ids.values()) {
     if (occupied.get(next)?.some((slot) => ids.get(restampAddress(slot))?.old !== old) ||
       occupied.get(old)?.some((slot) => ids.get(restampAddress(slot))?.next !== next)) throw new Error("A restamped Revoke ID would collide");
   }
+  return { ids, oldByNew };
+}
+
+/** Reserve dangling Unrevoke targets too. Only references actually recorded in the plan may be replayed. */
+export function restampLinks(state: ReturnType<typeof readRestampState>, mapping: readonly RestampMove[], approved?: readonly RestampLink[]): RestampLink[] {
+  const { oldByNew } = revokeMoves(state, mapping, false);
   const nextByOld = new Map([...oldByNew].map(([next, old]) => [old, next]));
+  const links: RestampLink[] = [];
+  for (const [store, rows] of state.unrevokes) for (const row of rows) {
+    const link = approved?.find(entry => entry.store === store && entry.ref === row.id);
+    if (link) {
+      if (nextByOld.get(link.old) !== link.new || (row.revoke !== link.old && row.revoke !== link.new)) {
+        throw new Error("An Unrevoke reference changed since restamp was queued");
+      }
+      links.push(link);
+      continue;
+    }
+    if (oldByNew.has(row.revoke)) throw new Error("A restamped Revoke ID would collide with an Unrevoke reference");
+    const next = nextByOld.get(row.revoke);
+    if (next !== undefined) links.push({ store, ref: row.id, old: row.revoke, new: next });
+  }
+  return links;
+}
+
+/** Prepare a whole generation before the first replacement. A rollback only reverses fields this plan names. */
+export function rewriteRestamp(state: ReturnType<typeof readRestampState>, mapping: readonly RestampMove[], links: readonly RestampLink[], rollback = false) {
+  const changed = new Set<string>();
+  const { ids } = revokeMoves(state, mapping, rollback);
   for (const move of mapping) {
     const address = restampAddress(move);
     const slot = state.own.get(address);
-    if (!slot) throw new Error("A restamp timestamp does not name an own time");
-    if (slot.value === move.old) {
+    if (!slot && !rollback) throw new Error("A restamp timestamp does not name an own time");
+    if (slot?.value === (rollback ? move.new : move.old)) {
       const id = ids.get(address);
-      if (id && state.revokes.has(slot)) slot.row.id = id.next;
-      slot.row[slot.field] = move.new;
+      if (id && state.revokes.has(slot)) slot.row.id = rollback ? id.old : id.next;
+      slot.row[slot.field] = rollback ? move.old : move.new;
       changed.add(slot.store);
     }
   }
   for (const [store, { doc }] of state.docs) {
     if (!store.endsWith(REMOVAL_FILE) || !Array.isArray(doc.unrevokes)) continue;
     for (const row of doc.unrevokes) {
-      if (!isJsonObject(row) || typeof row.revoke !== "string") continue;
-      const next = nextByOld.get(row.revoke);
-      if (next !== undefined) {
-        row.revoke = next;
+      if (!isJsonObject(row)) continue;
+      const link = links.find(entry => entry.store === store && entry.ref === row.id);
+      if (link && row.revoke === (rollback ? link.new : link.old)) {
+        row.revoke = rollback ? link.old : link.new;
         changed.add(store);
       }
     }
