@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
+import { privateStateFs } from "../private-state.ts";
 import { bounded, relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { AccountHolds } from "./holds.ts";
@@ -11,7 +12,7 @@ import { AccountMailbox } from "./mailbox.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { applyAccountRecords } from "./records.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
-import { pcRecordId, SafetyLog } from "./safety-log.ts";
+import { pcRecordId, SAFETY_LOG_FILE, SafetyLog, WAITING_MAX } from "./safety-log.ts";
 
 const ACCOUNT = "acct_1";
 const SERVER = "0123456789abcdef0123456789abcdef";
@@ -82,6 +83,54 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     devices.revoke(signer.id);
     expect(mailbox.listHeld(k.spki)).toBe(false);
     expect(mailbox.waitingRemoveKeys()).toEqual([]);
+  });
+
+  test("P19: a waiting block write failure makes the safety log strict", async () => {
+    const { dir, log } = pc();
+    log.ensureFile();
+    const record = await block((await key()).spki, await key());
+    const rename = privateStateFs.renameSync;
+    const eio = new Error("simulated EIO");
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(dir, SAFETY_LOG_FILE)) throw eio;
+      return rename(from, to);
+    };
+    try {
+      log.wait({ record, got: "mailbox", signer_removed: false });
+    } catch (error) {
+      if (error !== eio) throw error;
+    } finally {
+      privateStateFs.renameSync = rename;
+    }
+    expect(log.strict).not.toBeNull();
+  });
+
+  test("T51: a block that finds the waiting queue full fails the PC closed", async () => {
+    const { devices, log } = pc();
+    const signer = await member(devices);
+    const absent = await key();
+    for (let i = 0; i < WAITING_MAX; i += 1) {
+      const record = await block(absent.spki, signer);
+      expect(log.wait({ record, got: "mailbox", signer_removed: false })).toBe(true);
+    }
+    expect(log.waitingBlocks()).toHaveLength(WAITING_MAX);
+    expect(devices.failsClosed).toBe(false);
+
+    await devices.applyBlock(await block(absent.spki, signer), "mailbox");
+    expect(devices.failsClosed).toBe(true);
+  });
+
+  test("T51: a pairing whose row a waiting block removes still spends its code", async () => {
+    const { devices, log } = pc();
+    const signer = await member(devices);
+    const target = await key();
+    const record = await block(target.spki, signer);
+    expect(log.wait({ record, got: "mailbox", signer_removed: false })).toBe(true);
+    const { code } = devices.startPairing();
+
+    expect(devices.pairRelay(code, "Joining", target.spki)).toBeNull();
+    expect(log.receipt(record.id)).toMatchObject({ outcome: "applied" });
+    expect(devices.pairingId()).toBeNull();
   });
 
   test("T51: a queued block rechecks the signer at apply and writes nothing if it was removed", async () => {
