@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -200,5 +200,33 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     expect(told).toEqual([]);
     expect(devices.match(cookie.token)).toBeNull();
     expect(store(at).match(cookie.token)).not.toBeNull();
+  });
+
+  test("P8, T41: a Revoke recovered at start after a stop before its gen was raised raises it then", async () => {
+    const at = dir();
+    const devices = store(at);
+    const id = devices.pairRelay(devices.startPairing().code, "A", await key())!.device.id;
+    const registry = readFileSync(join(at, "devices.json"));
+    const counter = readFileSync(join(at, "account-pc.json"));
+    const before = PcAccountState.open(at).gen();
+    devices.revoke(id);
+    // the stop: the deny is on disk, the gen raise and the registry write are not
+    writeFileSync(join(at, "devices.json"), registry, { mode: 0o600 });
+    writeFileSync(join(at, "account-pc.json"), counter, { mode: 0o600 });
+    store(at);
+    expect(PcAccountState.open(at).gen()).toBeGreaterThan(before);
+  });
+
+  test("P8: a Revoke all that cannot clear the binding says so, not that rows could not be migrated", async () => {
+    const at = dir();
+    const devices = store(at);
+    devices.pairRelay(devices.startPairing().code, "A", await key());
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "devices.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.accountError ?? "").not.toContain("before the upgrade");
   });
 });
