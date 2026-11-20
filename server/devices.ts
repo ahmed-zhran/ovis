@@ -2243,7 +2243,9 @@ export class DeviceStore {
     this.resumeRevokeAll();
     const now = new Date().toISOString();
     const gone = this.devices;
-    const denied = this.deny(() => intent.begin(gone, now));
+    // a registry that will not read may hold listed rows: count it as some, so the intent outlives it
+    const listed = this.joinedRows?.blocked() ? 1 : this.joinedRows?.rows().length ?? 0;
+    const denied = this.deny(() => intent.begin(gone, now, listed));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? now;
     this.devices = [];
     this.gateClosedAt = gate;
@@ -2256,18 +2258,28 @@ export class DeviceStore {
     for (const device of gone) this.announceRemoval(device, "pc");
     for (const device of gone) this.journalRemoval(device, "pc", user === undefined ? undefined : "recover", user);
     if (denied !== null) throw denied;
-    intent.finish(rows => this.finishRevokeAll(rows, gate));
+    intent.finish(rows => this.completeRevokeAll(intent, rows, gate));
     return gone.map((device) => device.id);
   }
 
   private resumeRevokeAll(): void {
-    this.revokeAllIntent?.finish(rows => {
-      this.assertWritable();
-      const blocked = this.joinedRows?.blocked();
-      if (blocked) throw new Error(blocked);
-      if (this.evidence) this.joinedRows?.pruneDenied(this.evidence, "revoke_all");
-      this.finishRevokeAll(rows, this.gateClosedAt ?? new Date().toISOString());
-    });
+    const intent = this.revokeAllIntent;
+    intent?.finish(rows => this.completeRevokeAll(intent, rows, this.gateClosedAt ?? new Date().toISOString()));
+  }
+
+  /**
+   * The one finisher of a Revoke all, new or resumed: only while the listed registry can show every row the intent
+   * covers. One that will not read, or is gone while the intent covered listed rows, keeps the intent (S19, T41).
+   */
+  private completeRevokeAll(intent: RevokeAllIntent, rows: readonly StoredDevice[], gate: string): void {
+    this.assertWritable();
+    const blocked = this.joinedRows?.blocked();
+    if (blocked) throw new Error(blocked);
+    if (intent.listed > 0 && this.joinedRows?.missing()) {
+      throw new Error("account-devices.json is missing while Revoke all covers listed rows: only this PC itself gets in until it is restored.");
+    }
+    if (this.evidence) this.joinedRows?.pruneDenied(this.evidence, "revoke_all");
+    this.finishRevokeAll(rows, gate);
   }
 
   /** The writes of a Revoke all whose file is on disk: its Revokes, the empty registry, the PC's account; then the file goes. */
