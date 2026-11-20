@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -33,6 +33,12 @@ function start(at: string, sibling: string | undefined, accountOpensAll: boolean
   dirs.splice(dirs.indexOf(at), 1);
   return fixture;
 }
+/** Stops a server and keeps its folder, as a restart does. */
+function stop(fixture: ReturnType<typeof relayFixture>, at: string): void {
+  fixture.app.stop();
+  fixtures.splice(fixtures.indexOf(fixture), 1);
+  dirs.push(at);
+}
 
 describe("a row's age is its own folder's word (P21, P22, T50)", () => {
   test("T50: only this folder's rows from before the upgrade are stamped legacy; a sibling's row keeps its own number there and none here", () => {
@@ -43,6 +49,62 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     start(a, b, true);
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ from: "legacy", admit_no: 0 }), bbbbbbbbbbbbbbbb: undefined });
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, bbbbbbbbbbbbbbbb: expect.objectContaining({ from: "remote", admit_no: 1 }) });
+  });
+
+  test("P22: twin rows whose origins disagree keep none in either folder, also when one copy moved its key", () => {
+    const [a, b] = [dir(), dir()];
+    const at = (admit_no: number, how: "code" | "link" = "code") => ({ from: "remote" as const, how, by: null, admit_no, at: AT });
+    writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 9 }), { mode: 0o600 });
+    writeFileSync(join(b, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 9 }), { mode: 0o600 });
+    put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: "key-a", origin: at(1) }), row("cccccccccccccccc", { relay_public_key: "first-key", origin: at(2) })]);
+    put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: "key-a", origin: at(3) }), row("cccccccccccccccc", { relay_public_key: "moved-key", account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true, origin: at(5, "link") })]);
+    start(a, b, true);
+    expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: undefined });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: undefined });
+  });
+
+  test("T50: a row copied into a folder that never started with the flag is no row of its own there at its first start", async () => {
+    const [a, b] = [dir(), dir()];
+    put(a, []);
+    const first = start(a, undefined, true);
+    const devices = first.app.context.services.devices;
+    const key = exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const aLocal = devices.pairRelay(devices.startPairing().code, "A local", await key)!.device.id;
+    stop(first, a);
+    stop(start(a, b, true), a);
+    expect(persisted(b)).toEqual({ [aLocal]: undefined });
+    const second = start(b, a, true).app.context.services.devices;
+    const bKey = exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const bLocal = second.pairRelay(second.startPairing().code, "B local", await bKey)!.device.id;
+    expect(persisted(b)).toEqual({ [aLocal]: undefined, [bLocal]: expect.objectContaining({ from: "remote", admit_no: 1 }) });
+  });
+
+  test("P22: with the release flag off a twin keeps this folder's own origin as main does, never the sibling's", () => {
+    const [a, b] = [dir(), dir()];
+    put(a, [row("aaaaaaaaaaaaaaaa")]);
+    put(b, [row("aaaaaaaaaaaaaaaa", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
+    start(a, b, false);
+    expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
+  });
+
+  test("P21: a folder opened by its real path and through a link to it is one order", () => {
+    const at = dir();
+    const linked = `${at}-link`;
+    symlinkSync(at, linked);
+    dirs.push(linked);
+    expect(AdmissionOrder.open(linked)).toBe(AdmissionOrder.open(at));
+  });
+
+  test("P22: digits approved with no member name the path digits and no approver, whatever code is pending", async () => {
+    const at = dir();
+    const memberKey = exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    put(at, [row("aaaaaaaaaaaaaaaa", { relay_public_key: await memberKey, account: "acct", linked_at: AT })]);
+    const devices = start(at, undefined, true).app.context.services.devices;
+    devices.startPairing(Date.now(), { remote: true, startedBy: "aaaaaaaaaaaaaaaa", memberRequired: true, by: null });
+    const key = exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const id = devices.pairRelayApproved("Digits", await key, { path: "code" })!.device.id;
+    expect(persisted(at)?.[id]).toMatchObject({ how: "digits", by: null });
   });
 
   test("P22: with the release flag off a merge keeps every row's origin as main does, and an unreadable origin is no age, not a bad registry", () => {
