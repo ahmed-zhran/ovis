@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { newRecordId, signAccountRecord } from "../../shared/account-records.ts";
 import { relayDevice } from "../relay/test-helpers.ts";
 import { ACCOUNT, createListedPc } from "./listed-pc.test-helpers.ts";
 import { phone } from "./pairing.test-helpers.ts";
@@ -6,8 +7,8 @@ import { phone } from "./pairing.test-helpers.ts";
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); });
 
-async function recentlyPromoted() {
-  const { fixture, service, member: elder } = await createListedPc(close => closes.push(close));
+async function listedTablet() {
+  const { fixture, service, serverId, member: elder } = await createListedPc(close => closes.push(close));
   const time = { now: Date.now() + 3_600_001 };
   const clock = spyOn(Date, "now").mockImplementation(() => time.now);
   closes.push(() => clock.mockRestore());
@@ -21,17 +22,42 @@ async function recentlyPromoted() {
   if (!notice?.row) throw new Error("Expected the tablet admission");
   const id = notice.row;
   const approve = (addedBy: string) => devices.pairRelayApproved("Tablet", key, { path: "account", addedBy, id });
-  expect(approve(recent.id)?.device.id).toBe(id);
-  expect(devices.sessionRow(id)).toBeNull();
-  time.now++;
-  return { devices, elder, approve, id, key, notice: notice.id };
+  async function signedAdd(member: typeof elder) {
+    const record = await signAccountRecord({ v: 1, kind: "add", account: ACCOUNT, key, signer: member.publicKey,
+      label: "Tablet", role: "drive", issued_at: new Date(time.now).toISOString(), id: newRecordId() }, member.keys.privateKey);
+    expect((await service.fetch(new Request("https://account.test/v1/records", { method: "POST",
+      headers: { authorization: `Bearer ${service.issueToken(ACCOUNT)}` }, body: JSON.stringify({ server_ids: [serverId], record }) }))).ok).toBe(true);
+    await accountMailbox.pull();
+    expect(await accountMailbox.readSnapshot()).toMatchObject({ committed: true });
+  }
+  return { devices, elder, recent, approve, signedAdd, time, id, key, notice: notice.id };
 }
 
-test("H1/T38: an established member's later digits release the same carried hold", async () => {
-  const { devices, elder, approve, id, key, notice } = await recentlyPromoted();
-  expect(approve(elder.id)?.device.id).toBe(id);
+async function recentlyPromoted() {
+  const tablet = await listedTablet();
+  expect(tablet.approve(tablet.recent.id)?.device.id).toBe(tablet.id);
+  expect(tablet.devices.sessionRow(tablet.id)).toBeNull();
+  tablet.time.now++;
+  return tablet;
+}
+
+test.each([
+  ["recent", "signed add"], ["recent", "digits"],
+  ["established", "signed add"], ["established", "digits"],
+] as const)("H1/T38, P15/T57: %s member's %s affects the hold but leaves the notice answerable", async (standing, method) => {
+  const { devices, elder, recent, approve, signedAdd, id, key, notice } =
+    standing === "established" ? await recentlyPromoted() : await listedTablet();
+  const member = standing === "established" ? elder : recent;
+  if (method === "signed add") await signedAdd(member);
+  else expect(approve(member.id)?.device.id).toBe(id);
+  expect(devices.originOf(id)?.how).toBe("promoted");
+  if (standing === "established") expect(devices.sessionRow(id)).toMatchObject({ role: "drive", key });
+  else expect(devices.sessionRow(id)).toBeNull();
+  const replay = () => devices.noticeReplay(elder.id)?.notices.find(n => n.id === notice);
+  expect(replay()?.open).toBe(true);
+  expect(devices.itsMe(elder.id, notice, elder.publicKey)).toBe(true);
+  expect(replay()?.open).toBe(false);
   expect(devices.sessionRow(id)).toMatchObject({ role: "drive", key });
-  expect(devices.openNotices().some(n => n.id === notice)).toBe(true);
 });
 
 test("T38/P22: confirming the promoted key on the PC screen releases its hold", async () => {
