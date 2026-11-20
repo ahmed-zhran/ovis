@@ -130,6 +130,38 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(a)?.[id]).toMatchObject({ how: "link", by: null, admit_no: 2 });
   });
 
+  test("P21: an order file missing or behind this folder's own numbered rows is strict, even when a sibling merge removes those rows", async () => {
+    for (const damage of ["missing", "behind"] as const) {
+      const [a, b] = [dir(), dir()];
+      put(a, []);
+      const first = start(a, undefined, true);
+      const devices = first.app.context.services.devices;
+      const ids: string[] = [];
+      for (let n = 0; n < 3; n++) ids.push(devices.pairRelay(devices.startPairing().code, "Phone", await exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey))!.device.id);
+      stop(first, a);
+      stop(start(a, b, true), a);
+      const there = start(b, undefined, true);
+      for (const id of ids) there.app.context.services.devices.revoke(id);
+      stop(there, b);
+      if (damage === "missing") rmSync(join(a, ADMISSION_FILE));
+      else writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+      expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
+    }
+  });
+
+  test("P22: two folders that each numbered a row 1 keep only their own after a flag-off merge and a flag-on start", () => {
+    const [a, b] = [dir(), dir()];
+    const one = { from: "remote" as const, how: "code" as const, by: null, admit_no: 1, at: AT };
+    for (const [at, id] of [[a, "aaaaaaaaaaaaaaaa"], [b, "bbbbbbbbbbbbbbbb"]] as const) {
+      writeFileSync(join(at, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+      put(at, [row(id, { origin: one })]);
+    }
+    stop(start(a, b, false), a);
+    expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(false);
+    expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ admit_no: 1 }), bbbbbbbbbbbbbbbb: undefined });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, bbbbbbbbbbbbbbbb: expect.objectContaining({ admit_no: 1 }) });
+  });
+
   test("P22: with the release flag off a twin keeps this folder's own origin, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
