@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { exportAccountKey, newRecordId, signSafetyRecord } from "./account-records.ts";
 import {
-  AccountDevicesApiError, accountOpensAll, blockOutcome, parseBlockReceipt, parseNoticeAnswer, parseRecoveryAction, type HoldState, type PcBlockOutcome,
+  AccountDevicesApiError, accountOpensAll, blockOutcome, LINK_REPLACEMENT_OPT_IN, parseBlockReceipt, parseLinkReplacement, REPLACEMENT_NEEDS_APP, parseNoticeAnswer, parseRecoveryAction, type HoldState, type PcBlockOutcome,
 } from "./account-devices-api.ts";
 
 async function key() {
@@ -100,5 +100,19 @@ describe("recovery actions (device table R11)", () => {
       { act: "remove", targets: ["a".repeat(121)] }, { act: "remove", targets: ["a".repeat(65)] }, { act: "remove", targets: ["not_a_row"] }, { act: "remove", targets: ["a".repeat(64)] }, { act: "release", rows: ["not_a_row"] }, { act: "undo", rows: ["ABCDEF0123456789"] },
     ];
     for (const value of bad) expect(() => parseRecoveryAction(value)).toThrow(AccountDevicesApiError);
+  });
+});
+
+describe("a link the PC holds for its screen (P22, T7, T72)", () => {
+  const challenge = "A".repeat(43);
+  test("the opt-in, the code an app without it gets, and the 202 body the app reads", () => {
+    expect(LINK_REPLACEMENT_OPT_IN).toBe(1);
+    expect(REPLACEMENT_NEEDS_APP).toBe("replacement_needs_app");
+    expect(parseLinkReplacement({ challenge, fingerprint: "AB12-CD34" })).toEqual({ challenge, fingerprint: "AB12-CD34" });
+  });
+  test("a challenge that is not 32 base64url bytes, or a fingerprint of another shape, is no replacement", () => {
+    for (const value of [null, {}, { challenge: "short", fingerprint: "AB12-CD34" }, { challenge: `${"A".repeat(42)}=`, fingerprint: "AB12-CD34" }, { challenge, fingerprint: "ab12-cd34" }, { challenge, fingerprint: "AB12-CD34", extra: 1 }]) {
+      expect(parseLinkReplacement(value)).toBeNull();
+    }
   });
 });
