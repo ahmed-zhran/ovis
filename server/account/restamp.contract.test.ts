@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, setSystemTime, spyOn, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
 import { createServer } from "../index.ts";
 import { privateStateFs } from "../private-state.ts";
+import { loadRelayIdentity } from "../relay/identity.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { askRecovery } from "./recovery.ts";
 import { parseEvidence } from "./removal-evidence.ts";
@@ -477,4 +478,157 @@ posix("r1 LOW: confirmation cannot overwrite a newer on-disk journal", async () 
   expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringMatching(/journal/i) });
   expect(bytes(active, "device-journal.json")).toBe(before);
   expect(pending(active)).toBe(false);
+});
+
+posix("r2 H2a: a future own time in the sibling ledger closes admission but permits recovery", async () => {
+  const [active, sibling] = [dir(), dir()];
+  registry(active, row(stamp(-HOUR)));
+  put(sibling, "account-removed.json", { v: 1, markers: [], revokes: [revoke(key(), REVOKED)], unrevokes: [] });
+  const closed = start(active, sibling);
+  expect({ closed: closed.devices.failsClosed, reason: closed.devices.accountError }).toEqual({
+    closed: true, reason: expect.stringMatching(/time.*future/i),
+  });
+  await queue(active);
+});
+
+posix("r2 H2b: the local denial is durable when the second tombstone projection is published", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const paired = row();
+  const k = paired.relay_public_key;
+  registry(active, paired);
+  tombstones(active, tomb(k, REVOKED));
+  tombstones(sibling, tomb(k, stamp(HOUR), "service-removal"));
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  const rename = privateStateFs.renameSync;
+  let durable: boolean | undefined;
+  privateStateFs.renameSync = (from, to) => {
+    rename(from, to);
+    if (to !== join(sibling, "account-tombstones.json") || !bytes(sibling, "account-tombstones.json").includes("service-removal") || durable !== undefined) return;
+    durable = [active, sibling].some(folder =>
+      (existsSync(join(folder, "account-removed.json")) && evidence(folder)?.revokes.some(r => r.key === k)) ||
+      JSON.parse(bytes(folder, "account-tombstones.json")).tombstones.some((t: ReturnType<typeof tomb>) => t.key === k && t.record_id === "local"));
+  };
+  try { start(active, sibling); } finally { privateStateFs.renameSync = rename; }
+  expect(durable).toBe(true);
+});
+
+posix("r2 H3a: a missing participant cannot terminate a partial two-folder rewrite", async () => {
+  const [active, sibling, holding] = [dir(), dir(), dir()];
+  const first = row();
+  const k = key();
+  for (const folder of [active, sibling]) {
+    registry(folder, first);
+    tombstones(folder, tomb(k, REVOKED));
+  }
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  expect(failRename(join(sibling, "account-tombstones.json"), () => start(active, sibling).stop())).toBe(true);
+  expect(registered(sibling)[0]?.created_at).toBe(stamp(1));
+  const moved = join(holding, "missing");
+  renameSync(sibling, moved);
+  try {
+    const unavailable = start(active);
+    expect(unavailable.devices.failsClosed).toBe(true);
+    unavailable.stop();
+    expect(existsSync(join(active, "restamp-refused.json"))).toBe(false);
+    expect(pending(active) || existsSync(join(active, "restamp-rollback.json"))).toBe(true);
+  } finally { renameSync(moved, sibling); }
+  const rollback = start(active, sibling);
+  expect(rollback.devices.failsClosed).toBe(true);
+  for (const folder of [active, sibling]) {
+    expect(registered(folder)[0]?.created_at).toBe(FUTURE);
+    expect(bytes(folder, "account-tombstones.json")).toContain(REVOKED);
+  }
+});
+
+posix("r2 H3b: an independent non-future value keeps both startup directions closed until confirmed", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const first = row();
+  for (const folder of [active, sibling]) registry(folder, first);
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  for (const folder of [active, sibling]) registry(folder, { ...first, created_at: stamp(-HOUR) });
+  const initial = start(active, sibling);
+  expect(initial.devices.failsClosed).toBe(true);
+  initial.stop();
+  const before = [active, sibling].map(folder => bytes(folder, "devices.json"));
+  const next = start(sibling, active);
+  expect(next.devices.failsClosed).toBe(true);
+  expect([active, sibling].map(folder => bytes(folder, "devices.json"))).toEqual(before);
+  await queue(sibling);
+  next.stop();
+  expect(start(active, sibling).devices.failsClosed).toBe(false);
+});
+
+posix("r2 H3c: a local-only approved repair does not involve a foreign sibling", async () => {
+  const [active, foreign] = [dir(), dir()];
+  loadRelayIdentity(active);
+  loadRelayIdentity(foreign);
+  registry(active, row());
+  registry(foreign, row(REVOKED));
+  const before = bytes(foreign, "devices.json");
+  const closed = start(active, foreign);
+  await queue(active);
+  closed.stop();
+  const repaired = start(active, foreign);
+  expect(repaired.devices.accountError).toBeNull();
+  expect(repaired.devices.failsClosed).toBe(false);
+  expect(bytes(foreign, "devices.json")).toBe(before);
+});
+
+posix("r2 H3d: ordinary journal trimming does not evict a pending approval", async () => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  for (let i = 0; i < 1_000; i++) closed.devices.journalEvent({ kind: "account", how: "owner action", key: null, no: null, row: null, by: "pc", account: null, label: `action ${i}` });
+  expect(DeviceJournal.open(active).entries().some(entry => entry.how === "restamp asked")).toBe(false);
+  closed.stop();
+  expect(start(active).devices.accountError).toBeNull();
+  expect(existsSync(join(active, "restamp-done.json"))).toBe(true);
+});
+
+posix.each([false, true])("r2 M2: a row disagreeing with its binding refuses the repair; after queue=%p", async queued => {
+  const active = dir();
+  const first = { ...row(), account };
+  registry(active, first);
+  put(active, "account-pc.json", { v: 1, next_admit: 1, binding: { account, bind_id: "a".repeat(32) }, clears: [], first: null, others_ever: true, gen: 0 });
+  const running = start(active);
+  const preview = await askRecovery(active, { act: "restamp" }) as { confirm?: string };
+  expect(preview.confirm).toBeString();
+  if (queued) {
+    expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ queued: true });
+    running.stop();
+  }
+  const inconsistent = { ...first, account: "other_account" };
+  registry(active, inconsistent);
+  if (queued) {
+    expect(start(active).devices.failsClosed).toBe(true);
+    expect(registered(active)[0]?.created_at).toBe(FUTURE);
+    expect(existsSync(join(active, "restamp-done.json"))).toBe(false);
+  } else {
+    expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringMatching(/bind|member/i) });
+    expect(pending(active)).toBe(false);
+  }
+});
+
+posix("r2 M3: a trusted retryable clock refusal is audited once before returning", async () => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  setSystemTime(NOW - 2 * DAY);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const refused = start(active);
+    expect(refused.devices.accountError).toContain("too far behind");
+    refused.stop();
+    expect(pending(active)).toBe(true);
+  }
+  const refusals = DeviceJournal.open(active).entries().filter(entry => entry.how === "restamp refused");
+  expect(refusals.map(entry => entry.label)).toEqual([expect.stringContaining("too far behind")]);
 });

@@ -38,6 +38,23 @@ test.each([
   expect(transcript.join("")).toMatch(wording);
 });
 
+test("restamp explicitly confirms retaining independently changed times with no timestamp moves", async () => {
+  const sent: RecoveryAction[] = [];
+  const status = await runRecover(["--restamp"], {
+    terminal: true, platform: "linux", out: () => {},
+    ask: async prompt => {
+      expect(prompt).toMatch(/keep.*current.*times/i);
+      return "yes";
+    },
+    send: async request => {
+      sent.push(request);
+      return sent.length === 1 ? { confirm: "reconcile", moves: [], reconcile: true } : { queued: true };
+    },
+  });
+  expect(status).toBe(0);
+  expect(sent).toEqual([{ act: "restamp" }, { act: "restamp", confirm: "reconcile" }]);
+});
+
 const rows = [
   { id: "a1", label: "Phone", origin: { from: "remote", how: "list" }, waiting: "catching_up", last_seen_at: "2026-11-19T10:00:00Z", refusal: null },
   { id: "b2", label: "Old laptop", origin: { from: "legacy", how: "legacy" }, waiting: "catching_up", last_seen_at: null, refusal: "frozen" },
