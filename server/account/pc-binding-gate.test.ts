@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -238,5 +238,15 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     fixtures.pop();
     dirs.push(dir);
     expect(store(dir).account()).toBeNull();
+  });
+
+  test("LEDGER S2-38 S17-3 (gate r2 at ed0def60, P12, not access): a clear in A reaches a sibling that has no account-pc.json yet", () => {
+    const [a, b] = [stateDir(), stateDir()];
+    const active = PcAccountState.open(a);
+    active.migrate(null, false);
+    active.bind(ACCOUNT, "first").commit();
+    expect(active.clear("left_on_pc", "pc")).toBe(true);
+    start(a, true, b);
+    expect(existsSync(join(b, ADMISSION_FILE))).toBe(true);
   });
 });
