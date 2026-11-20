@@ -1,4 +1,7 @@
-import { TriangleAlert } from "lucide-react";
+import { useState } from "react";
+import { TriangleAlert, X } from "lucide-react";
+
+import "./RelayOnlyWarning.css";
 
 import { useT } from "../lib/i18n.ts";
 
@@ -9,11 +12,13 @@ import { useT } from "../lib/i18n.ts";
  */
 export function RelayOnlyWarning({ opensAll }: { opensAll: boolean }) {
   const t = useT();
-  if (!opensAll) return null;
+  const [hidden, setHidden] = useState(false);
+  if (!opensAll || hidden) return null;
   return (
-    <>
+    <div className="relay-only-warning">
       <p className="setup-note"><TriangleAlert aria-hidden="true" />{t("Keep SSH or a screen working on this PC: reached only through the relay, one stolen older device could lock you out of it.")}</p>
       <p className="setup-muted">{t("A device removed while this PC was off is let go after it restarts, once it reads your account again.")}</p>
-    </>
+      <button type="button" className="icon-button update-notice-dismiss" aria-label={t("Dismiss")} title={t("Dismiss")} onClick={() => setHidden(true)}><X /></button>
+    </div>
   );
 }
