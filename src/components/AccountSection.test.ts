@@ -44,12 +44,12 @@ it("reads the plan for the sign-in the section shows, none while plans are off, 
   // the service answers for whichever account the token belongs to
   const fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
     const account = new Headers(init?.headers).get("authorization")?.replace("Bearer at_", "") ?? "";
-    return Response.json({ plans: account === "acct_off" ? "off" : "on", plan: account === "acct_a" ? "pro" : "free", source: null, ends_at: null, pcs_max: 2 });
+    return Response.json({ plans: account === "acct_off" ? "off" : "on", ...account === "acct_a" ? { plan: "pro", source: "paid" } : { plan: "free", source: null }, ends_at: null });
   };
   const service = new AccountService({ store, fetch: fetch as typeof globalThis.fetch, lock: memoryLock() });
   const shown = session("acct_a");
   await store.set("session", shown);
-  expect(await accountPlanOf(service, shown)).toEqual({ plan: "pro", source: null, ends_at: null });
+  expect(await accountPlanOf(service, shown)).toEqual({ plan: "pro", source: "paid", ends_at: null });
   const off = session("acct_off");
   await store.set("session", off);
   expect(await accountPlanOf(service, off)).toBeNull();
@@ -65,7 +65,7 @@ it("drops a plan answer that arrives after the sign-in it was asked for ended in
     await store.set("session", shown);
     const fetch = async (_input: RequestInfo | URL, _init?: RequestInit) => {
       await store.set("session", meanwhile);
-      return Response.json({ plans: "on", plan: "pro", source: null, ends_at: null, pcs_max: 2 });
+      return Response.json({ plans: "on", plan: "pro", source: "paid", ends_at: null });
     };
     const service = new AccountService({ store, fetch: fetch as typeof globalThis.fetch, lock: memoryLock() });
     expect(await accountPlanOf(service, shown)).toBeNull();
@@ -105,10 +105,11 @@ it("reads the PCs and sign-in methods for the sign-in the section shows, and non
 
 it("names the plan Free or Pro, with the date a free period or a grant ends", () => {
   const t = (key: string, vars?: Record<string, string | number>) => translate("en", key, vars);
-  const ends_at = Date.parse("2027-01-15T12:00:00.000Z");
-  expect(planText(t, { plan: "free", source: null, ends_at: null }, "en-US")).toBe("Free");
-  expect(planText(t, { plan: "pro", source: "paid", ends_at }, "en-US")).toBe("Pro");
-  expect(planText(t, { plan: "pro", source: "launch", ends_at }, "en-US")).toBe("Pro, free until Jan 15, 2027");
-  expect(planText(t, { plan: "pro", source: "grant", ends_at }, "en-US")).toBe("Pro until Jan 15, 2027");
-  expect(planText(t, { plan: "pro", source: "grant", ends_at: null }, "en-US")).toBe("Pro");
+  // noon of that day where the test runs: the row shows the local date
+  const ends_at = new Date(2027, 0, 15, 12).getTime();
+  expect(planText(t, { plan: "free" }, "en-US")).toBe("Plan: Free");
+  expect(planText(t, { plan: "pro", source: "paid", ends_at }, "en-US")).toBe("Plan: Pro");
+  expect(planText(t, { plan: "pro", source: "launch", ends_at }, "en-US")).toBe("Plan: Pro, free until Jan 15, 2027");
+  expect(planText(t, { plan: "pro", source: "grant", ends_at }, "en-US")).toBe("Plan: Pro until Jan 15, 2027");
+  expect(planText(t, { plan: "pro", source: "grant", ends_at: null }, "en-US")).toBe("Plan: Pro");
 });

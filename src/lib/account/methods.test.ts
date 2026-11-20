@@ -217,7 +217,7 @@ describe("sign-in methods", () => {
 });
 
 describe("the account's plan", () => {
-  const limits = { plans: "on", plan: "pro", source: "launch", ends_at: 1_798_761_600_000, pcs_max: 2, pc_offline_release_days: 7 };
+  const limits = { plans: "on", plan: "pro", source: "launch", ends_at: 1_798_761_600_000 };
 
   it("reads it from the session's own service, and none when it reports none", async () => {
     const fake = new FakeAccountService();
@@ -231,16 +231,30 @@ describe("the account's plan", () => {
   });
 
   it("reads free as Free and any other plan as Pro", () => {
-    expect(parseAccountPlan({ ...limits, plan: "free", source: null, ends_at: null })).toEqual({ plan: "free", source: null, ends_at: null });
-    expect(parseAccountPlan({ ...limits, plan: "other", source: "grant", ends_at: null })).toEqual({ plan: "pro", source: "grant", ends_at: null });
+    expect(parseAccountPlan({ ...limits, plan: "free", source: null, ends_at: null })).toEqual({ plan: "free" });
+    expect(parseAccountPlan({ ...limits, plan: "plan-x", source: "grant", ends_at: null })).toEqual({ plan: "pro", source: "grant", ends_at: null });
+    expect(parseAccountPlan({ ...limits, source: "paid", ends_at: null })).toEqual({ plan: "pro", source: "paid", ends_at: null });
   });
 
   it("shows none while plans are off, or for an answer it cannot read", () => {
     expect(parseAccountPlan({ ...limits, plans: "off", plan: "free", source: null, ends_at: null })).toBeNull();
-    expect(parseAccountPlan({ plan: "pro", pcs_max: 3 })).toBeNull();
-    expect(parseAccountPlan({ ...limits, plan: "" })).toBeNull();
-    expect(parseAccountPlan({ ...limits, source: "elsewhere" })).toBeNull();
-    expect(parseAccountPlan({ ...limits, ends_at: "2027-01-01" })).toBeNull();
+    expect(parseAccountPlan({ plan: "pro" })).toBeNull();
     expect(parseAccountPlan(null)).toBeNull();
+    for (const plan of ["", "  ", 7]) expect(parseAccountPlan({ ...limits, plan })).toBeNull();
+    expect(parseAccountPlan({ ...limits, source: "elsewhere" })).toBeNull();
+  });
+
+  it("shows none for an end that names no date", () => {
+    for (const ends_at of ["2027-01-01", 1e100, 1.5, Number.MAX_SAFE_INTEGER]) {
+      expect(parseAccountPlan({ ...limits, ends_at })).toBeNull();
+      expect(parseAccountPlan({ ...limits, source: "grant", ends_at })).toBeNull();
+    }
+  });
+
+  it("shows none for fields that contradict each other", () => {
+    expect(parseAccountPlan({ ...limits, plan: "free", source: "grant", ends_at: null })).toBeNull();
+    expect(parseAccountPlan({ ...limits, plan: "free", source: null })).toBeNull();
+    expect(parseAccountPlan({ ...limits, source: null, ends_at: null })).toBeNull();
+    expect(parseAccountPlan({ ...limits, source: "launch", ends_at: null })).toBeNull();
   });
 });

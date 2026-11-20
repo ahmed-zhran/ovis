@@ -40,15 +40,17 @@ type View =
   | { kind: "device-code"; provider: DeviceSignInProvider; userCode: string | null; verificationUri: string; verificationUriComplete: string | null }
   | { kind: "signed-in"; provider: AccountProvider; account: string; pcs: MyPc[] | null; methods: AccountIdentity[] | null; plan: AccountPlan | null; error: string | null };
 
-/** The plan beside the sign-in: "Free", "Pro", or Pro with the date a free period or a grant ends. No price and no purchase: paid Pro is not offered here. */
+/**
+ * The account's plan, labelled as Ovis's own under the sign-in (not the provider's): "Plan: Free", "Plan: Pro", or Pro
+ * with the date a free period or a grant ends. It is text only: nothing here offers a purchase.
+ */
 export function planText(t: Translate, plan: AccountPlan, locale: string): string {
-  if (plan.plan === "free") return t("Free|plan");
-  const date = plan.ends_at === null ? null : new Date(plan.ends_at).toLocaleDateString(locale, { dateStyle: "medium" });
+  if (plan.plan === "free") return t("Plan: Free");
+  const date = (at: number) => new Date(at).toLocaleDateString(locale, { dateStyle: "medium" });
   switch (plan.source) {
-    case "launch": return date === null ? t("Pro|plan") : t("Pro, free until {date}", { date });
-    case "grant": return date === null ? t("Pro|plan") : t("Pro until {date}", { date });
-    case "paid":
-    case null: return t("Pro|plan");
+    case "launch": return t("Plan: Pro, free until {date}", { date: date(plan.ends_at) });
+    case "grant": return plan.ends_at === null ? t("Plan: Pro") : t("Plan: Pro until {date}", { date: date(plan.ends_at) });
+    case "paid": return t("Plan: Pro");
   }
 }
 

@@ -202,26 +202,36 @@ function retryAfterMs(header: string | null): number | null {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : null;
 }
 
-const PLAN_SOURCES = ["launch", "paid", "grant"] as const;
-export type PlanSource = (typeof PLAN_SOURCES)[number];
-
 /**
  * The account's plan from GET /v1/account/limits, as Settings → Account shows it while plans are on. The app knows
- * two plans: `free`, and any other the service names reads as `pro`. `ends_at` is ms since the epoch, null for no end.
+ * two plans: `free`, and any other the service names reads as `pro`, which always says where it comes from; a free
+ * period (`launch`) always ends. `ends_at` is ms since the epoch, null for no end.
  */
-export interface AccountPlan {
-  readonly plan: "free" | "pro";
-  readonly source: PlanSource | null;
-  readonly ends_at: number | null;
-}
+export type AccountPlan =
+  | { readonly plan: "free" }
+  | { readonly plan: "pro"; readonly source: "launch"; readonly ends_at: number }
+  | { readonly plan: "pro"; readonly source: "paid" | "grant"; readonly ends_at: number | null };
 
-/** The plan to show, or null for none: plans off, or an answer this client cannot read. */
+/** ms since the epoch that name a date: a whole number inside Date's range. */
+const isInstant = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && !Number.isNaN(new Date(value).getTime());
+
+/**
+ * The plan to show, or null for none: plans off, or an answer this client cannot read, a blank plan, an end that
+ * names no date, or fields that contradict each other (Free with a source or an end, Pro without a source, a free
+ * period without its end).
+ */
 export function parseAccountPlan(value: unknown): AccountPlan | null {
-  if (!isRecord(value) || value.plans !== "on" || typeof value.plan !== "string" || value.plan === "") return null;
-  const source = value.source === null ? null : PLAN_SOURCES.find((known) => known === value.source);
-  const ends_at = value.ends_at === null ? null : typeof value.ends_at === "number" && Number.isFinite(value.ends_at) ? value.ends_at : undefined;
-  if (source === undefined || ends_at === undefined) return null;
-  return { plan: value.plan === "free" ? "free" : "pro", source, ends_at };
+  if (!isRecord(value) || value.plans !== "on" || typeof value.plan !== "string") return null;
+  const plan = value.plan.trim();
+  const { source, ends_at } = value;
+  if (plan === "" || (ends_at !== null && !isInstant(ends_at))) return null;
+  if (plan === "free") return source === null && ends_at === null ? { plan: "free" } : null;
+  switch (source) {
+    case "launch": return ends_at === null ? null : { plan: "pro", source, ends_at };
+    case "paid":
+    case "grant": return { plan: "pro", source, ends_at };
+    default: return null;
+  }
 }
 
 function parsePc(value: unknown): DirectoryPc | null {
