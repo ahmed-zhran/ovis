@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { accountDeviceId, newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
 import { createServer } from "../index.ts";
 import { privateStateFs } from "../private-state.ts";
-import { loadRelayIdentity } from "../relay/identity.ts";
+import { loadRelayIdentity, rotateRelayIdentity } from "../relay/identity.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { askRecovery } from "./recovery.ts";
 import { parseEvidence, RemovalEvidence } from "./removal-evidence.ts";
@@ -491,7 +491,7 @@ posix("r2 H2a: a future own time in the sibling ledger closes admission but perm
   await queue(active);
 });
 
-posix("r2 H2b: the local denial is durable when the second tombstone projection is published", async () => {
+posix("r2 H2b: both ledgers hold both standing denials before tombstone publication", async () => {
   const [active, sibling] = [dir(), dir()];
   const paired = row();
   const k = paired.relay_public_key;
@@ -502,16 +502,21 @@ posix("r2 H2b: the local denial is durable when the second tombstone projection 
   await queue(active);
   closed.stop();
   const rename = privateStateFs.renameSync;
-  let durable: boolean | undefined;
+  const publications = new Set<string>();
+  const projections = [active, sibling].map(folder => join(folder, "account-tombstones.json"));
   privateStateFs.renameSync = (from, to) => {
+    if (typeof to === "string" && projections.includes(to) && readFileSync(from, "utf8").includes("service-removal")) {
+      for (const folder of [active, sibling]) {
+        const ledger = RemovalEvidence.open(folder, SafetyLog.open(folder));
+        expect(ledger.standingRevokes(k)).toContainEqual(revoke(k, stamp(HOUR + 2)));
+        expect(ledger.standingMarkers(k).flatMap(({ standing }) => standing.map(({ id }) => id))).toContain("service-removal");
+      }
+      publications.add(to);
+    }
     rename(from, to);
-    if (to !== join(sibling, "account-tombstones.json") || !bytes(sibling, "account-tombstones.json").includes("service-removal") || durable !== undefined) return;
-    durable = [active, sibling].some(folder =>
-      (existsSync(join(folder, "account-removed.json")) && evidence(folder)?.revokes.some(r => r.key === k)) ||
-      JSON.parse(bytes(folder, "account-tombstones.json")).tombstones.some((t: ReturnType<typeof tomb>) => t.key === k && t.record_id === "local"));
   };
   try { start(active, sibling); } finally { privateStateFs.renameSync = rename; }
-  expect(durable).toBe(true);
+  expect(publications).toEqual(new Set(projections));
 });
 
 posix.each(["origin", "sibling"] as const)("r2 H3a: a missing %s cannot terminate a partial two-folder rewrite", async missing => {
@@ -729,6 +734,12 @@ posix("r3 L9b: changing a folder's filesystem device number does not invalidate 
   const closed = start(active, sibling);
   await queue(active);
   closed.stop();
+  const ids = [active, sibling].map(folder => {
+    expect(statSync(join(folder, "restamp-folder-id.json")).mode & 0o777).toBe(0o600);
+    return bytes(folder, "restamp-folder-id.json");
+  });
+  expect(ids.every(value => /^[0-9a-f]{32}$/.test(JSON.parse(value)))).toBe(true);
+  expect(new Set(ids).size).toBe(2);
   const stat = fs.statSync;
   const fakeStat = ((...args: Parameters<typeof stat>) => {
     const result = stat(...args);
@@ -742,5 +753,21 @@ posix("r3 L9b: changing a folder's filesystem device number does not invalidate 
     expect(start(active, sibling).devices.accountError).toBeNull();
     for (const folder of [active, sibling]) expect(registered(folder)[0]?.created_at).toBe(stamp(1));
     expect(existsSync(join(active, "restamp-done.json"))).toBe(true);
+    expect([active, sibling].map(folder => bytes(folder, "restamp-folder-id.json"))).toEqual(ids);
   } finally { hook.mockRestore(); }
+});
+
+posix("r3 L9b: a changed relay identity does not inherit the folder's approved repair", async () => {
+  const active = dir();
+  loadRelayIdentity(active);
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  const before = bytes(active, "devices.json");
+  rotateRelayIdentity(active);
+  const restarted = start(active);
+  expect(restarted.devices.accountError).toContain("relay identity changed");
+  expect(bytes(active, "devices.json")).toBe(before);
+  expect(pending(active)).toBe(true);
 });

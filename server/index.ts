@@ -13,13 +13,13 @@ import { RelayReceiptIds } from "./machine-relay.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { OrderSequence } from "./order-sequence.ts";
 import { readHerdrProfiles, type HerdrMachineProfile } from "./herdr-profiles.ts";
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, rmSync, statSync } from "node:fs";
 import { version } from "../package.json";
 import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, importFolderTombstones, mergeAccountTombstones, readDeviceRegistry, type StoredDevice } from "./devices.ts";
+import { DeviceStore, mergeAccountTombstones, readDeviceRegistry, type StoredDevice } from "./devices.ts";
 import { syncDirectory } from "./private-state.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
@@ -58,7 +58,7 @@ import { AccountMailbox, accountServiceUrl, passAccountService } from "./account
 import { accountOpensAll } from "../shared/account-devices-api.ts";
 import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
 import { PcAccountState } from "./account/pc-binding.ts";
-import { relayIdentityPath, savedServerId } from "./relay/identity.ts";
+import { savedServerId } from "./relay/identity.ts";
 import { snapshotPorts } from "./account/snapshot-ports.ts";
 import type { Readmission } from "./account/readmission.ts";
 import { AccountOrder } from "./account/account-order.ts";
@@ -73,7 +73,6 @@ import { AccountIntroductions } from "./account/introductions.ts";
 import { RecoveryReleases } from "./account/recovery.ts";
 import { openPcRecovery } from "./account/recovery-server.ts";
 import { applyRestamp, restampTombstoneMergeClock } from "./account/restamp.ts";
-import { checkRestampFile } from "./account/restamp-state.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
 import { lockRoutes } from "./account/lock-routes.ts";
@@ -279,18 +278,7 @@ export function createServer(
   // A folder of another relay identity is another PC, not a source of rows or account state (P12, T48).
   const sameIdentity = (other: string) => { const [mine, theirs] = [savedServerId(stateDir), savedServerId(other)]; return mine === undefined || theirs === undefined || mine === theirs; };
   const candidate = options.siblingStateDir;
-  const restampSiblingEligible = (origin: string, other: string) => {
-    const read = (dir: string) => {
-      const path = relayIdentityPath(dir);
-      checkRestampFile(path);
-      const id = savedServerId(dir);
-      if (id === undefined && existsSync(path)) throw new Error(`Cannot read ${path}`);
-      return id;
-    };
-    const mine = read(origin), theirs = read(other);
-    return mine === undefined || theirs === undefined || mine === theirs;
-  };
-  const restamp = opensAll ? applyRestamp({ stateDir, sibling: candidate }, restampSiblingEligible) : {};
+  const restamp = opensAll ? applyRestamp({ stateDir, sibling: candidate }) : {};
   const restampBlocked = restamp.problem !== undefined && restamp.retry !== true;
   const foreignSibling = opensAll && !!candidate && !restampBlocked && !sameIdentity(candidate);
   const sibling = restamp.sibling !== undefined ? restamp.sibling : foreignSibling || restampBlocked ? null : candidate;
@@ -298,6 +286,7 @@ export function createServer(
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = (typeof options.relay === "function" ? options.relay() : options.relay)
     ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
+  const serverIdNow = () => ovisRelay.currentIdentity()?.server_id ?? null;
   // the order is checked against this folder's own rows before the sibling merge, which may remove some (P21, S29)
   const checkedOrder = (dir: string) => {
     const state = PcAccountState.open(dir);
@@ -315,7 +304,7 @@ export function createServer(
   let clockProblem: string | null = null;
   let clock: ReturnType<typeof restampTombstoneMergeClock> | undefined;
   if (opensAll && sibling && blocked === null && restamp.problem === undefined) {
-    try { clock = restampTombstoneMergeClock(stateDir, sibling); }
+    try { clock = restampTombstoneMergeClock(stateDir, sibling, serverIdNow()); }
     catch (error) {
       clockProblem = error instanceof Error ? error.message : String(error);
       console.error(clockProblem);
@@ -347,8 +336,10 @@ export function createServer(
         const siblingEvidence = RemovalEvidence.open(sibling, safetyLog);
         if (pcAccount?.evidenceWritten()) removals.missingAfterWritten();
         if (PcAccountState.open(sibling).evidenceWritten()) siblingEvidence.missingAfterWritten();
-        importFolderTombstones(stateDir, removals, carried);
-        importFolderTombstones(sibling, siblingEvidence, carried);
+        const refusal = removals.strict ?? siblingEvidence.strict;
+        if (refusal !== null) throw new Error(refusal);
+        removals.importDenials(carried);
+        siblingEvidence.importDenials(carried);
         if (process.platform !== "win32") for (const dir of [stateDir, sibling]) {
           if (!syncDirectory(dir, process.platform).directorySynced) throw new Error(`Cannot make the imported denials durable in ${dir}`);
         }
@@ -361,7 +352,6 @@ export function createServer(
   // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
   const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
   // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
-  const serverIdNow = () => ovisRelay.currentIdentity()?.server_id ?? null;
   // Step 2 (S2-25): the rows the account's list admits, kept apart from devices.json and judged by the device store
   const opened: { rows: ReturnType<typeof accountRowsFor> | null } = { rows: null };
   // Recovery can use row ports inside the DeviceStore constructor, before its caller has a reference.
@@ -637,7 +627,7 @@ export function createServer(
   }) : undefined;
   const recoverySocket = recoveryReleases && journal && safetyLog ? openPcRecovery({
     stateDir, devices, pcAccount, journal, safetyLog, releases: recoveryReleases, pending: pendingRedemptions, pairings: keyProofPairings,
-    sibling, retryRestamp: restamp.retry === true, restampSiblingEligible,
+    sibling, retryRestamp: restamp.retry === true,
   }) : null;
   // the lock is written only after this PC's screen approves it, then the rows it does not let in end (T46)
   const lockSignal = safetyLog ? new LockSignal() : undefined;

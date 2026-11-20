@@ -392,16 +392,6 @@ export function folderTombstones(dir: string): AccountTombstone[] {
   });
 }
 
-/** Persist each original denial before a sibling merge publishes a one-per-key projection. */
-export function importFolderTombstones(dir: string, evidence: RemovalEvidence, found: readonly AccountTombstone[]): void {
-  if (evidence.strict !== null) throw new Error(evidence.strict);
-  const path = join(dir, "devices.json");
-  const registry = readDeviceRegistry(path, true, false);
-  if (registry.kind === "bad") throw new Error(`Cannot read ${path}`);
-  const rows = registry.kind === "ok" ? registry.devices.map(row => ({ ...row, pairedHere: pairedHere(row) })) : [];
-  evidence.takeIn(found, rows, Date.now());
-}
-
 /** The same file shape for startup recovery, without opening a DeviceStore. */
 export function parseTombstones(value: unknown): AccountTombstone[] | null {
   if (!isJsonObject(value) || value.v !== 1 || !Array.isArray(value.tombstones)
@@ -660,7 +650,8 @@ export class DeviceStore {
     // a damaged pending file beside a readable tombstone file: the Revokes the readable one holds are evidence at once,
     // and neither file is touched until the damaged one is repaired (T26, S19)
     if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.safety?.strict == null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
-      this.evidence.takeIn([...this.carried, ...tombstones], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
+      // Before journal and lock replay, a registry row cannot end any denial.
+      this.evidence.importDenials([...this.carried, ...tombstones]);
     }
     // a time this PC wrote that lies more than a day ahead is no time it wrote: it would push every later stamp past it,
     // so the PC fails closed until it is repaired (S19, P13)
@@ -882,7 +873,7 @@ export class DeviceStore {
   private migrate(): void {
     if (this.pc === null || this.error !== null) return;
     const numbered = this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no]);
-    try { this.pc.settlePending((binding, key) => this.devices.some((d) => d.account === binding.account && d.relay_public_key === key)); }
+    try { this.pc.settlePending(this.devices); }
     catch (error) { this.pc.unwritten(error); return; }
     const members = [...new Set(this.devices.flatMap((d) => d.account === undefined ? [] : [d.account]))];
     if (!this.pc.migrating) { this.pc.checkAbove(numbered); this.pc.checkMembers(members); return; }

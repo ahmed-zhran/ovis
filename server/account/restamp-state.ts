@@ -2,14 +2,15 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isIsoTime } from "../../shared/account-records.ts";
-import { parseAccountDevicesFile } from "../../shared/account-snapshot.ts";
 import { folderTombstones, parseDeviceRegistry, parseTombstones, readDeviceRegistry, type StoredDevice } from "../devices.ts";
 import { isJsonObject } from "../http.ts";
 import { privateStateRefusal } from "../private-state.ts";
+import { relayIdentityPath, savedServerId } from "../relay/identity.ts";
+import { parseAccountDevicesForIdentity } from "./account-device-state.ts";
 import { ACCOUNT_DEVICES_FILE } from "./account-devices.ts";
 import { ADMISSION_FILE } from "./admission-order.ts";
 import { restampJournalProblem } from "./device-journal.ts";
-import { memberBindingProblem, parsePcAccount, rowNumberProblem } from "./pc-binding.ts";
+import { parsePcAccount, restampMemberProblem, rowNumberProblem } from "./pc-binding.ts";
 import { localRevokeId, parseEvidence, REMOVAL_FILE, type Unrevoke } from "./removal-evidence.ts";
 import { DEVICE_JOURNAL_FILE, parseLog, SAFETY_LOG_FILE } from "./safety-log.ts";
 
@@ -35,7 +36,7 @@ function readStateJson(path: string): unknown {
 }
 
 /** Ordinary boot reads only the stores with own times; strict restamp trust starts with a pending plan. */
-export function readSiblingMergeClock(stateDir: string, sibling: string, limit: number) {
+export function readSiblingMergeClock(stateDir: string, sibling: string, serverId: string | null, limit: number) {
   const carried = [...folderTombstones(stateDir), ...folderTombstones(sibling)];
   const times = carried.filter(t => t.record_id === "local").map(t => t.removed_at);
   for (const dir of [stateDir, sibling]) {
@@ -53,10 +54,11 @@ export function readSiblingMergeClock(stateDir: string, sibling: string, limit: 
     }
   }
   const listPath = join(stateDir, ACCOUNT_DEVICES_FILE);
-  const list = readStateJson(listPath);
-  if (list !== undefined) {
+  const list = serverId === null ? undefined : readStateJson(listPath);
+  if (list !== undefined && serverId !== null) {
     try {
-      for (const row of parseAccountDevicesFile(list).devices) times.push(row.confirmed_at);
+      const { file, foreign } = parseAccountDevicesForIdentity(list, serverId);
+      if (!foreign) for (const row of file.devices) times.push(row.confirmed_at);
     } catch (error) { throw new Error(`Cannot read ${listPath}`, { cause: error }); }
   }
   const invalid = times.find(time => !isIsoTime(time));
@@ -73,6 +75,14 @@ export function checkRestampFile(path: string): void {
 }
 
 export class RestampTrustError extends Error {}
+
+export function restampRelayId(dir: string): string | null {
+  const path = relayIdentityPath(dir);
+  checkRestampFile(path);
+  const id = savedServerId(dir);
+  if (id === undefined && lstatSync(path, { throwIfNoEntry: false })) throw new Error(`Cannot read ${path}`);
+  return id ?? null;
+}
 
 /** Check all paths before a refusal audit: a later trust refusal must not leave earlier writes behind. */
 export function checkRestampInputs({ stateDir, sibling }: RestampFolders): void {
@@ -101,7 +111,7 @@ export function restampAddress({ store, ref, field }: RestampAddress): string {
   return JSON.stringify([store, ref, field]);
 }
 
-export function readRestampState(folders: RestampFolders) {
+export function readRestampState(folders: RestampFolders, serverId: string | null) {
   const own = new Map<string, Slot>();
   const docs = new Map<string, { path: string; doc: Doc }>();
   const revokes = new Set<Slot>();
@@ -167,11 +177,12 @@ export function readRestampState(folders: RestampFolders) {
       rows(devices.devices, (row) => slot(store, String(row.id), "created_at", row));
     }
     bindings.push({ path: bindingPath, pc, rows: memberRows });
-    if (prefix === "") {
+    if (prefix === "" && serverId !== null) {
       const listed = read(dir, ACCOUNT_DEVICES_FILE, ACCOUNT_DEVICES_FILE);
       if (listed !== undefined) {
-        rows(listed.devices, (row) => slot(ACCOUNT_DEVICES_FILE, String(row.id), "confirmed_at", row));
-        parseAccountDevicesFile(listed);
+        if (!parseAccountDevicesForIdentity(listed, serverId).foreign) {
+          rows(listed.devices, (row) => slot(ACCOUNT_DEVICES_FILE, String(row.id), "confirmed_at", row));
+        }
       }
     }
     for (const file of ["account-tombstones.json", "account-tombstones.pending.json"]) {
@@ -213,19 +224,8 @@ export function readRestampState(folders: RestampFolders) {
       for (const { record } of parsed.waiting) floor(record.signed_at);
     }
   }
-  const cleared = new Set(bindings.flatMap(({ pc }) => pc?.clears.map(clear => clear.bind_id) ?? []));
-  const bound = bindings.map(({ pc, rows }) => {
-    const binding = pc?.binding;
-    if (!binding || cleared.has(binding.bind_id)) return null;
-    if (binding.pending && !rows.some(row => row.account === binding.account && row.relay_public_key === pc?.first?.key)) return null;
-    return binding.account;
-  });
-  const standing = bound.filter(account => account !== null);
-  if (new Set(standing).size > 1) throw new Error("The two folders bind this PC to two accounts");
   for (const [index, { path, pc, rows }] of bindings.entries()) {
-    const accounts = [...new Set(rows.flatMap(row => row.account === undefined ? [] : [row.account]))];
-    const account = bound[index] ?? standing[0] ?? (pc === null || pc.counterOnly ? accounts[0] ?? null : null);
-    const problem = memberBindingProblem(path, account, accounts);
+    const problem = restampMemberProblem(path, pc, bindings[1 - index]?.pc ?? null, rows);
     if (problem !== null) throw new Error(problem);
   }
   return { own, nonOwn, docs, revokes, localTombstones, unrevokes, journals };

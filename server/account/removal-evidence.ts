@@ -202,6 +202,10 @@ export class RemovalEvidence {
    * of its key that was paired here is taken in already ended. An account tombstone with no removal of that id
    * becomes one.
    */
+  importDenials(tombstones: readonly EvidenceTombstone[]): void {
+    this.takeIn(tombstones, [], Date.now());
+  }
+
   takeIn(tombstones: readonly EvidenceTombstone[], rows: readonly { relay_public_key?: string | undefined; created_at: string; pairedHere: boolean }[], now: number): void {
     let doc = this.doc;
     const at = new Date(now).toISOString();

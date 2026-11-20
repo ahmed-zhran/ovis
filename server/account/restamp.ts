@@ -1,16 +1,17 @@
 /** Queue a confirmed clock repair on the live PC, and apply it before account startup can replay any store. */
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, realpathSync, rmSync, statSync } from "node:fs";
+import { linkSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { isIsoTime } from "../../shared/account-records.ts";
 import { isJsonObject } from "../http.ts";
-import { publishPrivateState, syncDirectory, writePrivateState } from "../private-state.ts";
+import { preparePrivateState, publishPrivateState, syncDirectory, writePrivateState } from "../private-state.ts";
 import { DeviceJournal, type JournalInput } from "./device-journal.ts";
 import { RESTAMP_PARTICIPANT as PARTICIPANT, RESTAMP_PLAN as FILE, RESTAMP_ROLLBACK as ROLLBACK } from "./restamp-files.ts";
-import { checkRestampFile, checkRestampInputs, openRestampAudit, readRestampJson, readRestampState, readSiblingMergeClock, restampAddress, restampLinks, RestampTrustError, rewriteRestamp, type RestampAddress, type RestampFolders, type RestampLink, type RestampMove } from "./restamp-state.ts";
+import { checkRestampFile, checkRestampInputs, openRestampAudit, readRestampJson, readRestampState, readSiblingMergeClock, restampAddress, restampLinks, restampRelayId, RestampTrustError, rewriteRestamp, type RestampAddress, type RestampFolders, type RestampLink, type RestampMove } from "./restamp-state.ts";
 
 const DAY = 86_400_000;
-type Plan = { readonly v: 1; readonly by: string; readonly at: string; readonly base: string; readonly origin: string; readonly originId: string; readonly sibling: string | null; readonly siblingId: string | null; readonly mapping: readonly RestampMove[]; readonly links?: readonly RestampLink[] };
+const FOLDER_ID = "restamp-folder-id.json";
+type Plan = { readonly v: 2; readonly by: string; readonly at: string; readonly base: string; readonly origin: string; readonly originId: string; readonly originRelay: string | null; readonly sibling: string | null; readonly siblingId: string | null; readonly siblingRelay: string | null; readonly mapping: readonly RestampMove[]; readonly links?: readonly RestampLink[] };
 type Participant = { readonly origin: string; readonly digest: string; readonly rollback?: true };
 type TimedSlot = RestampAddress & { readonly value: string };
 type Install = "plugin" | "desktop" | "other";
@@ -24,17 +25,41 @@ const digestOf = (value: unknown) => createHash("sha256").update(JSON.stringify(
 const absolute = (value: unknown): value is string => typeof value === "string" && isAbsolute(value) && resolve(value) === value;
 const present = (path: string) => lstatSync(path, { throwIfNoEntry: false }) !== undefined;
 const real = (dir: string) => realpathSync(dir);
-const isDirectoryId = (id: unknown): id is string => typeof id === "string" && /^\d+:\d+$/.test(id);
+const isId = (id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{32}$/.test(id);
 
-function directoryId(path: string): string | null {
+function directoryId(dir: string): string | null {
   try {
-    if (real(path) !== path) return null;
-    const stat = statSync(path, { bigint: true });
-    return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+    if (real(dir) !== dir) return null;
+    const path = join(dir, FOLDER_ID);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat && process.platform !== "win32" && (stat.mode & 0o077) !== 0) throw new RestampTrustError(`${path} is not private`);
+    const value = readRestampJson(path);
+    if (value === undefined) return null;
+    if (!isId(value)) throw new RestampTrustError(`Invalid restamp folder ID in ${dir}`);
+    return value;
   } catch (error) {
     if (["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
     throw error;
   }
+}
+
+function ensureDirectoryId(dir: string): string {
+  const existing = directoryId(dir);
+  if (existing !== null) {
+    syncRestampDirectory(dir);
+    return existing;
+  }
+  const path = join(dir, FOLDER_ID);
+  const created = randomBytes(16).toString("hex");
+  const temp = preparePrivateState(path, created);
+  try { linkSync(temp, path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  } finally { rmSync(temp); }
+  syncRestampDirectory(dir);
+  const id = directoryId(dir);
+  if (id === null) throw new Error(`Cannot read restamp folder ID in ${dir}`);
+  return id;
 }
 
 function syncRestampDirectory(dir: string): void {
@@ -56,10 +81,11 @@ function moves(slots: Iterable<TimedSlot>, base: number): RestampMove[] {
 
 function readPlan(path: string): Plan {
   const value = readRestampJson(path);
-  if (!isJsonObject(value) || Object.keys(value).some(key => !["v", "by", "at", "base", "origin", "originId", "sibling", "siblingId", "mapping", "links"].includes(key)) ||
-    value.v !== 1 || typeof value.by !== "string" || value.by.length === 0 ||
-    !absolute(value.origin) || !isDirectoryId(value.originId) ||
-    !(value.sibling === null && value.siblingId === null || absolute(value.sibling) && value.sibling !== value.origin && isDirectoryId(value.siblingId)) ||
+  if (!isJsonObject(value) || Object.keys(value).some(key => !["v", "by", "at", "base", "origin", "originId", "originRelay", "sibling", "siblingId", "siblingRelay", "mapping", "links"].includes(key)) ||
+    value.v !== 2 || typeof value.by !== "string" || value.by.length === 0 ||
+    !absolute(value.origin) || !isId(value.originId) || !(value.originRelay === null || isId(value.originRelay)) ||
+    !(value.sibling === null && value.siblingId === null && value.siblingRelay === null ||
+      absolute(value.sibling) && value.sibling !== value.origin && isId(value.siblingId) && (value.siblingRelay === null || isId(value.siblingRelay))) ||
     !isIsoTime(value.at) || !isIsoTime(value.base) || !Array.isArray(value.mapping) || value.mapping.length === 0) {
     throw new Error("Invalid restamp.json shape");
   }
@@ -85,8 +111,8 @@ function readPlan(path: string): Plan {
       return { store: link.store, ref: link.ref, old: link.old, new: link.new };
     });
   }
-  return { v: 1, by: value.by, at: value.at, base: value.base, origin: value.origin, originId: value.originId, sibling: value.sibling,
-    siblingId: value.siblingId, mapping, ...(links === undefined ? {} : { links }) };
+  return { v: 2, by: value.by, at: value.at, base: value.base, origin: value.origin, originId: value.originId, originRelay: value.originRelay,
+    sibling: value.sibling, siblingId: value.siblingId, siblingRelay: value.siblingRelay, mapping, ...(links === undefined ? {} : { links }) };
 }
 
 function matchesPlan(plan: Plan, state: ReturnType<typeof readRestampState>): boolean {
@@ -169,8 +195,20 @@ function pendingPlan(folders: RestampFolders, markUnavailable = false) {
   if (!folders.sibling || !present(folders.sibling)) return undefined;
   const sibling = real(folders.sibling);
   if (active === sibling) return undefined;
-  const other = pendingAt(sibling);
-  return other?.plan.sibling === active ? other : undefined;
+  try {
+    const other = pendingAt(sibling);
+    return other?.plan.sibling === active ? other : undefined;
+  } catch (error) {
+    // A candidate's unreadable plan belongs to us only if we cannot prove it is another PC.
+    // A readable plan that names us is authenticated against its journal before reading relay identity.
+    let foreign = false;
+    try {
+      const mine = restampRelayId(active), theirs = restampRelayId(sibling);
+      foreign = mine !== null && theirs !== null && mine !== theirs;
+    } catch { /* Indeterminate identity is not proof the plan is foreign. */ }
+    if (!foreign) throw error;
+    return undefined;
+  }
 }
 
 function unresolvedDigest(plan: Plan, state: ReturnType<typeof readRestampState>): string | undefined {
@@ -185,11 +223,17 @@ function unresolvedDigest(plan: Plan, state: ReturnType<typeof readRestampState>
   return changed.length || links.length ? digestOf([digestOf(plan), changed, links]) : undefined;
 }
 
-export function restampTombstoneMergeClock(stateDir: string, sibling: string) {
-  return readSiblingMergeClock(stateDir, sibling, Date.now() + DAY);
+export function restampTombstoneMergeClock(stateDir: string, sibling: string, serverId: string | null) {
+  return readSiblingMergeClock(stateDir, sibling, serverId, Date.now() + DAY);
 }
 
-export function applyRestamp(folders: RestampFolders, siblingEligible: (origin: string, sibling: string) => boolean): Applied {
+function checkRelayScope(plan: Plan): void {
+  if (restampRelayId(plan.origin) !== plan.originRelay || (plan.sibling !== null && restampRelayId(plan.sibling) !== plan.siblingRelay)) {
+    throw new Error("A restamp participant's relay identity changed");
+  }
+}
+
+export function applyRestamp(folders: RestampFolders): Applied {
   let audit: ((problem: string) => void) | undefined;
   try {
     const windows = process.platform === "win32";
@@ -216,6 +260,7 @@ export function applyRestamp(folders: RestampFolders, siblingEligible: (origin: 
       syncRestampDirectory(dir);
     };
     if (unavailable) {
+      if (restampRelayId(dir) !== plan.originRelay) throw new Error("The restamp origin's relay identity changed");
       if (!entry.rollback) publishPrivateState(entry.path, rollbackMarker);
       syncRestampDirectory(dir);
       throw new Error(`Restamp participant ${plan.sibling} is unavailable; rollback remains pending`);
@@ -227,7 +272,8 @@ export function applyRestamp(folders: RestampFolders, siblingEligible: (origin: 
       participant = undefined; // Replace a pointer left by a stop immediately after the old archive rename.
     }
     if (plan.sibling && pendingAt(plan.sibling)) throw new Error("Multiple restamp plans are pending across the two folders");
-    const state = readRestampState(scope);
+    checkRelayScope(plan);
+    const state = readRestampState(scope, plan.originRelay);
     const matches = matchesPlan(plan, state);
     const limit = Date.now() + DAY;
     const replacements = new Map(plan.mapping.map((entry) => [restampAddress(entry), Date.parse(entry.new)]));
@@ -248,8 +294,6 @@ export function applyRestamp(folders: RestampFolders, siblingEligible: (origin: 
     const acknowledged = unmatched !== undefined && [dir, ...(plan.sibling ? [plan.sibling] : [])].some(folder =>
       DeviceJournal.open(folder).approvesRestampReconciliation(unmatched));
     const writes = rewriteRestamp(state, plan.mapping, links, rollback);
-    // Check identity only after the complete preflight, but before touching either folder.
-    if (plan.sibling && !siblingEligible(dir, plan.sibling)) throw new Error("The other folder belongs to a different relay identity");
     if (!plan.sibling && real(folders.stateDir) !== dir) throw new Error("A local restamp cannot run from another folder");
     if (participantPath && !participant) writePrivateState(participantPath, { origin: dir, digest: planId }, undefined, true);
     // Publish the rollback decision before any rollback write. A crash cannot turn it back into an apply.
@@ -284,7 +328,6 @@ export function restampAct(options: RestampFolders & {
   readonly problem: () => string | null;
   readonly journal: DeviceJournal;
   readonly install: Install;
-  readonly siblingEligible: (origin: string, sibling: string) => boolean;
 }) {
   let preview: { token: string; plan: Plan } | { token: string; reconcile: string } | undefined;
   return (confirm: string | undefined, user: string) => {
@@ -303,8 +346,9 @@ export function restampAct(options: RestampFolders & {
       if (pending) {
         if (!pending.rollback) return { error: "A restamp is already pending; restart Ovis before queuing another." };
         const { plan } = pending;
-        const state = readRestampState({ stateDir: plan.origin, sibling: plan.sibling });
-        if (plan.sibling && !options.siblingEligible(plan.origin, plan.sibling)) return { error: "The other folder belongs to a different relay identity." };
+        if (plan.sibling !== null && directoryId(plan.sibling) !== plan.siblingId) return { error: "A restamp participant is unavailable; restart Ovis after restoring it." };
+        checkRelayScope(plan);
+        const state = readRestampState({ stateDir: plan.origin, sibling: plan.sibling }, plan.originRelay);
         const journalRefusal = options.journal.restampRefusal(state.journals.get(origin));
         if (journalRefusal !== null) return { error: journalRefusal };
         if (!DeviceJournal.open(plan.origin).approvesRestamp(digestOf(plan))) return { error: "Cannot reconcile an unapproved restamp." };
@@ -321,8 +365,11 @@ export function restampAct(options: RestampFolders & {
         syncRestampDirectory(origin);
         return { queued: true, install: options.install };
       }
-      const state = readRestampState({ stateDir: origin, sibling });
-      if (sibling && !options.siblingEligible(origin, sibling)) return { error: "The other folder belongs to a different relay identity; restart Ovis." };
+      const scope = { stateDir: origin, sibling };
+      checkRestampInputs(scope);
+      const originRelay = restampRelayId(origin), siblingRelay = sibling === null ? null : restampRelayId(sibling);
+      if (originRelay !== null && siblingRelay !== null && originRelay !== siblingRelay) return { error: "The other folder belongs to a different relay identity; restart Ovis." };
+      const state = readRestampState(scope, originRelay);
       const journalRefusal = options.journal.restampRefusal(state.journals.get(origin));
       if (journalRefusal !== null) return { error: journalRefusal };
       const now = Date.now();
@@ -338,9 +385,14 @@ export function restampAct(options: RestampFolders & {
         return { error: "The restamp would leave a time more than a day ahead; this PC stays closed." };
       }
       const links = restampLinks(state, mapping);
-      const originId = directoryId(origin), siblingId = sibling === null ? null : directoryId(sibling);
+      const path = join(origin, FILE);
+      checkRestampFile(path);
+      // The preview pins both IDs. Confirmation only reads them: a replacement folder never inherits approval.
+      const savedOriginId = directoryId(origin), savedSiblingId = sibling === null ? null : directoryId(sibling);
+      const originId = savedOriginId ?? (confirm === undefined ? ensureDirectoryId(origin) : null);
+      const siblingId = savedSiblingId ?? (confirm === undefined && sibling !== null ? ensureDirectoryId(sibling) : null);
       if (originId === null || (sibling !== null && siblingId === null)) return { error: "A restamp participant is unavailable; restart Ovis." };
-      const plan: Plan = { v: 1, by: user, at, base: iso(base), origin, originId, sibling, siblingId, mapping, ...(links.length ? { links } : {}) };
+      const plan: Plan = { v: 2, by: user, at, base: iso(base), origin, originId, originRelay, sibling, siblingId, siblingRelay, mapping, ...(links.length ? { links } : {}) };
       if (confirm === undefined) {
         const token = randomBytes(16).toString("hex");
         preview = { token, plan };
@@ -350,8 +402,6 @@ export function restampAct(options: RestampFolders & {
       if (!approved || !("plan" in approved) || JSON.stringify(plan) !== JSON.stringify(approved.plan)) {
         return { error: "The restamp inputs changed; run ovis recover --restamp again." };
       }
-      const path = join(options.stateDir, FILE);
-      checkRestampFile(path);
       const digest = digestOf(plan);
       options.journal.approveRestamp(digest, event(user, "restamp asked", `restamp asked ${digest}`));
       syncRestampDirectory(origin);

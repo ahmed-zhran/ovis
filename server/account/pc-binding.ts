@@ -76,6 +76,37 @@ export function rowNumberProblem(path: string, next: number | null, rows: readon
     : highest >= next ? `${path} is behind the number ${highest} a row here carries` : null;
 }
 
+/** Project the binding merge without writing either folder. Pending links are not standing during a merge. */
+export function mergePcBinding(ownDoc: PcDoc | null, sibling: PcDoc) {
+  const clears = [...new Map([...(ownDoc?.clears ?? []), ...sibling.clears].map(clear => [clear.bind_id, clear])).values()];
+  const kept = (binding: AccountBinding | null) => binding !== null && !clears.some(clear => clear.bind_id === binding.bind_id) ? binding : null;
+  const own = kept(ownDoc?.binding ?? null);
+  const other = kept(sibling.binding);
+  const standing = own?.pending ? null : own;
+  const inherited = other?.pending ? null : other;
+  return { clears, inherited, binding: standing ?? inherited, siblingBinding: other,
+    conflict: standing !== null && inherited !== null && standing.account !== inherited.account };
+}
+
+type Member = { readonly account?: string | undefined; readonly relay_public_key?: string | undefined };
+
+function settleLink(binding: AccountBinding | null, firstKey: string | null, rows: readonly Member[]): AccountBinding | null {
+  if (binding?.pending !== true) return binding;
+  if (!rows.some(row => row.account === binding.account && row.relay_public_key === firstKey)) return null;
+  const { pending: _, ...standing } = binding;
+  return standing;
+}
+
+/** The same projection and pending-link decision startup uses, before a recovery writer touches the rows. */
+export function restampMemberProblem(path: string, pc: (PcDoc & { counterOnly?: true }) | null, sibling: PcDoc | null, rows: readonly Member[]): string | null {
+  const merge = sibling === null ? null : mergePcBinding(pc, sibling);
+  if (merge?.conflict) return "The two folders bind this PC to two accounts";
+  const binding = merge === null ? settleLink(pc?.binding ?? null, pc?.first?.key ?? null, rows) : merge.binding;
+  const accounts = rows.flatMap(row => row.account === undefined ? [] : [row.account]);
+  const migrating = pc === null || pc.counterOnly === true;
+  return memberBindingProblem(path, (migrating ? merge?.inherited?.account ?? accounts[0] : binding?.account) ?? null, accounts);
+}
+
 /** A folder by what it is on disk, so a link to it and its real path are one folder (P21). */
 function realFolder(stateDir: string): string {
   try { return realpathSync(stateDir); } catch { return resolve(stateDir); }
@@ -138,11 +169,11 @@ export class PcAccountState {
    * A first link's binding left pending by a stop (T13): it stands when its row reached the disk, and bound nothing
    * when it did not.
    */
-  settlePending(rowOnDisk: (binding: AccountBinding, firstKey: string | null) => boolean): void {
+  settlePending(rows: readonly Member[]): void {
     const binding = this.doc.binding;
     if (binding?.pending !== true || this.problem !== null) return;
-    const { pending: _left, ...standing } = binding;
-    this.write(rowOnDisk(standing, this.doc.first?.key ?? null) ? { ...this.doc, binding: standing } : { ...this.doc, binding: null, first: null });
+    const standing = settleLink(binding, this.doc.first?.key ?? null, rows);
+    this.write(standing ? { ...this.doc, binding: standing } : { ...this.doc, binding: null, first: null });
   }
 
   /** Member rows of an account this PC is not in: the binding and the rows disagree, which is damage (P12, S19). */
@@ -207,17 +238,15 @@ export class PcAccountState {
       return;
     }
     if (typeof parsed === "string") { this.problem = `${path} cannot be trusted: ${parsed}`; return; }
-    const clears = [...new Map([...this.doc.clears, ...parsed.clears].map((clear) => [clear.bind_id, clear])).values()];
-    const standing = (binding: AccountBinding | null) => binding !== null && binding.pending !== true && !clears.some((clear) => clear.bind_id === binding.bind_id) ? binding : null;
-    const own = standing(this.doc.binding);
-    const theirs = standing(parsed.binding);
-    if (own !== null && theirs !== null && own.account !== theirs.account) { this.problem = `${this.path} and ${path} bind this PC to two accounts`; return; }
-    this.siblingBinding = theirs;
-    const doc = { ...this.doc, binding: own, clears, others_ever: this.doc.others_ever || parsed.others_ever };
+    const merged = mergePcBinding(this.doc, parsed);
+    if (merged.conflict) { this.problem = `${this.path} and ${path} bind this PC to two accounts`; return; }
+    const { clears, inherited, binding } = merged;
+    this.siblingBinding = inherited;
+    const doc = { ...this.doc, binding: this.fresh ? null : binding, clears, others_ever: this.doc.others_ever || parsed.others_ever };
     // the clears are one set in both folders: the sibling learns every clear too, so starting it alone never brings a
     // cleared account back (P12, T48)
     if (parsed.clears.length !== clears.length) {
-      const siblingDoc: PcDoc = { ...parsed, clears, binding: standing(parsed.binding) ?? (parsed.binding?.pending === true && !clears.some((clear) => clear.bind_id === parsed.binding!.bind_id) ? parsed.binding : null) };
+      const siblingDoc: PcDoc = { ...parsed, clears, binding: merged.siblingBinding };
       try { writePrivateState(path, siblingDoc); } catch (error) {
         this.problem = `${path} cannot learn this PC's cleared account (${error instanceof Error ? error.message : String(error)})`;
         return;
@@ -225,7 +254,7 @@ export class PcAccountState {
     }
     if (this.fresh) { this.doc = doc; return; }
     // a folder in no account beside one that is: the PC is in that account (P12)
-    if (own === null && theirs !== null) { doc.binding = theirs; doc.first = this.doc.first ?? parsed.first; }
+    if (binding !== null && binding === inherited) doc.first = this.doc.first ?? parsed.first;
     if (JSON.stringify(doc) !== JSON.stringify(this.doc)) this.write(doc);
   }
 
