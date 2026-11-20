@@ -71,6 +71,7 @@ import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
 import { RecoveryReleases } from "./account/recovery.ts";
 import { openPcRecovery } from "./account/recovery-server.ts";
+import { applyRestamp } from "./account/restamp.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
 import { lockRoutes } from "./account/lock-routes.ts";
@@ -272,13 +273,15 @@ export function createServer(
   const ipv6Loopback = (options.ipv6Loopback ?? process.env["OVIS_IPV6_LOOPBACK"] === "1") && hostname === "127.0.0.1";
   /** Empty token = gate disabled; every route then behaves exactly as it did before auth existed. */
   const token = options.token ?? process.env["OVIS_TOKEN"] ?? "";
-  /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
-  const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   const opensAll = provided.accountOpensAll ?? accountOpensAll();
   // A folder of another relay identity is another PC, not a source of rows or account state (P12, T48).
   const sameIdentity = (other: string) => { const [mine, theirs] = [savedServerId(stateDir), savedServerId(other)]; return mine === undefined || theirs === undefined || mine === theirs; };
   const foreignSibling = opensAll && typeof options.siblingStateDir === "string" && !sameIdentity(options.siblingStateDir);
   const sibling = foreignSibling ? null : options.siblingStateDir;
+  const restamp = opensAll ? applyRestamp({ stateDir, sibling }) : {};
+  if (restamp.problem) console.error(restamp.problem);
+  /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
+  const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   // the order is checked against this folder's own rows before the sibling merge, which may remove some (P21, S29)
   const checkedOrder = (dir: string) => {
     const state = PcAccountState.open(dir);
@@ -293,7 +296,7 @@ export function createServer(
   const damage = (dir: string) => checkedOrder(dir).strict;
   const blocked = pcAccount?.strict ?? damage(stateDir) ?? (sibling ? damage(sibling) : null);
   if (blocked !== null) console.error(blocked);
-  const untouched = blocked !== null;
+  const untouched = blocked !== null || restamp.problem !== undefined;
   // a binding is trusted only once the sibling folder's clears are read: a cleared bind_id never stands again (P12, T59)
   if (pcAccount !== null && sibling && !untouched) pcAccount.takeSibling(sibling);
   // every tombstone of both folders is evidence before the merge below coalesces them one per key (T48, P13)
@@ -318,12 +321,16 @@ export function createServer(
   const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
   // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
   const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
+  if (journal && restamp.audit) {
+    try { journal.append(restamp.audit); }
+    catch (error) { console.error(`Cannot journal ${restamp.audit.how}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
   const serverIdNow = () => ovisRelay.currentIdentity()?.server_id ?? null;
   // Step 2 (S2-25): the rows the account's list admits, kept apart from devices.json and judged by the device store
   const opened: { rows: ReturnType<typeof accountRowsFor> | null } = { rows: null };
   // Recovery can use row ports inside the DeviceStore constructor, before its caller has a reference.
-  const rowsForDevices = (devices: DeviceStore) => opened.rows = safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
+  const rowsForDevices = (devices: DeviceStore) => opened.rows = restamp.problem === undefined && safetyLog !== null && pcAccount !== null && journal !== null && removals !== null ? accountRowsFor(stateDir, serverIdNow, {
     evidence: removals,
     ...listNotices(journal, removals, (entry) => devices.publish(entry)),
     settleNotices: rows => devices.settleListNotices(rows),
@@ -348,6 +355,7 @@ export function createServer(
   }) : null;
   const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, {
     safety: safetyLog, pc: pcAccount, removals, journal, carried, joinedRows: rowsForDevices, held: (key) => accountMailbox.gates().held(key),
+    restampProblem: restamp.problem,
   });
   const accountRows = opened.rows;
   const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
@@ -594,6 +602,7 @@ export function createServer(
   }) : undefined;
   const recoverySocket = recoveryReleases && journal && safetyLog ? openPcRecovery({
     stateDir, devices, pcAccount, journal, safetyLog, releases: recoveryReleases, pending: pendingRedemptions, pairings: keyProofPairings,
+    sibling, retryRestamp: restamp.retry === true,
   }) : null;
   // the lock is written only after this PC's screen approves it, then the rows it does not let in end (T46)
   const lockSignal = safetyLog ? new LockSignal() : undefined;

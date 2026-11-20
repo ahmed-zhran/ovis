@@ -383,16 +383,21 @@ export function folderTombstones(dir: string): AccountTombstone[] {
   return ["account-tombstones.json", "account-tombstones.pending.json"].flatMap((file) => readTombstones(join(dir, file)) ?? []);
 }
 
+/** The same file shape for startup recovery, without opening a DeviceStore. */
+export function parseTombstones(value: unknown): AccountTombstone[] | null {
+  if (!isJsonObject(value) || value.v !== 1 || !Array.isArray(value.tombstones)
+    || !value.tombstones.every((t) => isJsonObject(t) && typeof t.key === "string" && typeof t.account === "string"
+      && typeof t.record_id === "string" && typeof t.removed_at === "string" && (t.records === undefined || Array.isArray(t.records)))) return null;
+  return value.tombstones as AccountTombstone[];
+}
+
 /** Null for a file that exists and will not parse; an absent file holds no tombstones. */
 function readTombstones(path: string): AccountTombstone[] | null {
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : null;
   }
-  if (!isJsonObject(parsed) || parsed.v !== 1 || !Array.isArray(parsed.tombstones)
-    || !parsed.tombstones.every((t) => isJsonObject(t) && typeof t.key === "string" && typeof t.account === "string"
-      && typeof t.record_id === "string" && typeof t.removed_at === "string" && (t.records === undefined || Array.isArray(t.records)))) return null;
-  return parsed.tombstones as AccountTombstone[];
+  return parseTombstones(parsed);
 }
 
 /**
@@ -565,7 +570,9 @@ export class DeviceStore {
   private readonly revokeAllIntent: RevokeAllIntent | null;
   /** A restored file is not part of this process's view until the next open. */
   private waitingForListedRestore = false;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean } = {}) {
+  private futureProblem: string | null = null;
+  private readonly restampProblem: string | null;
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean; restampProblem?: string | undefined } = {}) {
     this.joinedRows = typeof account.joinedRows === "function" ? account.joinedRows(this) : account.joinedRows ?? null;
     this.safety = account.safety ?? null;
     this.handedLifts = new HandedLifts(stateDir);
@@ -578,6 +585,7 @@ export class DeviceStore {
     if (this.evidence !== null && this.pc?.evidenceWritten() === true) this.evidence.missingAfterWritten();
     this.carried = account.carried ?? [];
     this.journal = account.journal ?? null;
+    this.restampProblem = account.restampProblem ?? null;
     this.path = join(stateDir, "devices.json");
     this.tombstonePath = join(stateDir, "account-tombstones.json");
     this.pendingTombstonePath = join(stateDir, "account-tombstones.pending.json");
@@ -609,6 +617,7 @@ export class DeviceStore {
     // a Revoke all that stopped half way is finished before anything is served, whatever else could not be read (P8, T41)
     this.revokeAllIntent = this.evidence === null ? null : new RevokeAllIntent(stateDir, this.revokeAllRows());
     if (this.evidence) this.journal?.checkRowReceipts(this.evidence.rowDrops);
+    if (this.restampProblem !== null) return;
     if (this.journal?.strict || this.evidence?.strict) return;
     // an account registry that will not read is not empty: every intent stays and nothing is written until it reads
     if (this.joinedRows?.blocked()) return;
@@ -631,9 +640,9 @@ export class DeviceStore {
     // so the PC fails closed until it is repaired (S19, P13)
     if (this.evidence !== null) {
       const ahead = [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t) || Date.parse(t) > Date.now() + DAY_MS);
-      if (ahead !== undefined) this.accountProblem = `A time this PC wrote lies in the future (${ahead}): account records are refused until it is repaired.`;
+      if (ahead !== undefined) this.futureProblem = `A time this PC wrote lies in the future (${ahead}): account records are refused until it is repaired.`;
     }
-    if (this.error === null && this.accountProblem === null && this.pc?.strict == null && !this.revokeAllIntent?.strict) {
+    if (this.error === null && this.accountProblem === null && this.futureProblem === null && this.pc?.strict == null && !this.revokeAllIntent?.strict) {
       if (this.evidence !== null) {
         const evidence = this.evidence;
         evidence.recover(() => {
@@ -661,6 +670,14 @@ export class DeviceStore {
     }
     // the one-time legacy pass asks only whether the registry could be read: nothing is admitted before it (T50)
     if (this.error === null) this.migrate();
+    if (this.futureProblem !== null && this.restampRefusal(false) === null) {
+      // Normally replay makes the journal's companions. A clock-blocked startup skips replay, but the first
+      // restamp audit still needs both companions to exist before the recovery socket can take a request.
+      this.evidence?.recover(() => {
+        this.evidence?.ensureFile();
+        this.safety?.ensureFile();
+      });
+    }
     if (this.error === null && this.accountError === null) this.applyWaitingBlocks();
     // evidence on disk at start counts as written, also for a PC that wrote it before this mark existed (S19)
     if (this.error === null && this.evidence?.onDisk === true && this.evidence.strict === null) this.pc?.noteEvidenceWritten();
@@ -809,7 +826,14 @@ export class DeviceStore {
 
   /** A local denial does not need the listed registry; it still needs the rest of the PC's safety state. */
   get revokeAllError(): string | null {
-    return this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.journal?.strict ?? this.denyProblem ?? this.accountProblem;
+    return this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.journal?.strict ?? this.denyProblem ?? this.accountProblem ?? this.restampProblem ?? this.futureProblem;
+  }
+
+  /** Restamp is not a repair for any other unreadable account or registry state. */
+  restampRefusal(retry: boolean): string | null {
+    return this.error ?? this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.journal?.strict ?? this.denyProblem
+      ?? this.accountProblem ?? this.revokeAllIntent?.strict ?? this.joinedRows?.blocked()
+      ?? (retry ? null : this.restampProblem ?? (this.futureProblem === null ? "This PC is not closed by a future timestamp." : null));
   }
 
   /** No device gets in by a row or a code when the PC cannot trust its account state. */
@@ -3067,7 +3091,7 @@ export class DeviceStore {
     // a deny that failed earlier does not keep a removal from trying again: its landing is what ends the closing (P8)
     if (this.evidence !== null) {
       this.assertWritable();
-      const refused = this.safety?.strict ?? this.pc?.strict ?? this.evidence.strict ?? this.accountProblem;
+      const refused = this.safety?.strict ?? this.pc?.strict ?? this.evidence.strict ?? this.accountProblem ?? this.restampProblem ?? this.futureProblem;
       if (refused !== null) throw new Error(refused);
     } else this.assertAccountWritable();
     if (this.evidence !== null) {
@@ -3251,7 +3275,7 @@ export class DeviceStore {
       ...keys.map((key) => ({ key, account: rows.find((d) => d.relay_public_key === key)?.account ?? "", record_id: "local", removed_at: removedAt }))];
     if (keys.length) {
       // with the main file unreadable the revoke still wins: its tombstone waits beside it
-      if (this.accountProblem !== null) {
+      if (this.accountProblem !== null || this.restampProblem !== null || this.futureProblem !== null) {
         writePrivateState(this.pendingTombstonePath, { v: 1, tombstones: next });
         this.tombstones = next;
       } else this.writeTombstones(next);

@@ -43,7 +43,7 @@ const REASONS: ReadonlySet<string> = new Set(["revoke_all", "identity_reset", "l
 const ID = /^[0-9a-f]{32}$/;
 const ACCOUNT = /^[A-Za-z0-9_-]{1,64}$/;
 
-function parseDoc(value: unknown): (PcDoc & { counterOnly?: true }) | string {
+export function parsePcAccount(value: unknown): (PcDoc & { counterOnly?: true }) | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not this PC's account state";
   const doc = value as Partial<PcDoc>;
   if (doc.v !== 1) return "unknown version";
@@ -103,7 +103,7 @@ export class PcAccountState {
     }
     let value: unknown;
     try { value = JSON.parse(text); } catch { state.problem = `${state.path} is not JSON`; return state; }
-    const parsed = parseDoc(value);
+    const parsed = parsePcAccount(value);
     if (typeof parsed === "string") state.problem = `${state.path} cannot be trusted: ${parsed}`;
     else {
       const { counterOnly, ...doc } = parsed;
@@ -184,8 +184,8 @@ export class PcAccountState {
   takeSibling(siblingDir: string): void {
     if (this.problem !== null) return;
     const path = join(realFolder(siblingDir), ADMISSION_FILE);
-    let parsed: ReturnType<typeof parseDoc>;
-    try { parsed = parseDoc(JSON.parse(readFileSync(path, "utf8"))); } catch (error) {
+    let parsed: ReturnType<typeof parsePcAccount>;
+    try { parsed = parsePcAccount(JSON.parse(readFileSync(path, "utf8"))); } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       this.problem = `${path} cannot be read (${error instanceof Error ? error.message : String(error)})`;
       return;

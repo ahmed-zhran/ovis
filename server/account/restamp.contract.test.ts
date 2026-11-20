@@ -65,18 +65,43 @@ posix("restamp 1/12: a Revoke still denies, with one derived ID shared by both t
   registry(active, paired);
   tombstones(active, tomb(k, REVOKED));
   tombstones(sibling, tomb(k, REVOKED));
+  const ended = key();
+  const endedRevoke = revoke(ended, stamp(2 * DAY + 2));
+  const unrevoke = { id: "e".repeat(32), revoke: endedRevoke.id, at: stamp(2 * DAY + 3), by: "pc" };
+  for (const folder of [active, sibling]) put(folder, "account-removed.json", {
+    v: 1, markers: [], revokes: [revoke(k, REVOKED), endedRevoke], unrevokes: [unrevoke],
+  });
   const closed = start(active, sibling);
   expect(closed.devices.failsClosed).toBe(true);
-  const before = bytes(active, "devices.json");
+  const unchanged = ["devices.json", "account-tombstones.json", "account-removed.json", "account-pc.json", "account-log.json"];
+  const before = unchanged.map((file) => bytes(active, file));
   await queue(active);
-  expect(bytes(active, "devices.json")).toBe(before);
+  expect(unchanged.map((file) => bytes(active, file))).toEqual(before);
   closed.stop();
   const restarted = start(active, sibling);
   expect(restarted.devices.failsClosed).toBe(false);
   expect(restarted.devices.hasKey(k)).toBe(false);
-  expect(evidence(active)?.revokes).toEqual([revoke(k, stamp(2))]);
+  const endedAfter = revoke(ended, stamp(3));
+  for (const folder of [active, sibling]) {
+    expect(evidence(folder)?.revokes).toEqual([revoke(k, stamp(2)), endedAfter]);
+    expect(evidence(folder)?.unrevokes).toEqual([{ ...unrevoke, at: stamp(4), revoke: endedAfter.id }]);
+  }
   expect(bytes(active, "account-tombstones.json")).toContain(stamp(2));
   expect(bytes(sibling, "account-tombstones.json")).toContain(stamp(2));
+});
+
+posix("restamp 1: refuse a new Revoke ID already occupied in the ledger", async () => {
+  const active = dir();
+  const k = key();
+  registry(active, row());
+  tombstones(active, tomb(k, REVOKED));
+  put(active, "account-removed.json", {
+    v: 1, markers: [], unrevokes: [],
+    revokes: [revoke(k, REVOKED), { ...revoke(key(), stamp(-DAY)), id: revoke(k, stamp(2)).id }],
+  });
+  expect(start(active).devices.failsClosed).toBe(true);
+  expect(await askRecovery(active, { act: "restamp" })).toMatchObject({ error: expect.stringMatching(/collide/) });
+  expect(pending(active)).toBe(false);
 });
 
 posix("restamp 2/3/10: keep own values below the floor, including a past pairing denied by a later removal", async () => {
@@ -149,6 +174,11 @@ posix("restamp 6: a later non-own time invalidates a plan without rewriting any 
   expect(bytes(active, "devices.json")).toBe(before);
   expect(pending(active)).toBe(true);
   expect(bytes(active, "device-journal.json")).toContain("restamp refused");
+  await queue(active);
+  restarted.stop();
+  const repaired = start(active);
+  expect(repaired.devices.failsClosed).toBe(false);
+  expect(repaired.devices.list(null)[0]?.created_at).toBe(stamp(HOUR + 1));
 });
 
 posix.each(["newer", "non-own", "bad shape", "unsafe"] as const)("restamp 7: fail closed over a %s plan", async (damage) => {

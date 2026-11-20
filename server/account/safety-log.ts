@@ -130,7 +130,7 @@ function sameRecord(a: SafetyRecord, b: SafetyRecord): boolean {
   return canonical(a) === canonical(b);
 }
 
-function parseLog(value: unknown): LogFile | string {
+export function parseLog(value: unknown): LogFile | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not a log";
   const file = value as Partial<LogFile>;
   if (file.v !== 1) return "unknown version";
