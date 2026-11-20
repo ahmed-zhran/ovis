@@ -1895,8 +1895,8 @@ export class DeviceStore {
       this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
       return;
     }
-    // evidence that cannot be trusted holds nothing: the Revoke leaves main's tombstone, which a later start takes in
-    // as a Revoke (P13, rule 1)
+    // evidence that cannot be trusted holds nothing: the Revoke leaves main's tombstone, which keeps the key out at once
+    // (stale) and becomes a Revoke at the first start that takes the evidence in (P13, rule 1)
     const keys = [...new Set(rows.flatMap((d) => d.relay_public_key === undefined || this.isTombstoned(d.relay_public_key) ? [] : [d.relay_public_key]))];
     const removedAt = new Date(now).toISOString();
     const next = [...this.tombstones,
