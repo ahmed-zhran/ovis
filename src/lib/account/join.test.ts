@@ -10,7 +10,8 @@ import { deriveServerId } from "../../../shared/relay-server-proof.ts";
 import type { RelayDevice } from "../relay/device.ts";
 import { MemoryDeviceStore } from "../relay/device.test.ts";
 import { newRecordId, readAccountRecord, signAccountRecord } from "../../../shared/account-records.ts";
-import { AdmissionChangedError, admitToAccount, approveJoin, enrollOnPc, vouchedAdmission, enrollPc, keepRemovals, linkThisDevice, rememberDevice, needsLink, pcAccountStatus, planEnroll, takeIntroduction, UnverifiedJoinError, sendQueuedAdds } from "./join.ts";
+import { pairChallenge, pairFingerprint } from "../../../shared/pair-fingerprint.ts";
+import { AccountPcError, AdmissionChangedError, ReplacementPendingError, admitToAccount, approveJoin, enrollOnPc, vouchedAdmission, enrollPc, keepRemovals, linkThisDevice, rememberDevice, needsLink, pcAccountStatus, planEnroll, takeIntroduction, UnverifiedJoinError, sendQueuedAdds } from "./join.ts";
 import { leaveAccount, removeFromAccount } from "./leave.ts";
 import { myPcs } from "./myPcs.ts";
 import { AccountService } from "./service.ts";
@@ -946,4 +947,42 @@ it("does not count a PC as reached when this device holds the account key there 
   expect(unconfirmed).toEqual([y.identity.server_id]);
   const left = await leaveAccount({ service: account, accountStore, relayStore: phone, session: (await account.session())! });
   expect(left.unconfirmed).toEqual([y.identity.server_id]);
+});
+
+describe("a link the PC holds for its screen (P22, T7, T72)", () => {
+  async function saved(store: MemoryDeviceStore) {
+    const own = await accountKey();
+    return store.update("0123456789abcdef0123456789abcdef", () => ({
+      server_id: "0123456789abcdef0123456789abcdef", server_public_key: "server-key", relay: "wss://relay.example", name: "p620",
+      device_id: "fedcba9876543210", private_key: own.private_key, public_spki: own.public_spki, label: "Phone",
+    }));
+  }
+
+  it("asks for the replacement, keeps its current key, and shows the fingerprint it computes itself, never the PC's", async () => {
+    const store = new MemoryDeviceStore();
+    const device = await saved(store);
+    const key = await accountKey();
+    const challenge = pairChallenge();
+    const sent: unknown[] = [];
+    const fetch = async (_path: string, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return Response.json({ device: { id: device.device_id }, replacement: { challenge, fingerprint: "0000-0000" } }, { status: 202 });
+    };
+    const held = await linkThisDevice({ fetch, device, key, account: ACCOUNT, store }).catch((error: unknown) => error);
+    expect(held).toBeInstanceOf(ReplacementPendingError);
+    expect((held as ReplacementPendingError).fingerprint).toBe(await pairFingerprint(device.server_id, challenge, key.public_spki));
+    expect(sent).toEqual([expect.objectContaining({ replacement: 1 })]);
+    const kept = (await store.get(device.server_id))!;
+    expect(kept.public_spki).toBe(device.public_spki);
+    expect(kept.pending_key?.public_spki).toBe(key.public_spki);
+  });
+
+  it("a 202 without a usable challenge is refused, and the current key stays", async () => {
+    const store = new MemoryDeviceStore();
+    const device = await saved(store);
+    const key = await accountKey();
+    const fetch = async () => Response.json({ device: { id: device.device_id }, replacement: { fingerprint: "0000-0000" } }, { status: 202 });
+    expect(await linkThisDevice({ fetch, device, key, account: ACCOUNT, store }).catch((error: unknown) => error)).toBeInstanceOf(AccountPcError);
+    expect((await store.get(device.server_id))!.public_spki).toBe(device.public_spki);
+  });
 });
