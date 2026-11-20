@@ -541,8 +541,9 @@ export function createServer(
   const accountOrder = safetyLog !== null ? AccountOrder.open(stateDir) : null;
   devices.attachAccountOrder(accountOrder);
   const readPorts = safetyLog !== null && pcAccount !== null && journal !== null && accountOrder !== null
+    ? (readmission?: Readmission) => snapshotPorts({ devices, safetyLog, pc: pcAccount, journal, order: accountOrder, serverId: serverIdNow, requestRead: () => { void accountMailbox.pull(); },
       // the read's commit turn: the account rows take its list, idle rows expire (T54), and the wait after a start ends
-      commitList: (snapshot) => accountCatchUp.commitList(snapshot) })
+      commitList: (snapshot) => accountCatchUp.commitList(snapshot, readmission) })
     : null;
   const accountMailbox = new AccountMailbox({
     pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
