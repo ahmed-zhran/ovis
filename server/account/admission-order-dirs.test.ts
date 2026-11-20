@@ -249,6 +249,19 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     }
   });
 
+  test("LEDGER S2-38 (dori at 2332d220): numbered rows an older release copied into a folder with no order file do not block either folder for good", () => {
+    const [a, b] = [dir(), dir()];
+    writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+    put(a, [row("aaaaaaaaaaaaaaaa", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
+    // an older release merges whole rows, origin included, into the sibling, which never ran this release
+    writeFileSync(join(b, "devices.json"), readFileSync(join(a, "devices.json")), { mode: 0o600 });
+    for (const flag of [true, false]) {
+      const devices = start(a, b, flag).app.context.services.devices;
+      expect(() => devices.startPairing()).not.toThrow();
+      stop(fixtures.at(-1)!, a);
+    }
+  });
+
   test("P22: with the release flag off a twin keeps this folder's own origin, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
