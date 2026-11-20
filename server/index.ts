@@ -267,8 +267,6 @@ export function createServer(
   // a sibling dir's account state is merged too; one that cannot be fails this PC closed like a damaged log (S19)
   const accountMerge = opensAll && options.siblingStateDir ? mergeAccountState(stateDir, options.siblingStateDir) : null;
   const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge ?? accountMerge) : null;
-  // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
-  try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
   // then its rows: none is imported while the merged log holds a lock, a block or a freeze in force, and a row whose
   // key differs between the two copies is dropped (T48, T27)
   const closure = safetyLog !== null && (safetyLog.strict !== null || safetyLog.state().locked || safetyLog.state().freezes.length > 0);
@@ -284,6 +282,11 @@ export function createServer(
   // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
   const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
   const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, journal });
+  // Device migration creates the journal's companions. Recover interrupted notices before their whole records fold.
+  if (devices.error === null && devices.accountError === null && safetyLog && journal) {
+    journal.recordSnapshotLifts(safetyLog);
+    try { safetyLog.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   for (const strict of [safetyLog?.strict, pcAccount?.strict, removals?.strict, journal?.strict]) if (strict) console.error(strict);
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
   if (options.profile === "machine") devices.closeGate();
