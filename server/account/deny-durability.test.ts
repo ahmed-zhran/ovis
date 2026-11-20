@@ -297,4 +297,27 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     expect(reopened.isTombstoned(k)).toBe(true);
     expect(reopened.hasKey(k)).toBe(false);
   });
+
+  test("LEDGER S2-38 D2 (dori MEDIUM at 0c444b46): a cookie Revoke whose registry write failed can be retried in the same run, and its success opens the PC", () => {
+    const at = dir();
+    const devices = store(at);
+    const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    devices.match(cookie.token);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "devices.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revoke(cookie.device.id)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.revoke(cookie.device.id)).toBe(true);
+    expect(devices.failsClosed).toBe(false);
+  });
+
+  test("LEDGER S2-38 D3 (dori LOW at 0c444b46): raising gen while account-pc.json cannot be read does not throw; the PC is already closed", () => {
+    const at = dir();
+    store(at);
+    writeFileSync(join(at, "account-pc.json"), "not json", { mode: 0o600 });
+    const pc = PcAccountState.open(at);
+    expect(() => pc.raiseGen()).not.toThrow();
+  });
 });
