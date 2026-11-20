@@ -1,6 +1,7 @@
 import type { TailnetPcsOptions } from "../tailnet-pcs.ts";
 import type { SshCandidatesOptions } from "../ssh-candidates.ts";
 import { createAlertWebhook } from "../alert-webhook.ts";
+import { forgetBuiltInBrowserToken } from "../agent-launch.ts";
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { RelaySocket } from "../../shared/relay-channel.ts";
@@ -880,11 +881,13 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     },
     onPaneEnded: (paneId) => {
       paneGone(paneId);
+      forgetBuiltInBrowserToken(paneId);
       broadcastAll({ type: "pane-exited", pane_id: paneId });
       push.onEnded(paneId).catch(logPushError);
     },
     onPaneClosed: (paneId) => {
       paneGone(paneId);
+      forgetBuiltInBrowserToken(paneId);
       push.closed(paneId);
     },
     onPaneMoved: (from, to) => {

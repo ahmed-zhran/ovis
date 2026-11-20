@@ -71,7 +71,7 @@ export function coreEnv(base: Env, execPath: string = process.execPath): Env {
  * with its state in the app's own folder. A herdr plugin's or supervisor's settings the app was
  * started under are dropped: this server is neither.
  */
-export function serverEnv(base: Env, options: { hc: string; stateDir: string; port: number }): Env {
+export function serverEnv(base: Env, options: { hc: string; stateDir: string; port: number; browserSocket?: string }): Env {
   const env: Env = {
     ...coreEnv(base),
     OVIS_RUNTIME: "herdr-core",
@@ -82,6 +82,8 @@ export function serverEnv(base: Env, options: { hc: string; stateDir: string; po
     HOST: "127.0.0.1",
     PORT: String(options.port),
     OVIS_DESKTOP_APP: "1",
+    // where an agent's built-in browser tool reaches the app (browserBroker.ts); the server offers it only with this
+    ...(options.browserSocket ? { OVIS_BROWSER_SOCKET: options.browserSocket } : {}),
   };
   const dropped = new Set(["HERDR_PLUGIN_ROOT", "HERDR_SOCKET", "OVIS_MANAGED", "OVIS_BOOT_ID", "OVIS_TOKEN"]);
   // the server would take a dropped setting back from its name before the rename (server/legacy-env.ts)
