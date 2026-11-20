@@ -2,7 +2,7 @@ import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAccountDevicesFile } from "../../shared/account-snapshot.ts";
-import { ACCOUNT_OPENS_ALL_FEATURE } from "../../shared/relay-mux.ts";
+import { ACCOUNT_OPENS_ALL_FEATURE, FrameType } from "../../shared/relay-mux.ts";
 import { bounded, deferred, relayConnection, TestClock } from "../relay/test-helpers.ts";
 import { ACCOUNT_DEVICES_FILE } from "./account-devices.ts";
 import { createListedPc } from "./listed-pc.test-helpers.ts";
@@ -90,11 +90,16 @@ test("T55/S27: only the expired device's proved attempt gets a new admission, no
   expect(machine.row().state).toBe("expired");
 
   const returning = await relayConnection(machine.fixture, { serverId: machine.serverId });
+  let holdReason: string | undefined;
+  returning.onFrame = frame => {
+    if (frame.type === FrameType.SESSION_ERROR) holdReason = frame.payload.hold?.reason;
+  };
   const result = await bounded(Promise.race([
     returning.auth(machine.device, [ACCOUNT_OPENS_ALL_FEATURE]).then(() => "authenticated", () => returning.serverError),
     returning.serverError,
   ]));
   expect(result).toBe("held");
+  expect(holdReason).toBe("join_hold");
   const admitted = machine.row();
   expect(admitted).toMatchObject({
     state: "hold", last_signin_day: null,
