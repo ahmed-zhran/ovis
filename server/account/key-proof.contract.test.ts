@@ -10,24 +10,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOURNAL_FILE } from "./device-journal.ts";
 import { pairingPc, phone, setUpFor, type Pc } from "./pairing.test-helpers.ts";
-import { provingDevice } from "./key-proof.test-helpers.ts";
+import { keyProofPc, provingDevice } from "./key-proof.test-helpers.ts";
 
 const pcs: Pc[] = [];
 afterEach(async () => { for (const pc of pcs.splice(0)) await pc.close(); });
 
-async function pc(accountOpensAll: boolean, platform: NodeJS.Platform = "linux") {
-  const told: { pending: { id: string; action: { kind: string; pending?: string; fingerprint?: string } }[] }[] = [];
-  let push!: (line: string) => void;
-  const input = new ReadableStream<Uint8Array>({ start(controller) { push = (line) => controller.enqueue(new TextEncoder().encode(line)); } });
-  const made = await pairingPc({ server: { accountOpensAll, platform, desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
+async function pc(accountOpensAll: boolean, platform?: NodeJS.Platform) {
+  const made = await keyProofPc(accountOpensAll, platform);
   pcs.push(made);
-  const screen = {
-    told,
-    approve: (id: string) => push(`${JSON.stringify({ approve: id })}\n`),
-    decline: (id: string) => push(`${JSON.stringify({ decline: id })}\n`),
-    keyConfirm: () => told.at(-1)?.pending.find((entry) => entry.action.kind === "approve_key"),
-  };
-  return Object.assign(made, { screen });
+  return made;
 }
 
 test("T71/T72: the device proves its key, waits, and is let in only when the PC's screen approves that key", async () => {
