@@ -204,4 +204,101 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     expect(devices.failsClosed).toBe(false);
     expect(devices.account()).toBe("acct_a");
   });
+
+  test("LEDGER S2-38 L1 (dori at bf7d2c97): a link made with the flag off binds its account at the next flag-on start, not strict", async () => {
+    const dir = stateDir();
+    store(dir);
+    const off = new DeviceStore(dir);
+    const k = await key();
+    const id = off.pairRelay(off.startPairing().code, "Phone", k)!.device.id;
+    off.linkAccountKey(id, k, k, ACCOUNT);
+    const on = store(dir);
+    expect(on.failsClosed).toBe(false);
+    expect(on.account()).toBe(ACCOUNT);
+  });
+
+  test("LEDGER S2-38 L2 (dori at bf7d2c97): Revoke all with the flag off clears the binding at the next flag-on start", async () => {
+    const dir = stateDir();
+    await linked(store(dir));
+    new DeviceStore(dir).revokeAll();
+    expect(store(dir).account()).toBeNull();
+  });
+
+  test("LEDGER S2-38 L3 (dori at bf7d2c97): an identity reset with the flag off clears the binding at the next flag-on start", async () => {
+    const dir = stateDir();
+    await linked(store(dir));
+    const f = relayFixture(false, { stateDir: dir, accountOpensAll: false });
+    fixtures.push(f);
+    dirs.splice(dirs.indexOf(dir), 1);
+    await f.app.context.services.relay.resetIdentity();
+    f.app.stop();
+    fixtures.pop();
+    dirs.push(dir);
+    expect(store(dir).account()).toBeNull();
+  });
+
+  test("LEDGER S2-38 L4 (dori LOW at bf7d2c97): an identity reset whose clear cannot be written fails the PC closed, as Revoke all does", async () => {
+    const dir = stateDir();
+    const devices = store(dir);
+    await linked(devices);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(dir, ADMISSION_FILE)) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { try { devices.clearAccountBinding("identity_reset", "pc"); } catch { /* the write fails */ } } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
+  });
+
+  test("LEDGER S2-38 L5 (gate r3 at bf7d2c97): a folder taking its sibling's binding takes that binding's first key, also when fresh or after its own Revoke all", async () => {
+    const [fresh, sibling] = [stateDir(), stateDir()];
+    const first = await linked(store(sibling), "acct_x");
+    start(fresh, true, sibling);
+    expect(PcAccountState.open(fresh).first()?.key).toBe(first.key);
+    const [revoked, other] = [stateDir(), stateDir()];
+    const own = store(revoked);
+    await linked(own, "acct_x");
+    own.revokeAll();
+    const theirs = await linked(store(other), "acct_x");
+    start(revoked, true, other);
+    expect(PcAccountState.open(revoked).first()?.key).toBe(theirs.key);
+  });
+
+  test("LEDGER S2-38 L6 (gate r3 at bf7d2c97): a sibling with no saved relay identity is no sibling of a PC whose identity is known", async () => {
+    const [a, b] = [stateDir(), stateDir()];
+    loadRelayIdentity(a);
+    store(a);
+    const state = PcAccountState.open(b);
+    state.migrate(null, false);
+    state.bind("acct_x", "x").commit();
+    expect(start(a, true, b).account()).toBeNull();
+  });
+
+  test("LEDGER S2-38 L7 (gate r3 at bf7d2c97): a sibling folder of another relay identity merges no rows into this one", async () => {
+    const [a, b] = [stateDir(), stateDir()];
+    for (const dir of [a, b]) loadRelayIdentity(dir);
+    const mine = await linked(store(a), "acct_a");
+    await linked(store(b), "acct_b");
+    const devices = start(a, true, b);
+    expect(devices.failsClosed).toBe(false);
+    expect(devices.list(null).map((d) => d.id)).toEqual([mine.id]);
+  });
+
+  test("LEDGER S2-38 L8 (gate r3 at bf7d2c97): a pending binding with its row stands beside an empty sibling of the same identity", async () => {
+    const [a, b] = [stateDir(), stateDir()];
+    store(b);
+    const devices = store(a);
+    const k = await key();
+    const id = devices.pairRelay(devices.startPairing().code, "First", k)!.device.id;
+    const rename = privateStateFs.renameSync;
+    let writes = 0;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(a, ADMISSION_FILE) && ++writes === 2) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { try { devices.linkAccountKey(id, k, k, ACCOUNT); } catch { /* the binding could not be made to stand */ } } finally { privateStateFs.renameSync = rename; }
+    const restarted = start(a, true, b);
+    expect(restarted.failsClosed).toBe(false);
+    expect(restarted.account()).toBe(ACCOUNT);
+  });
 });
