@@ -464,7 +464,7 @@ export class DeviceStore {
    * `expires`: the wall-clock end of its ten minutes, which its `expires_at` shows; `deadline`: the same end on the
    * store's clock, which only moves forward; `over`: set the first time either says its ten minutes are over (codeOver)
    */
-  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string; reserved?: Map<string, { readonly key: string; readonly how: "code" | "qr" }> } | null = null;
+  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string; reserved?: Map<string, { readonly key: string; readonly how: "code" | "qr" }>; cancelExpiry?: () => void } | null = null;
   private readonly pairingEndedListeners = new Set<(codeId: string) => void>();
   /** How the latest codes made for an account ended, newest last: ENDED_ACCOUNT_CODES at most, in memory only. */
   private endedAccountCodes: Extract<AccountPairingState, { state: "ended" }>[] = [];
@@ -998,6 +998,13 @@ export class DeviceStore {
       ...(how.noAccountOnly === true && account !== undefined ? { named: { account } } : {}),
       ...(how.noAccountOnly === true && issuedUnder !== undefined ? { issuedUnder } : {}),
     };
+    // the code ends on the store's own clock when its ten minutes are over, not at the next look (T71)
+    const pending = this.pending;
+    pending.cancelExpiry = this.clock.setTimeout(() => {
+      if (this.pending !== pending) return;
+      pending.over = true;
+      this.expirePending();
+    }, CODE_TTL_MS + 1);
     const started = { code, expires_at: new Date(this.pending.expires).toISOString() };
     for (const listener of this.codeStarts) listener();
     return started;
@@ -1234,6 +1241,7 @@ export class DeviceStore {
     const waiting = this.pending?.waiting;
     const id = this.pending?.id;
     const named = this.pending?.named;
+    this.pending?.cancelExpiry?.();
     this.pending = null;
     // every end of a code is heard: its reservations go with it (T71, S2-13 PendingRedemptions.dropCode)
     if (id !== undefined) for (const listener of [...this.pairingEndedListeners]) {
