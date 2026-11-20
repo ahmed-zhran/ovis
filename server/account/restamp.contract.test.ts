@@ -1,12 +1,16 @@
-import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, expect, setSystemTime, spyOn, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
 import { createServer } from "../index.ts";
 import { privateStateFs } from "../private-state.ts";
+import { DeviceJournal } from "./device-journal.ts";
 import { askRecovery } from "./recovery.ts";
 import { parseEvidence } from "./removal-evidence.ts";
+import { SafetyLog } from "./safety-log.ts";
 
 const NOW = Date.parse("2026-10-15T12:00:00.000Z");
 const DAY = 86_400_000;
@@ -24,12 +28,19 @@ const revoke = (key: string, at: string) => ({ id: createHash("sha256").update(`
 const dirs: string[] = [];
 const apps = new Set<ReturnType<typeof createServer>>();
 const posix = test.skipIf(process.platform === "win32");
+let herdrSocket: string | undefined;
 
-beforeEach(() => setSystemTime(NOW));
+beforeEach(() => {
+  setSystemTime(NOW);
+  herdrSocket = process.env["HERDR_SOCKET"];
+  process.env["HERDR_SOCKET"] = join(dir(), "unused.sock");
+});
 afterEach(() => {
   setSystemTime();
   for (const app of apps) app.stop();
   apps.clear();
+  if (herdrSocket === undefined) delete process.env["HERDR_SOCKET"];
+  else process.env["HERDR_SOCKET"] = herdrSocket;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -41,12 +52,13 @@ function dir() {
 const put = (dir: string, file: string, value: unknown) => writeFileSync(join(dir, file), JSON.stringify(value), { mode: 0o600 });
 const bytes = (dir: string, file: string) => readFileSync(join(dir, file), "utf8");
 const registry = (dir: string, ...devices: ReturnType<typeof row>[]) => put(dir, "devices.json", { gate_closed_at: stamp(-DAY), devices });
+const registered = (dir: string) => (JSON.parse(bytes(dir, "devices.json")) as { devices: ReturnType<typeof row>[] }).devices;
 const tombstones = (dir: string, ...tombstones: ReturnType<typeof tomb>[]) => put(dir, "account-tombstones.json", { v: 1, tombstones });
 const evidence = (dir: string) => parseEvidence(JSON.parse(bytes(dir, "account-removed.json")));
 const pending = (dir: string) => existsSync(join(dir, "restamp.json"));
 
 function start(stateDir: string, siblingStateDir?: string) {
-  const app = createServer({ stateDir, ...(siblingStateDir === undefined ? {} : { siblingStateDir }), accountOpensAll: true, port: 0, hostname: "127.0.0.1", tailscaleOwner: null, sidecar: false });
+  const app = createServer({ stateDir, ...(siblingStateDir === undefined ? {} : { siblingStateDir }), accountOpensAll: true, port: 0, hostname: "127.0.0.1", tailscaleOwner: null, sidecar: false, machines: false });
   apps.add(app);
   return { devices: app.context.services.devices, stop() { app.stop(); apps.delete(app); } };
 }
@@ -172,7 +184,8 @@ posix("restamp 6: a later non-own time invalidates a plan without rewriting any 
   expect(restarted.devices.failsClosed).toBe(true);
   expect(restarted.devices.accountError).toContain("ovis recover --restamp again");
   expect(bytes(active, "devices.json")).toBe(before);
-  expect(pending(active)).toBe(true);
+  expect(pending(active)).toBe(false);
+  expect(existsSync(join(active, "restamp-refused.json"))).toBe(true);
   expect(bytes(active, "device-journal.json")).toContain("restamp refused");
   await queue(active);
   restarted.stop();
@@ -224,4 +237,242 @@ posix("restamp 8: the asked audit reaches disk before publishing the plan, and a
   expect(pending(active)).toBe(false);
   expect(existsSync(join(active, "restamp-done.json"))).toBe(true);
   expect(bytes(active, "device-journal.json")).toContain("restamp applied");
+});
+
+posix("r1 HIGH 1: startup refuses a writable log without changing its mode or bytes", async () => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  const file = "account-log.json";
+  const before = bytes(active, file);
+  chmodSync(join(active, file), 0o664);
+  const restarted = start(active);
+  expect({
+    closed: restarted.devices.failsClosed, mode: statSync(join(active, file)).mode & 0o777, log: bytes(active, file), pending: pending(active),
+  }).toEqual({ closed: true, mode: 0o664, log: before, pending: true });
+});
+
+posix("r1 HIGH 2: clock-blocked sibling merge does not coalesce away a separate local denial", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const paired = row();
+  registry(active, paired);
+  tombstones(active, tomb(paired.relay_public_key, REVOKED));
+  tombstones(sibling, tomb(paired.relay_public_key, stamp(HOUR), "service-removal"));
+  const closed = start(active, sibling);
+  expect(closed.devices.failsClosed).toBe(true);
+  await queue(active);
+  closed.stop();
+  const repaired = start(active, sibling);
+  expect(repaired.devices.failsClosed).toBe(false);
+  expect(repaired.devices.hasKey(paired.relay_public_key)).toBe(false);
+  expect(evidence(active)?.revokes).toContainEqual(revoke(paired.relay_public_key, stamp(HOUR + 2)));
+  expect(evidence(active)?.markers[0]?.removals.map(({ id }) => id)).toContain("service-removal");
+});
+
+function failRename(path: string, run: () => void) {
+  const rename = privateStateFs.renameSync;
+  let hit = false;
+  privateStateFs.renameSync = (from, to) => {
+    if (to === path && !hit) {
+      hit = true;
+      throw new Error("interrupted private-state replacement");
+    }
+    rename(from, to);
+  };
+  try { run(); } finally { privateStateFs.renameSync = rename; }
+  return hit;
+}
+
+posix.each([false, true])("r1 HIGH 3: stale two-folder plan rolls back; interrupt rollback=%p", async (interrupt) => {
+  const [active, sibling] = [dir(), dir()];
+  const first = row();
+  const k = key();
+  for (const folder of [active, sibling]) registry(folder, first);
+  tombstones(active, tomb(k, REVOKED));
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  expect(failRename(join(sibling, "devices.json"), () => start(active, sibling).stop())).toBe(true);
+  expect(registered(active)[0]?.created_at).toBe(stamp(1));
+  expect(bytes(active, "account-tombstones.json")).toContain(stamp(2));
+  expect(registered(sibling)[0]?.created_at).toBe(FUTURE);
+  tombstones(sibling, tomb(k, REVOKED), tomb(key(), stamp(HOUR), "late-removal"));
+  if (interrupt) {
+    expect(failRename(join(active, "account-tombstones.json"), () => {
+      const stopped = start(active, sibling);
+      expect(stopped.devices.failsClosed).toBe(true);
+      stopped.stop();
+    })).toBe(true);
+    expect(pending(active) || existsSync(join(active, "restamp-rollback.json"))).toBe(true);
+    expect(registered(active)[0]?.created_at).toBe(FUTURE);
+    expect(bytes(active, "account-tombstones.json")).toContain(stamp(2));
+  }
+  const refused = start(active, sibling);
+  expect(refused.devices.failsClosed).toBe(true);
+  expect(registered(active)[0]?.created_at).toBe(FUTURE);
+  expect(bytes(active, "account-tombstones.json")).toContain(REVOKED);
+  expect(registered(sibling)[0]?.created_at).toBe(FUTURE);
+  expect(bytes(sibling, "account-tombstones.json")).toContain(stamp(HOUR));
+  expect(existsSync(join(active, "restamp-refused.json"))).toBe(true);
+  await queue(active);
+  refused.stop();
+  expect(start(active, sibling).devices.failsClosed).toBe(false);
+});
+
+posix("r1 HIGH 3: starting the sibling completes the other folder's plan", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const first = row();
+  registry(active, first);
+  registry(sibling, first);
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  expect(start(sibling, active).devices.failsClosed).toBe(false);
+  expect(existsSync(join(active, "restamp-done.json"))).toBe(true);
+  expect(registered(sibling)[0]?.created_at).toBe(stamp(1));
+});
+
+posix("r1 HIGH 4: an otherwise unoccupied ID named by a sibling Unrevoke is reserved", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const k = key();
+  registry(active, row());
+  tombstones(active, tomb(k, REVOKED));
+  put(sibling, "account-removed.json", {
+    v: 1, markers: [], revokes: [], unrevokes: [{ id: "e".repeat(32), revoke: revoke(k, stamp(2)).id, at: stamp(-DAY), by: "pc" }],
+  });
+  expect(start(active, sibling).devices.failsClosed).toBe(true);
+  expect(await askRecovery(active, { act: "restamp" })).toMatchObject({ error: expect.stringMatching(/collide|reserved/) });
+  expect(pending(active)).toBe(false);
+});
+
+posix("r1 MEDIUM: a waiting signed block contributes to the comparison floor", async () => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+  const signer = Buffer.from(await crypto.subtle.exportKey("spki", pair.publicKey)).toString("base64url");
+  const block = await signSafetyRecord({ v: 1, kind: "block", account, target: key(), signer, target_no: 2, signer_no: 1, signed_at: stamp(HOUR), nonce: newRecordId() }, pair.privateKey);
+  if (block.kind !== "block") throw new Error("Expected a signed block fixture");
+  expect(SafetyLog.open(active).wait({ record: block, got: "mailbox", signer_removed: false })).toBe(true);
+  await queue(active);
+  expect(JSON.parse(bytes(active, "restamp.json"))).toMatchObject({ base: stamp(HOUR) });
+  closed.stop();
+});
+
+posix("r1 MEDIUM: confirmation refuses a newly conflicting sibling binding", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const binding = (account: string, bind_id: string) => ({ v: 1, next_admit: 1, binding: { account, bind_id }, clears: [], first: null, others_ever: true, gen: 0 });
+  registry(active, row());
+  put(active, "account-pc.json", binding(account, "a".repeat(32)));
+  start(active, sibling);
+  const preview = await askRecovery(active, { act: "restamp" }) as { confirm?: string };
+  expect(preview.confirm).toBeString();
+  put(sibling, "account-pc.json", binding("other_account", "b".repeat(32)));
+  expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringMatching(/bind.*two accounts/i) });
+  expect(pending(active)).toBe(false);
+});
+
+posix.each([false, true])("r1 MEDIUM: audit is already on disk when archiving a plan; refuse=%p", async (invalidated) => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  if (invalidated) tombstones(active, tomb(key(), stamp(HOUR), "late-removal"));
+  const label = invalidated ? "restamp refused" : "restamp applied";
+  const archive = join(active, invalidated ? "restamp-refused.json" : "restamp-done.json");
+  const rename = privateStateFs.renameSync;
+  let recorded = false;
+  privateStateFs.renameSync = (from, to) => {
+    if (to === archive) recorded = bytes(active, "device-journal.json").includes(label);
+    rename(from, to);
+  };
+  try { start(active); } finally { privateStateFs.renameSync = rename; }
+  expect(recorded).toBe(true);
+  expect(existsSync(archive)).toBe(true);
+});
+
+posix("r1 MEDIUM: Windows startup does not consume or alter a queued plan", async () => {
+  const active = dir();
+  registry(active, row());
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  const before = bytes(active, "restamp.json");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!platform) throw new Error("No test platform descriptor");
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try { expect(start(active).devices.failsClosed).toBe(true); }
+  finally { Object.defineProperty(process, "platform", platform); }
+  expect(bytes(active, "restamp.json")).toBe(before);
+  expect(bytes(active, "devices.json")).toContain(FUTURE);
+});
+
+posix("r1 LOW: a new own timestamp invalidates the plan without losing the new value", async () => {
+  const active = dir();
+  const first = row();
+  registry(active, first);
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  const later = row(stamp(2 * DAY + 5), key(), other);
+  registry(active, first, later);
+  const before = bytes(active, "devices.json");
+  const refused = start(active);
+  expect(refused.devices.failsClosed).toBe(true);
+  expect(bytes(active, "devices.json")).toBe(before);
+  expect(existsSync(join(active, "restamp-refused.json"))).toBe(true);
+  await queue(active);
+});
+
+posix("r1 HIGH 3b: rollback does not overwrite a value that the plan never wrote", async () => {
+  const active = dir();
+  const first = row();
+  const second = row(REVOKED, key(), other);
+  registry(active, first, second);
+  const closed = start(active);
+  await queue(active);
+  closed.stop();
+  const independent = stamp(2 * DAY + 8);
+  registry(active, { ...first, created_at: stamp(1) }, { ...second, created_at: independent });
+  const refused = start(active);
+  expect(refused.devices.failsClosed).toBe(true);
+  const { devices } = JSON.parse(bytes(active, "devices.json")) as { devices: ReturnType<typeof row>[] };
+  expect(devices.map(({ created_at }) => created_at)).toEqual([FUTURE, independent]);
+});
+
+posix("r1 MEDIUM: the startup plan is read before the sibling identity and relay state", async () => {
+  const [active, sibling] = [dir(), dir()];
+  registry(active, row());
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  const realRead = fs.readFileSync;
+  const reads: string[] = [];
+  const watch = spyOn(fs, "readFileSync").mockImplementation((...args: Parameters<typeof fs.readFileSync>) => {
+    if (typeof args[0] === "string") reads.push(args[0]);
+    return realRead(...args);
+  });
+  try { start(active, sibling); } finally { watch.mockRestore(); }
+  const plan = reads.indexOf(join(active, "restamp.json"));
+  const identity = reads.indexOf(join(sibling, "relay", "identity.json"));
+  const relay = reads.indexOf(join(active, "relay", "pairing-window.json"));
+  expect({ planSeen: plan >= 0, identityAfter: identity > plan, relayAfter: relay > plan }).toEqual({
+    planSeen: true, identityAfter: true, relayAfter: true,
+  });
+});
+
+posix("r1 LOW: confirmation cannot overwrite a newer on-disk journal", async () => {
+  const active = dir();
+  registry(active, row());
+  start(active);
+  const preview = await askRecovery(active, { act: "restamp" }) as { confirm?: string };
+  expect(preview.confirm).toBeString();
+  DeviceJournal.open(active).append({ kind: "account", how: "independent audit", key: null, no: null, row: null, by: "pc", account: null, label: "independent audit" });
+  const before = bytes(active, "device-journal.json");
+  expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringMatching(/journal/i) });
+  expect(bytes(active, "device-journal.json")).toBe(before);
+  expect(pending(active)).toBe(false);
 });
