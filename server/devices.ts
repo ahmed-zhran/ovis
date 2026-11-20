@@ -917,13 +917,7 @@ export class DeviceStore {
     const targets = this.devices.filter((d) => d.relay_public_key === record.target);
     // a target this PC has no row of: the block waits, ends nobody, and is judged when its target is here (P19)
     if (targets.length === 0) {
-      if (!safety.wait({ record, got, signer_removed: false })) {
-        if (safety.strict === null) {
-          this.failedDenies.add(record.target);
-          this.denyProblem = "A block could not be queued because the waiting queue is full: only this PC itself gets in.";
-        }
-        return refused("record_invalid");
-      }
+      if (!safety.wait({ record, got, signer_removed: false })) return refused("record_invalid");
       return refused("unknown_target");
     }
     let cutoff: AdmissionPosition | null = null;
