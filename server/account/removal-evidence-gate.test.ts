@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey, type SafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
+import { privateStateFs } from "../private-state.ts";
 import { relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { REMOVAL_FILE, RemovalEvidence } from "./removal-evidence.ts";
@@ -364,5 +367,118 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     // repaired: the old forget is read again, and the removal still stands
     writeFileSync(join(dir, "account-log.json"), log, { mode: 0o600 });
     expect(open(dir).removedByAccount(k)).toBe(true);
+  });
+
+  test("LEDGER S2-38 L1 (gate r3 at 2dd91119): with a tombstone file damaged, the revoked row leaves devices.json at once, not only after the repair", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", await key())!.device.id;
+    const kept = readFileSync(join(dir, "devices.json"));
+    damageFile(join(dir, "account-tombstones.json"));
+    open(dir).revoke(id);
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    open(dir);
+    expect(JSON.parse(readFileSync(join(dir, "devices.json"), "utf8")).devices.map((d: { id: string }) => d.id)).not.toContain(id);
+  });
+
+  test("LEDGER S2-38 L2 (gate r3 at 2dd91119): a damaged pending file refuses account records but does not fail the whole PC closed", () => {
+    const dir = stateDir();
+    open(dir);
+    writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
+    const devices = open(dir);
+    expect(devices.accountError).not.toBeNull();
+    expect(devices.failsClosed).toBe(false);
+  });
+
+  test("LEDGER S2-38 L3 (gate r3 at 2dd91119): Revokes and unrevokes a re-pair ended do not grow without bound", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const k = await key();
+    for (let i = 0; i < 5; i++) {
+      const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+      devices.revoke(id);
+    }
+    devices.pairRelay(devices.startPairing().code, "Phone", k);
+    const doc = JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[]; unrevokes: unknown[] };
+    expect(doc.revokes.length + doc.unrevokes.length).toBeLessThan(10);
+  });
+
+
+
+  test("LEDGER S2-38 L4 (dori LOW 1 at c9b1a699): removal evidence that is a link to another file is not trusted, as no private state is", () => {
+    if (process.platform === "win32") return;
+    const dir = stateDir();
+    open(dir);
+    const elsewhere = stateDir();
+    const target = join(elsewhere, "evidence.json");
+    writeFileSync(target, readFileSync(join(dir, REMOVAL_FILE)), { mode: 0o600 });
+    rmSync(join(dir, REMOVAL_FILE));
+    symlinkSync(target, join(dir, REMOVAL_FILE));
+    expect(open(dir).failsClosed).toBe(true);
+  });
+
+  test("LEDGER S2-38 L5 (dori LOW 2 at c9b1a699, MUST-CLOSE): removal evidence written once and then missing is strict, even with no device journal", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    devices.revoke(devices.pairRelay(devices.startPairing().code, "Phone", await key())!.device.id);
+    rmSync(join(dir, REMOVAL_FILE));
+    expect(open(dir).failsClosed).toBe(true);
+  });
+
+  test("LEDGER S2-38 L6 (dori LOW 3 at c9b1a699, MUST-CLOSE): a ninth removal of one key does not evict a removal still standing", async () => {
+    const dir = stateDir();
+    const evidence = RemovalEvidence.open(dir, null);
+    const k = await key();
+    for (let n = 0; n < 9; n++) evidence.addRemoval(k, "acct", { id: String(n).padStart(32, "0"), at: new Date(Date.UTC(2026, 9, 1 + n)).toISOString() });
+    expect(evidence.standingMarkers(k).flatMap((m) => m.standing.map((r) => r.id))).toContain("0".repeat(32));
+  });
+
+  test("LEDGER S2-38 L7 (dori LOW 4 at c9b1a699): ended Revoke and unrevoke pairs are bounded (see L3)", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const k = await key();
+    for (let i = 0; i < 12; i++) devices.revoke(devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id);
+    const doc = JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[] };
+    expect(doc.revokes.length).toBeLessThanOrEqual(8);
+  });
+
+  test("LEDGER S2-38 L8 (dori LOW 5 at c9b1a699): with the flag on, an account tombstone of an account this PC is not in keeps no row of it out", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const k = await key();
+    devices.pairRelay(devices.startPairing().code, "Phone", k);
+    put(dir, "account-tombstones.json", tombstones([{ key: k, account: "acct_x", record_id: "r".repeat(32), removed_at: new Date(Date.now() + 60_000).toISOString() }]));
+    expect(open(dir).hasKey(k)).toBe(true);
+  });
+
+  test("LEDGER S2-38 L9 (dori MEDIUM at 16a85de1, MUST-CLOSE): a row paired while the clock ran two days ahead does not fail the PC closed, and a Revoke after it still keeps it out", async () => {
+    const dir = stateDir();
+    const k = await key();
+    try {
+      setSystemTime(new Date("2026-10-03T00:00:00.000Z"));
+      const devices = open(dir);
+      const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+      setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      const reopened = open(dir);
+      expect(reopened.failsClosed).toBe(false);
+      const kept = readFileSync(join(dir, "devices.json"));
+      reopened.revoke(id);
+      writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+      expect(open(dir).has(id)).toBe(false);
+    } finally { setSystemTime(); }
+  });
+
+  test("LEDGER S2-38 CR2 (CodeRabbit at 4868c76e): Revoke all writes the Revokes of every key in one write, so a failure writes none", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    for (let i = 0; i < 2; i++) devices.pairRelay(devices.startPairing().code, "Phone", await key());
+    const rename = privateStateFs.renameSync;
+    let writes = 0;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(dir, REMOVAL_FILE) && ++writes === 2) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { try { devices.revokeAll(); } catch { /* the second write fails */ } } finally { privateStateFs.renameSync = rename; }
+    expect((JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[] }).revokes).toHaveLength(0);
   });
 });
