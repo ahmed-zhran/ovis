@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
+import { DeviceStore, mergeAccountTombstones } from "./devices.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { SeenStore } from "./seen.ts";
@@ -256,9 +256,7 @@ export function createServer(
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   const opensAll = provided.accountOpensAll ?? accountOpensAll();
-  // the rows this folder held before its first start with the flag on, read before its sibling's join it (T50)
-  const ownBefore = readDeviceRegistry(join(stateDir, "devices.json"));
-  const admissions = opensAll ? AdmissionOrder.open(stateDir, ownBefore.kind === "ok" ? ownBefore.devices.map((device) => device.id) : []) : null;
+  const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
   const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir, undefined, opensAll) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir) {

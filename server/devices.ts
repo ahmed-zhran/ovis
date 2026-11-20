@@ -165,6 +165,8 @@ export interface StoredDevice {
   joined_by?: JoinedBy;
   /** where this PC admitted the row from, and its place in this PC's own order (server/account/admission-order.ts) */
   origin?: RowOrigin;
+  /** a copy a sibling merge brought into this dir with the release flag on: no row of this dir's own, never legacy (T50) */
+  imported?: true;
 }
 
 /**
@@ -304,6 +306,7 @@ export function readDeviceRegistry(path: string): DeviceRegistry {
       && (d.added_by === undefined || typeof d.added_by === "string")
       && (d.linked_at === undefined || typeof d.linked_at === "string")
       && (d.link_moved_key === undefined || typeof d.link_moved_key === "boolean")
+      && (d.imported === undefined || d.imported === true)
       && (d.account_add === undefined || isJsonObject(d.account_add))
       )) return { kind: "bad" };
   // an origin that cannot be read is no age (P22): the row stays, without it
@@ -556,23 +559,24 @@ export class DeviceStore {
     if (!this.admissions.fresh) { this.admissions.checkAbove(this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no])); return; }
     // a row numbered here means this folder had an order file: its loss is damage, and nothing is stamped (P21)
     if (this.devices.some((d) => d.origin !== undefined && d.origin.from !== "legacy")) { this.admissions.missingBeside(); return; }
-    const preUpgrade = this.admissions.preUpgrade;
-    if (this.devices.some((d) => d.origin === undefined && preUpgrade.has(d.id))) {
-      const next = this.devices.map((d) => d.origin === undefined && preUpgrade.has(d.id) ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
-      this.save(next);
+    const own = (d: StoredDevice) => d.origin === undefined && d.imported !== true;
+    if (this.devices.some(own)) {
+      const next = this.devices.map((d) => own(d) ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
+      // a pass that cannot be written leaves the order unknown: strict, as the log's fold does, never a failed start (S19)
+      try { this.save(next); } catch (error) { this.admissions.unwritten(error); return; }
       this.devices = next;
     }
-    this.admissions.settleFresh();
+    try { this.admissions.settleFresh(); } catch (error) { this.admissions.unwritten(error); }
   }
 
   /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */
-  private admitted(device: StoredDevice, now: number): StoredDevice {
+  private admitted(device: StoredDevice, now: number, path: { startedBy?: string | null; digits?: boolean } = {}): StoredDevice {
     if (this.admissions === null) return device;
-    // `by` is the account member who approved it, by its account key, and only a member (P22): the device that started
-    // the code when it is one, or the member named on the row
-    const approverId = device.added_by ?? this.pending?.startedBy ?? undefined;
+    // `by` is the account member who approved it, by its account key, and only a member (P22): the member named on the
+    // row, or the one that started the code this pairing redeemed; a link approves nothing
+    const approverId = device.added_by ?? path.startedBy ?? undefined;
     const approver = approverId !== undefined && this.isAccountApprover(approverId) ? this.devices.find((d) => d.id === approverId) : undefined;
-    const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : approver !== undefined ? "member" : "code";
+    const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : approver !== undefined ? "member" : path.digits === true ? "digits" : "code";
     const by = approver?.relay_public_key ?? null;
     return { ...device, origin: this.admissions.admit("remote", how, by, now) };
   }
@@ -1137,7 +1141,7 @@ export class DeviceStore {
       if (this.unconfirmedFirstPairs.length > UNCONFIRMED_FIRST_PAIR_LIMIT) this.unconfirmedFirstPairs.shift();
       return { token, device: { id: device.id, label: device.label, role: device.role } };
     }
-    this.enroll(device, now, origin);
+    this.enroll(device, now, origin, true, { startedBy });
     return { token, device: { id: device.id, label: device.label, role: device.role } };
   }
 
@@ -1167,8 +1171,8 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true): void {
-    const device = this.admitted(admitting, now);
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean } = {}): void {
+    const device = this.admitted(admitting, now, path);
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
     this.save(next, gate);
@@ -1275,7 +1279,7 @@ export class DeviceStore {
     if (approval.addedBy !== undefined && (this.accountError !== null || this.isTombstoned(publicKey))) { this.noteRelayFailure(approval.path, now); return null; }
     if (approval.id !== undefined && this.has(approval.id)) { this.noteRelayFailure(approval.path, now); return null; }
     if (admit && this.isNewKey(publicKey) && !admit()) return null;
-    const paired = this.enrollRelay(label, publicKey, now, false, { addedBy: approval.addedBy, approvedIn: approval.addedBy === undefined ? undefined : this.approverAccount(approval.addedBy) ?? undefined }, approval.id);
+    const paired = this.enrollRelay(label, publicKey, now, false, { addedBy: approval.addedBy, approvedIn: approval.addedBy === undefined ? undefined : this.approverAccount(approval.addedBy) ?? undefined, digits: true }, approval.id);
     // written after the row, so a stop between the two leaves a row newer than its tombstone (finishInterruptedWrites)
     if (approval.addedBy === undefined) this.clearTombstone(publicKey);
     return paired;
@@ -1322,7 +1326,7 @@ export class DeviceStore {
     return this.isAccountApprover(id) ? this.devices.find((d) => d.id === id)?.account ?? null : null;
   }
 
-  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn }: { addedBy?: string | undefined; approvedIn?: string | undefined }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } {
+  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } {
     const device: StoredDevice = {
       id, label: normalizeLabel(label, "Device"), role: "drive",
       token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: publicKey,
@@ -1332,7 +1336,7 @@ export class DeviceStore {
       // what a later link reads to tell a member's approval from a code a device outside the account started
       ...(addedBy !== undefined && approvedIn !== undefined ? { member_approved_in: approvedIn } : {}),
     };
-    this.enroll(device, now, [], codeSpent);
+    this.enroll(device, now, [], codeSpent, { ...(digits === undefined ? {} : { digits }) });
     return { device: { id: device.id, label: device.label, role: device.role } };
   }
 

@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MAX_PREFERENCES_BYTES, sharedPreferencesBody, type PreferencesChange } from "../shared/preferences.ts";
+import type { RowOrigin } from "./account/admission-order.ts";
 import { readDeviceRegistry, VOUCHED, type StoredDevice } from "./devices.ts";
 import { preparePrivateState, publishPrivateState, writePrivateState } from "./private-state.ts";
 import { normalizeEndpoint, PUSH_EXTRA_KEYS } from "./push.ts";
@@ -114,8 +115,9 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // link undoes it. Otherwise the kept copy's mark, or, where both copies are in that account, the other's when the
     // kept one has none: a vouched mark goes with its own account only. Only a missing mark is none
     const { joined_by: own, origin: ownOrigin, ...rest } = device;
-    // an origin is kept only when both copies hold the same one: a row's age here is never another dir's word (T27 in 2d)
-    const origin = perDirOrigins ? ownOrigin : ownOrigin ?? twin.origin;
+    // with the release flag on an origin is kept only when both copies hold the same one for the same key: a row's age
+    // is never another dir's word (P22, T27 in 2d). With it off this dir's own copy is kept, as main does
+    const origin = !perDirOrigins ? ownOrigin : ownOrigin !== undefined && twin.relay_public_key === device.relay_public_key && sameOrigin(ownOrigin, twin.origin) ? ownOrigin : undefined;
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -137,9 +139,10 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
   for (const device of theirs) {
     // revoked here since the last merge
     if (myIds.has(device.id) || own !== null && !incomplete.own && bases.own?.has(device.id)) continue;
-    // a row only the other dir holds has no place in this dir's order (with the release flag on)
-    const { origin: _elsewhere, ...imported } = device;
-    devices.push(perDirOrigins ? imported : device);
+    // a row only the other dir holds has no place in this dir's order, and is marked as no row of this dir's own, so
+    // this dir's one-time legacy pass never stamps it (with the release flag on; T50)
+    const { origin: _elsewhere, ...copied } = device;
+    devices.push(perDirOrigins ? { ...copied, imported: true } : device);
   }
   // every piece of evidence that either side was ever gated keeps the merge gated
   const gate = earliest([own?.gate_closed_at, other?.gate_closed_at, ...mine.map((d) => d.created_at), ...theirs.map((d) => d.created_at)]);
@@ -231,6 +234,11 @@ type Intent = (ids: string[], sides: NonNullable<MergeRecord["pending"]>["sides"
 const closedFor = (read: ReturnType<typeof readDeviceRegistry>): boolean =>
   read.kind === "bad" || read.kind === "ok" && (read.gateClosedAt !== null || read.devices.length > 0);
 
+/** Two copies hold one origin: the same admission, field by field. */
+function sameOrigin(a: RowOrigin, b: RowOrigin | undefined): boolean {
+  return b !== undefined && a.from === b.from && a.how === b.how && a.by === b.by && a.admit_no === b.admit_no && a.at === b.at;
+}
+
 function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date, perDirOrigins: boolean): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
   const ownPath = join(active, "devices.json");
   const otherPath = join(sibling, "devices.json");
@@ -262,9 +270,16 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
     return { blocked: null, ids: [], changed: 0 };
   }
   const merged = mergeRegistries(mine, theirs, bases, { own: ownIncomplete, other: otherIncomplete }, perDirOrigins);
-  // with the release flag on each folder keeps its own rows' origins: the sibling's file gets its own copies' (P21, P22)
-  const theirOrigin = new Map((theirs?.devices ?? []).map((device) => [device.id, device.origin]));
-  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin: _mine, ...device }) => theirOrigin.get(device.id) === undefined ? device : { ...device, origin: theirOrigin.get(device.id)! }) };
+  // with the release flag on the sibling's file is its own word on its own rows: a row only it held keeps its origin
+  // and mark there, a twin the origin both copies agree on, and a row only this dir held is a copy there (P22, T50)
+  const myCopy = new Map((mine?.devices ?? []).map((device) => [device.id, device]));
+  const theirCopy = new Map((theirs?.devices ?? []).map((device) => [device.id, device]));
+  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin, imported: _here, ...device }) => {
+    const copy = theirCopy.get(device.id);
+    if (copy === undefined) return { ...device, imported: true as const };
+    const kept = myCopy.has(device.id) ? origin : copy.origin;
+    return { ...device, ...(kept === undefined ? {} : { origin: kept }), ...(copy.imported ? { imported: true as const } : {}) };
+  }) };
   // with a complete registry in it, the result holds every device not revoked since the last merge
   const complete = mine !== null && !ownIncomplete || theirs !== null && !otherIncomplete;
   const onDisk = (read: typeof own) => read.kind === "ok" ? { gate_closed_at: read.gateClosedAt, devices: read.devices, ...(read.placeholder ? { placeholder: true } : {}) } : null;

@@ -27,11 +27,7 @@ async function key(): Promise<string> {
   return Buffer.from(await crypto.subtle.exportKey("spki", pair.publicKey)).toString("base64url");
 }
 
-/** A store as createServer opens it: the order is told which rows this folder held before its first start (T50). */
-const store = (dir: string) => {
-  const before = readDeviceRegistry(join(dir, "devices.json"));
-  return new DeviceStore(dir, null, null, { admissions: AdmissionOrder.open(dir, before.kind === "ok" ? before.devices.map((d) => d.id) : []) });
-};
+const store = (dir: string) => new DeviceStore(dir, null, null, { admissions: AdmissionOrder.open(dir) });
 
 async function pairRelay(devices: DeviceStore, now: number): Promise<string> {
   const paired = devices.pairRelay(devices.startPairing(now).code, "Phone", await key(), now);

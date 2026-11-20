@@ -51,13 +51,15 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, bbbbbbbbbbbbbbbb: expect.objectContaining({ from: "remote", admit_no: 1 }) });
   });
 
-  test("P22: twin rows whose origins disagree keep none in either folder, also when one copy moved its key", () => {
+  test("P22: twin rows whose origins disagree keep none in either folder, also when one copy moved its key", async () => {
     const [a, b] = [dir(), dir()];
+    const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const [keyA, firstKey, movedKey] = [await newKey(), await newKey(), await newKey()];
     const at = (admit_no: number, how: "code" | "link" = "code") => ({ from: "remote" as const, how, by: null, admit_no, at: AT });
     writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 9 }), { mode: 0o600 });
     writeFileSync(join(b, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 9 }), { mode: 0o600 });
-    put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: "key-a", origin: at(1) }), row("cccccccccccccccc", { relay_public_key: "first-key", origin: at(2) })]);
-    put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: "key-a", origin: at(3) }), row("cccccccccccccccc", { relay_public_key: "moved-key", account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true, origin: at(5, "link") })]);
+    put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: keyA, origin: at(1) }), row("cccccccccccccccc", { relay_public_key: firstKey, origin: at(2) })]);
+    put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: keyA, origin: at(3) }), row("cccccccccccccccc", { relay_public_key: movedKey, account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true, origin: at(5, "link") })]);
     start(a, b, true);
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: undefined });
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: undefined });

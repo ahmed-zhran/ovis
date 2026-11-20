@@ -6,7 +6,7 @@
  * `legacy` once (T50) and keep their creation order among themselves; a row with no origin, or a tie, has no age and
  * so no authority over another row (T19). Read only while OVIS_ACCOUNT_OPENS_ALL is on.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { writePrivateState } from "../private-state.ts";
 import { AccountSnapshotError, parseAdmissionOrigin, type AdmissionFrom, type AdmissionHow, type AdmissionOrigin } from "../../shared/account-snapshot.ts";
@@ -52,6 +52,11 @@ export function remoteReach(caller: AdmissionRow, target: AdmissionRow): boolean
 }
 
 
+/** A folder by what it is on disk, so a link to it and its real path are one folder (P21). */
+function realFolder(stateDir: string): string {
+  try { return realpathSync(stateDir); } catch { return resolve(stateDir); }
+}
+
 /** The one handle of each folder's order in this process (P21). */
 const HANDLES = new Map<string, AdmissionOrder>();
 
@@ -65,16 +70,14 @@ export class AdmissionOrder {
 
   /**
    * The one handle of `stateDir`'s order in this process, read again from disk: no two handles of one folder give
-   * numbers (P21). A missing file makes the order fresh; `preUpgrade` then names the rows this folder held before it
-   * read its sibling, the only ones the one-time pass stamps legacy (T50).
+   * numbers (P21), whatever path names it. A missing file makes the order fresh.
    */
-  static open(stateDir: string, preUpgrade: readonly string[] = []): AdmissionOrder {
-    const path = resolve(stateDir, ADMISSION_FILE);
+  static open(stateDir: string): AdmissionOrder {
+    const path = join(realFolder(stateDir), ADMISSION_FILE);
     const order = HANDLES.get(path) ?? new AdmissionOrder(path);
     HANDLES.set(path, order);
     order.problem = null;
     (order as { fresh: boolean }).fresh = false;
-    order.preUpgrade = new Set(preUpgrade);
     let text: string;
     try { text = readFileSync(order.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") order.problem = `Cannot read ${order.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
@@ -89,9 +92,6 @@ export class AdmissionOrder {
     } catch { order.problem = `${order.path} is not JSON`; }
     return order;
   }
-
-  /** The rows this folder held before its first start with the flag on: the only ones stamped legacy. */
-  preUpgrade: ReadonlySet<string> = new Set();
 
   /** A row numbered at or past the next number: the order file is behind its rows, which is damage (P21). */
   checkAbove(numbers: readonly number[]): void {
@@ -113,6 +113,12 @@ export class AdmissionOrder {
   missingBeside(): void {
     (this as { fresh: boolean }).fresh = false;
     this.problem = `${this.path} is missing beside rows this PC numbered`;
+  }
+
+  /** The one-time legacy pass could not be written: this PC's order is unknown, so it fails closed (S19). */
+  unwritten(error: unknown): void {
+    (this as { fresh: boolean }).fresh = false;
+    this.problem = `The rows from before the upgrade could not be stamped in ${this.path} (${error instanceof Error ? error.message : String(error)})`;
   }
 
   settleFresh(): void {
