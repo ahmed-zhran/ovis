@@ -568,7 +568,7 @@ export class DeviceStore {
         this.takeInEvidence([...tombstones ?? [], ...pending]);
         // the log is the truth (P24): a block in force whose marker never reached the disk gets it before anything is served
         this.markBlockTargets();
-        this.joinedRows?.pruneDenied(this.evidence, this.journal);
+        this.joinedRows?.pruneDenied(this.evidence);
         this.liftOrphanedBlocks();
       } else {
         if (pending.length) {
