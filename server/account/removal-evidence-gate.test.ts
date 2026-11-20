@@ -152,7 +152,7 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
   }
   const damageFile = (path: string) => { rmSync(path, { recursive: true, force: true }); mkdirSync(path); };
 
-  test("PB1, PB2: with the tombstone file damaged, a Revoke and a stop before its row goes leave that key refused at sign-in", async () => {
+  test("PB1: with the tombstone file damaged, a Revoke and a stop before its row goes leave that key refused at sign-in", async () => {
     const dir = stateDir();
     const first = startAt(dir, true);
     const device = await relayDevice(first);
@@ -262,4 +262,25 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     expect(await signsIn(fixture, device)).toBe(false);
   });
 
+
+  test("P13: with the registry blocked, a row whose Revoke fell back to main's tombstone under untrusted evidence is refused at relay sign-in", async () => {
+    if (process.platform === "win32") return;
+    const dir = stateDir();
+    const first = startAt(dir, true);
+    const device = await relayDevice(first);
+    const kept = readFileSync(join(dir, "devices.json"));
+    stopAt(first);
+    chmodSync(join(dir, REMOVAL_FILE), 0o666);
+    const damaged = startAt(dir, true);
+    damaged.app.context.services.devices.revoke(device.id);
+    stopAt(damaged);
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    chmodSync(join(dir, REMOVAL_FILE), 0o600);
+    const sibling = stateDir();
+    writeFileSync(join(sibling, "devices.json"), "not json", { mode: 0o600 });
+    const fixture = relayFixture(false, { stateDir: dir, siblingStateDir: sibling, accountOpensAll: true });
+    fixtures.push(fixture);
+    dirs.splice(dirs.indexOf(dir), 1);
+    expect(await signsIn(fixture, device)).toBe(false);
+  });
 });
