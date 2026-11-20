@@ -52,6 +52,17 @@ export type SafetyReceipt =
   | { outcome: "refused"; id: string; code: "record_invalid" | "conflict" | "log_unavailable" };
 
 /** A block whose target this PC cannot place yet (P19): it ends nobody and waits for a read that names its target. */
+/**
+ * Why a lift was appended (seam for S2-27): a whole read's snapshot, a confirm on this PC's screen, a block whose
+ * signer left (orphan), `ovis recover --lift`, or a device-signed lift applied outside a snapshot (record). Closed: a
+ * new producer does not compile without choosing one.
+ */
+export type LiftCause = "snapshot" | "screen" | "orphan" | "recover" | "record";
+const LIFT_CAUSES: ReadonlySet<LiftCause> = new Set<LiftCause>(["snapshot", "screen", "orphan", "recover", "record"]);
+
+/** What is appended; a lift must name its cause, and one that does not is refused (seam for S2-27). */
+export interface SafetyAppend { readonly record: SafetyRecord; readonly got: SafetyGot; readonly asof?: BlockAsOf; readonly cause?: LiftCause }
+
 export interface WaitingBlock { readonly record: BlockRecord; readonly got: SafetyGot; readonly signer_removed: boolean }
 export const WAITING_MAX = 64;
 
@@ -257,11 +268,19 @@ export class SafetyLog {
    * Appends one record with the next number, on disk before it counts. A record this log already holds answers its
    * receipt and appends nothing; another record under a known id is refused, and the log keeps what it holds.
    */
-  append(input: { record: SafetyRecord; got: SafetyGot; asof?: BlockAsOf }): SafetyReceipt {
-    const { record, got, asof } = input;
+  /** Hears every lift once it is on disk: the key the block it ends kept out, and why it was lifted (seam for S2-27). */
+  onLifted(listener: (target: string, cause: LiftCause) => void): () => void {
+    this.liftListeners.add(listener);
+    return () => { this.liftListeners.delete(listener); };
+  }
+  private readonly liftListeners = new Set<(target: string, cause: LiftCause) => void>();
+
+  append(input: SafetyAppend): SafetyReceipt {
+    const { record, got, asof, cause } = input;
     const id = typeof record?.id === "string" ? record.id : "";
     if (this.readError !== null || this.writeError !== null) return { outcome: "refused", id, code: "log_unavailable" };
     if (!GOTS.has(got) || recordProblem(record, asof) !== null) return { outcome: "refused", id, code: "record_invalid" };
+    if (record.kind === "lift" && !LIFT_CAUSES.has(cause as LiftCause)) return { outcome: "refused", id, code: "record_invalid" };
     // what another handle of this folder appended is read first, so no number is given twice and none is lost (P24)
     if (!this.load()) return { outcome: "refused", id, code: "log_unavailable" };
     const held = this.file.entries.find((entry) => entry.record.id === id);
@@ -276,6 +295,13 @@ export class SafetyLog {
     }
     this.file = next;
     this.inForce = this.state();
+    if (record.kind === "lift" && cause !== undefined) {
+      const block = this.file.entries.find((held) => held.record.kind === "block" && held.record.id === record.target);
+      const target = block?.record.kind === "block" ? block.record.target : null;
+      if (target !== null) for (const listener of [...this.liftListeners]) {
+        try { listener(target, cause); } catch (error) { console.warn(`[account] a lift listener failed: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    }
     return { outcome: "applied", id, n: entry.n };
   }
 
