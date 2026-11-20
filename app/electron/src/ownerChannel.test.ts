@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { PassThrough } from "node:stream";
 
 import { withoutInherited } from "./children.ts";
-import { DESKTOP_OWNER_FD, ownerChannel, type OwnerPending } from "./ownerChannel.ts";
+import { DESKTOP_OWNER_FD, OWNER_LINE_MAX, ownerChannel, type OwnerPending } from "./ownerChannel.ts";
 
 const lockAsked = { id: "a1", action: { kind: "lock" }, shown: { title: "Turn on strict mode", lines: ["Ends 2 devices"] } };
 const keyAsked = { id: "b2", action: { kind: "approve_key", pending: "p1", fingerprint: "ab12 cd34" }, shown: { title: "Approve this key", lines: ["Pixel 9"], fingerprint: "ab12 cd34" } };
@@ -29,6 +29,13 @@ describe("the desktop owner channel", () => {
   it("R8: a line that does not parse is dropped and the next one still reads", () => {
     const { socket, seen } = open();
     socket.write(`{not json\n${JSON.stringify({ pending: [lockAsked] })}\n`);
+    expect(seen.map((pending) => pending.map((item) => item.id))).toEqual([["a1"]]);
+  });
+
+  it("R8: a line past the size cap is dropped whole, and the next line still reads", () => {
+    const { socket, seen } = open();
+    socket.write("x".repeat(OWNER_LINE_MAX + 1));
+    socket.write(`tail of the long line\n${JSON.stringify({ pending: [lockAsked] })}\n`);
     expect(seen.map((pending) => pending.map((item) => item.id))).toEqual([["a1"]]);
   });
 
