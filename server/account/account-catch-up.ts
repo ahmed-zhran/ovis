@@ -24,7 +24,7 @@ export class AccountCatchUp {
     const store = this.rows?.store();
     store?.commitList(snapshot);
     store?.expire();
-    this.gate?.wholeRead(row => this.devices.admits(this.devices.relayKeyOf(row.id)));
+    this.gate?.wholeRead(this.devices.list(null).filter(row => !this.devices.admits(this.devices.relayKeyOf(row.id))).map(row => row.id));
     // Only an applied whole read renews the deadline. Failed pulls never postpone it, and a hung service cannot
     // prevent the PC from closing idle sessions at the deadline.
     this.clearDeadline();
