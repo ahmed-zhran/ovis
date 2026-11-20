@@ -286,6 +286,10 @@ export class RelaySession {
    * challenge, and the session waits (KEY_PROVE, then the screen) until the key is admitted or the pairing ends.
    */
   private pairByProof(pairings: KeyProofPairings, pair: { code: string; label: string; public_key: string }): void {
+    // what a code pairing is held to before it makes a device holds before the proof too: a pairing paused for wrong
+    // codes (throws, answered auth_failed), and a relay pass that lets in no new session (nothing is answered)
+    this.options.services.devices.assertRelayPairing("code");
+    if (this.options.refuseNewDevice?.()) { this.state = "refused"; return; }
     const started = pairings.pair({ code: pair.code, label: pair.label, publicKey: pair.public_key, how: "code", via: "relay", keyProof: this.keyProof && !this.options.signInOnly, serverId: this.options.serverId });
     if ("refuse" in started) { this.close(started.refuse); return; }
     this.keyProofSession = started.session;
