@@ -515,7 +515,8 @@ export function createServer(
   // devices that redeemed a code and proved their key, waiting for this PC's screen (server/account/pending.ts)
   const pendingRedemptions = localConfirms ? new PendingRedemptions({
     serverId: () => ovisRelay.currentIdentity()?.server_id ?? null,
-    journalDrop: (entry) => { console.log(`A device waiting for this PC's screen was dropped (${entry.reason}): ${entry.label}`); },
+    // every drop is journalled (P24), with the key and the name it gave, so the device history names it
+    journalDrop: (entry) => { journal?.append({ kind: "drop", how: entry.reason, key: entry.key, no: null, row: null, label: entry.label, by: "pc", account: null }); },
     release: (codeId, key) => devices.releaseRedemption(codeId, key),
   }) : undefined;
   // a key confirm needs a screen this PC can prove: Linux in this release; elsewhere pairing is as before
