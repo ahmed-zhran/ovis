@@ -110,4 +110,58 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
     expect(devices.failsClosed).toBe(true);
   });
+
+  test("P8, S19: a cookie row whose registry write fails stays out for the run and the PC fails closed", () => {
+    const at = dir();
+    const devices = store(at);
+    const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "devices.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revoke(cookie.device.id)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.match(cookie.token)).toBeNull();
+    expect(devices.failsClosed).toBe(true);
+  });
+
+  test("P8, S19: an account removal retried after the folder is repaired writes its deny and ends the closing", async () => {
+    const at = dir();
+    const devices = store(at);
+    const k = await key();
+    devices.pairRelay(devices.startPairing().code, "A", k);
+    const record = { id: "r".repeat(32), issuedAt: new Date().toISOString() };
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, REMOVAL_FILE)) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.removeAccountKey(k, "acct", record)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
+    devices.removeAccountKey(k, "acct", record);
+    expect(devices.failsClosed).toBe(false);
+    expect(devices.removedByAccount(k)).toBe(true);
+  });
+
+  test("P8, T41: a Revoke all finished at start raises the generation, as the live path does", () => {
+    const at = dir();
+    store(at);
+    const before = PcAccountState.open(at).gen();
+    writeFileSync(join(at, "revoke-all.json"), JSON.stringify({ id: "a".repeat(32), by: "pc", at: new Date().toISOString() }), { mode: 0o600 });
+    store(at);
+    expect(PcAccountState.open(at).gen()).toBeGreaterThan(before);
+  });
+
+  test("P8: a removal is told after the registry no longer holds the row", async () => {
+    const at = dir();
+    const devices = store(at);
+    const id = devices.pairRelay(devices.startPairing().code, "A", await key())!.device.id;
+    let onDisk: boolean | null = null;
+    devices.onRemoved(() => {
+      const registry = readDeviceRegistry(join(at, "devices.json"));
+      onDisk = registry.kind === "ok" && registry.devices.some((d) => d.id === id);
+    });
+    devices.revoke(id);
+    expect(onDisk).toBe(false);
+  });
 });
