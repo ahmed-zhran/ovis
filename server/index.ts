@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, mergeAccountTombstones } from "./devices.ts";
+import { DeviceStore, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { SeenStore } from "./seen.ts";
@@ -257,6 +257,11 @@ export function createServer(
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   const opensAll = provided.accountOpensAll ?? accountOpensAll();
   const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
+  // the order is checked against this folder's own rows before the sibling merge, which may remove some (P21, S29)
+  if (admissions !== null) {
+    const own = readDeviceRegistry(join(stateDir, "devices.json"));
+    if (own.kind === "ok") admissions.checkRows(own.devices);
+  }
   const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir) {
