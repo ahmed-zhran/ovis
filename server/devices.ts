@@ -582,6 +582,8 @@ export class DeviceStore {
     rmSync(this.pendingTombstonePath, { force: true });
     const kept = this.devices.filter((d) => !this.coveredByEvidence(d));
     if (kept.length !== this.devices.length) {
+      // a deny recovered at start raises the generation, as the live path does (P8, T41)
+      this.pc?.raiseGen();
       const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? null;
       this.save(kept, gate);
       this.devices = kept;
@@ -1832,7 +1834,7 @@ export class DeviceStore {
     // its intent is on disk: any write after it that fails leaves the PC closed until a start finishes it (P8, T20)
     try { this.finishRevokeAll(gone, gate); } catch (error) {
       this.denyProblem = `Revoke all could not be finished (${error instanceof Error ? error.message : String(error)}): only this PC itself gets in until it is.`;
-      this.pc?.unwritten(error);
+      this.pc?.unwritten(error, "Revoke all could not clear this PC's account");
       throw error;
     }
     return gone.map((device) => device.id);

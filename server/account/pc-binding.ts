@@ -146,10 +146,11 @@ export class PcAccountState {
   }
 
   /** The one-time migration could not be written: this PC's account state is unknown, so it fails closed (S19). */
-  unwritten(error: unknown): void {
+  /** `what` could not be written to this file: the PC's account state is unknown until it is (S19). */
+  unwritten(error: unknown, what = "The rows from before the upgrade could not be migrated"): void {
     if (this.problem !== null) return;
     this.fresh = false;
-    this.problem = `The rows from before the upgrade could not be migrated in ${this.path} (${error instanceof Error ? error.message : String(error)})`;
+    this.problem = `${what} in ${this.path} (${error instanceof Error ? error.message : String(error)})`;
   }
 
   /** A folder whose rows already carry numbers lost this file: damage, not a migration (P21, S19). */
