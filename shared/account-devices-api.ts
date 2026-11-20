@@ -4,6 +4,7 @@
  */
 import { AccountRecordError, isAccountKeyEncoding, parseSafetyRecord, type BlockRecord, type SafetyRecord } from "./account-records.ts";
 import { PAIR_FINGERPRINT_PATTERN } from "./pair-fingerprint.ts";
+import { fromBase64Url, toBase64Url } from "./relay-pair-sas.ts";
 
 /**
  * The release flag of step 2: unset or anything but `1` keeps every existing path. Read only through
@@ -209,15 +210,26 @@ export function parseRecoveryAction(value: unknown): RecoveryAction {
  */
 export const LINK_REPLACEMENT_OPT_IN = 1;
 export const REPLACEMENT_NEEDS_APP = "replacement_needs_app";
-export interface LinkReplacement { readonly challenge: string; readonly fingerprint: string }
+export interface LinkReplacement { readonly challenge: string }
+export interface ReplacementProof extends LinkReplacement { readonly row: string; readonly signature: string }
 
-const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+function canonicalBytes(value: unknown, size: number): value is string {
+  if (typeof value !== "string" || value.length !== Math.ceil(size * 4 / 3) || /[^A-Za-z0-9_-]/.test(value)) return false;
+  const bytes = fromBase64Url(value);
+  return bytes.length === size && toBase64Url(bytes) === value;
+}
 
 export function parseLinkReplacement(value: unknown): LinkReplacement | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (Object.keys(body).some((field) => field !== "challenge" && field !== "fingerprint")) return null;
-  if (typeof body.challenge !== "string" || !CHALLENGE.test(body.challenge)) return null;
-  if (typeof body.fingerprint !== "string" || !PAIR_FINGERPRINT_PATTERN.test(body.fingerprint)) return null;
-  return { challenge: body.challenge, fingerprint: body.fingerprint };
+  if (!canonicalBytes(body.challenge, 32)) return null;
+  if ("fingerprint" in body && (typeof body.fingerprint !== "string" || !PAIR_FINGERPRINT_PATTERN.test(body.fingerprint))) return null;
+  return { challenge: body.challenge };
+}
+
+export function parseReplacementProof(value: unknown): ReplacementProof {
+  const body = shape(value, ["row", "challenge", "signature"]);
+  if (typeof body.row !== "string" || !ROW_ID.test(body.row) || !canonicalBytes(body.challenge, 32) || !canonicalBytes(body.signature, 64)) fail("Invalid replacement proof");
+  return { row: body.row, challenge: body.challenge, signature: body.signature };
 }
