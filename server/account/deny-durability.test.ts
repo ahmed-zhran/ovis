@@ -63,6 +63,7 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     const devices = store(at);
     devices.pairRelay(devices.startPairing().code, "Phone", await key());
     writeFileSync(join(at, "revoke-all.json"), JSON.stringify({ id: "a".repeat(32), by: "pc", at: new Date().toISOString() }), { mode: 0o600 });
+    rmSync(join(at, "account-tombstones.json"), { force: true });
     mkdirSync(join(at, "account-tombstones.json"));
     const reopened = store(at);
     expect(reopened.list(null)).toEqual([]);
