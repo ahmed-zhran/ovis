@@ -58,7 +58,7 @@ function apply(store: DeviceStore, record: AccountRecord, serverId: string | nul
   if (serverId === null) return refused("account_unavailable");
   const id = accountDeviceId(serverId, record.key);
   if (store.has(id)) return refused("record_invalid");
-  store.addAccountDevice({ id, key: record.key, label: record.label, role: record.role, account: record.account, addedBy: signer.id, record }, now);
+  if (store.addAccountDevice({ id, key: record.key, label: record.label, role: record.role, account: record.account, addedBy: signer.id, record }, now) === null) return refused("removal_pending");
   return { id: record.id, outcome: "applied" };
 }
 
