@@ -560,7 +560,8 @@ export class DeviceStore {
   private migrate(): void {
     if (this.pc === null || this.error !== null) return;
     const numbered = this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no]);
-    if (!this.pc.migrating) { this.pc.checkAbove(numbered); return; }
+    const members = [...new Set(this.devices.flatMap((d) => d.account === undefined ? [] : [d.account]))];
+    if (!this.pc.migrating) { this.pc.checkAbove(numbered); this.pc.checkMembers(members); return; }
     // a PC that ever had a device, its rows revoked since, is no first-device PC (T67): its gate stayed closed
     const hadDevices = this.devices.length > 0 || this.gateClosedAt !== null;
     // S2-03's counter file: the rows are numbered already, and only the binding is migrated (T50)
@@ -1701,6 +1702,8 @@ export class DeviceStore {
       ...(entry.record === undefined ? {} : { account_add: entry.record }),
     };
     this.enroll(device, now, [], false);
+    // another key joined the account: the PC has had other devices, for good (T67, H2)
+    if (this.pc !== null && this.pc.first()?.key !== entry.key) this.pc.setOthersEver();
     return { id: device.id, label: device.label, role: device.role };
   }
 

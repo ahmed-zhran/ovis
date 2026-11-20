@@ -118,6 +118,13 @@ export class PcAccountState {
     else this.checkAbove(numbers);
   }
 
+  /** Member rows of an account this PC is not in: the binding and the rows disagree, which is damage (P12, S19). */
+  checkMembers(accounts: readonly string[]): void {
+    const bound = this.doc.binding?.account ?? null;
+    const other = accounts.find((account) => account !== bound);
+    if (this.problem === null && other !== undefined) this.problem = `this PC's devices name ${other}, and ${this.path} binds it to ${bound ?? "no account"}`;
+  }
+
   /** A row numbered at or past the next number: the file is behind its rows, which is damage (P21). */
   checkAbove(numbers: readonly number[]): void {
     const highest = Math.max(0, ...numbers);
@@ -126,6 +133,7 @@ export class PcAccountState {
 
   /** The one-time migration could not be written: this PC's account state is unknown, so it fails closed (S19). */
   unwritten(error: unknown): void {
+    if (this.problem !== null) return;
     this.fresh = false;
     this.problem = `The rows from before the upgrade could not be migrated in ${this.path} (${error instanceof Error ? error.message : String(error)})`;
   }
@@ -173,6 +181,8 @@ export class PcAccountState {
     this.siblingBinding = theirs;
     const doc = { ...this.doc, binding: own, clears, others_ever: this.doc.others_ever || parsed.others_ever };
     if (this.fresh) { this.doc = doc; return; }
+    // a folder in no account beside one that is: the PC is in that account (P12)
+    if (own === null && theirs !== null) doc.binding = theirs;
     if (JSON.stringify(doc) !== JSON.stringify(this.doc)) this.write(doc);
   }
 
@@ -231,7 +241,8 @@ export class PcAccountState {
   /** The PC leaves its account: only for one of the three named reasons. The clear is kept, and the file stays. */
   clear(reason: ClearReason, by: string): boolean {
     const binding = this.doc.binding;
-    if (binding === null) return false;
+    // a PC already strict writes nothing: what it was told to clear waits for its repair, and it serves nobody meanwhile
+    if (binding === null || this.problem !== null) return false;
     this.write({ ...this.doc, binding: null, clears: [...this.doc.clears, { bind_id: binding.bind_id, reason, by }] });
     return true;
   }
