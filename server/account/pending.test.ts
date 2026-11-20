@@ -24,7 +24,7 @@ function store() {
 
 async function proved(pending: PendingRedemptions, code: string, label = "Phone") {
   const phone = await device();
-  const { challenge } = pending.name(code, label, phone.spki, "relay", undefined, `id-${code}`);
+  const { challenge } = pending.name(code, label, phone.spki, "relay", undefined, { codeId: `id-${code}` });
   const entry = await pending.prove(challenge, await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey));
   if (entry === null) throw new Error("The proof was refused");
   return { phone, entry, challenge };
@@ -122,7 +122,7 @@ test("T71: a redemption that ends unapproved gives its code's use back, and an a
   const pending = new PendingRedemptions({ serverId: SERVER, now: () => now, journalDrop: () => {}, release: (codeId) => { released.push(codeId); } });
   const named = async (code: string, codeId: string) => {
     const phone = await device();
-    const { challenge } = pending.name(code, "Phone", phone.spki, "relay", undefined, codeId);
+    const { challenge } = pending.name(code, "Phone", phone.spki, "relay", undefined, { codeId });
     return (await pending.prove(challenge, await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey)))!;
   };
   const declined = await named("code1", "use-1");
@@ -134,7 +134,7 @@ test("T71: a redemption that ends unapproved gives its code's use back, and an a
   pending.list();
   expect(released).toEqual(["use-1", "use-3"]);
   const phone = await device();
-  pending.name("code3", "Phone", phone.spki, "relay", undefined, "use-4");
+  pending.name("code3", "Phone", phone.spki, "relay", undefined, { codeId: "use-4" });
   now += PENDING_MS + 1;
   pending.list();
   expect(released).toEqual(["use-1", "use-3", "use-4"]);

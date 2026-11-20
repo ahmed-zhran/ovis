@@ -8,6 +8,7 @@
 import type { DeviceMatch } from "../devices.ts";
 import type { LocalConfirms } from "./local-confirm.ts";
 import type { PendingRedemption, PendingRedemptions, PendingVia } from "./pending.ts";
+import { PendingLimitError } from "./pending.ts";
 
 /** The admission seams of server/devices.ts this flow uses (Track A, S2-08). */
 export interface RedeemSeams {
@@ -27,11 +28,12 @@ export class KeyProofPairings {
   readonly #seams: RedeemSeams;
   readonly #sessions = new Map<string, Session>();
   readonly #byPending = new Map<string, string>();
+  // DeviceStore holds one use per (codeId, key), not one use per relay session.
+  readonly #uses = new Map<string, number>();
 
   constructor(options: { pending: PendingRedemptions; seams: RedeemSeams }) {
     this.#pending = options.pending;
     this.#seams = options.seams;
-    options.pending.onChange(() => this.#settleDropped());
   }
 
   /** A PAIR on a PC that needs the proof. A device that did not offer key-proof-1 is refused, never left waiting. */
@@ -40,15 +42,22 @@ export class KeyProofPairings {
     if (!request.keyProof) return { refuse: "unsupported_version" };
     const redeemed = this.#seams.redeemCode(request.code, request.how, request.publicKey);
     if (!redeemed.ok) return { refuse: "auth_failed" };
+    const session = crypto.randomUUID();
+    const use = JSON.stringify([redeemed.codeId, request.publicKey]);
+    this.#uses.set(use, (this.#uses.get(use) ?? 0) + 1);
     let named: { challenge: string };
-    try { named = this.#pending.name(request.code, request.label, request.publicKey, request.via, undefined, redeemed.codeId, request.serverId); }
-    catch {
-      this.#seams.releaseRedemption(redeemed.codeId, request.publicKey);
+    try {
+      named = this.#pending.name(request.code, request.label, request.publicKey, request.via, undefined, {
+        codeId: redeemed.codeId, ...(request.serverId === undefined ? {} : { serverId: request.serverId }),
+        release: () => this.#finish(session, null),
+      });
+    }
+    catch (error) {
+      this.#releaseUse(redeemed.codeId, request.publicKey, null);
+      if (!(error instanceof PendingLimitError)) throw error;
       return { refuse: "auth_failed" };
     }
-    const session = crypto.randomUUID();
-    let decide!: (decision: Decision) => void;
-    const decided = new Promise<Decision>((resolve) => { decide = resolve; });
+    const { promise: decided, resolve: decide } = Promise.withResolvers<Decision>();
     this.#sessions.set(session, { challenge: named.challenge, codeId: redeemed.codeId, key: request.publicKey, decide, decided });
     return { session, challenge: named.challenge };
   }
@@ -76,17 +85,12 @@ export class KeyProofPairings {
    * admission re-runs every guard; a refusal there admits nobody.
    */
   approve(pendingId: string, fingerprint: string, source: "screen" | "recover"): DeviceMatch | null {
-    // taken out of the waiting list first, so the list's change does not end this session's wait as a drop
     const sessionId = this.#byPending.get(pendingId);
-    this.#byPending.delete(pendingId);
+    if (sessionId === undefined) return null;
     const entry = this.#pending.take(pendingId, fingerprint);
-    if (entry === null || entry.codeId === undefined) {
-      if (sessionId !== undefined && entry === null) this.#byPending.set(pendingId, sessionId);
-      return null;
-    }
+    if (entry === null || entry.codeId === undefined) return null;
     const admitted = this.#seams.admitConfirmed({ codeId: entry.codeId, key: entry.key, label: entry.label, source });
-    if (admitted === null) this.#seams.releaseRedemption(entry.codeId, entry.key);
-    if (sessionId !== undefined) this.#finish(sessionId, admitted);
+    this.#finish(sessionId, admitted);
     return admitted;
   }
 
@@ -99,11 +103,7 @@ export class KeyProofPairings {
     const session = this.#sessions.get(sessionId);
     if (session === undefined) return;
     if (session.pendingId !== undefined) this.#pending.decline(session.pendingId);
-    else {
-      // before its proof: the challenge's slot goes, and the code's held use with it
-      this.#pending.forget(session.challenge);
-      this.#seams.releaseRedemption(session.codeId, session.key);
-    }
+    else this.#pending.forget(session.challenge);
     this.#finish(sessionId, null);
   }
 
@@ -117,11 +117,7 @@ export class KeyProofPairings {
   }
 
   #end(sessionId: string): { refuse: "auth_failed" } {
-    const session = this.#sessions.get(sessionId);
-    if (session !== undefined) {
-      if (session.pendingId !== undefined) this.#pending.decline(session.pendingId);
-      this.#finish(sessionId, null);
-    }
+    this.leave(sessionId);
     return { refuse: "auth_failed" };
   }
 
@@ -130,13 +126,19 @@ export class KeyProofPairings {
     if (session === undefined) return;
     this.#sessions.delete(sessionId);
     if (session.pendingId !== undefined) this.#byPending.delete(session.pendingId);
+    this.#releaseUse(session.codeId, session.key, admitted);
     session.decide({ admitted });
   }
 
-  /** A waiting entry the store dropped (declined, expired, its key removed) ends its session's wait. */
-  #settleDropped(): void {
-    const waiting = new Set(this.#pending.list().map((entry) => entry.id));
-    for (const [pendingId, sessionId] of [...this.#byPending]) if (!waiting.has(pendingId)) this.#finish(sessionId, null);
+  #releaseUse(codeId: string, key: string, admitted: DeviceMatch | null): void {
+    const use = JSON.stringify([codeId, key]);
+    const count = this.#uses.get(use);
+    if (count === 1) {
+      this.#uses.delete(use);
+      if (admitted === null) this.#seams.releaseRedemption(codeId, key);
+    } else if (count !== undefined) {
+      this.#uses.set(use, count - 1);
+    }
   }
 }
 

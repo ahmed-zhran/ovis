@@ -27,7 +27,13 @@ export interface PendingRedemption {
   readonly codeId?: string;
 }
 
-interface Named { code: string; label: string; key: string; via: PendingVia; at: number; codeId?: string; serverId?: string }
+interface Reservation {
+  readonly codeId: string;
+  readonly serverId?: string;
+  readonly release?: () => void;
+}
+
+interface Named { code: string; label: string; key: string; via: PendingVia; at: number; reservation?: Reservation & { readonly release: () => void } }
 
 export class PendingLimitError extends Error {}
 
@@ -39,6 +45,7 @@ export class PendingRedemptions {
   /** challenges sent and not yet answered, each for the one key named before it was made */
   readonly #named = new Map<string, Named>();
   readonly #waiting = new Map<string, PendingRedemption>();
+  readonly #releaseWaiting = new WeakMap<PendingRedemption, () => void>();
   readonly #listeners = new Set<() => void>();
 
   constructor(options: {
@@ -59,15 +66,18 @@ export class PendingRedemptions {
    * A device named its key for `code`: a fresh challenge for that key alone. Naming a key again (`previous`) spends the
    * challenge it had, so a key changed after a challenge was seen starts over with a new one.
    */
-  /** `serverId`: the relay identity the device paired to, which its proof and fingerprint name; this PC's own by default. */
-  name(code: string, label: string, key: string, via: PendingVia, previous?: string, codeId?: string, serverId?: string): { challenge: string } {
+  /** `reservation.serverId`: the relay identity the device paired to; this PC's own by default. */
+  name(code: string, label: string, key: string, via: PendingVia, previous?: string, reservation?: Reservation): { challenge: string } {
     this.#sweep();
     if (previous !== undefined) this.#forgetNamed(previous);
     const forCode = [...this.#waiting.values(), ...this.#named.values()].filter((entry) => entry.code === code).length;
     if (forCode >= PENDING_PER_CODE) throw new PendingLimitError("This code has as many devices waiting as it may");
     if (this.#waiting.size + this.#named.size >= PENDING_TOTAL) throw new PendingLimitError("As many devices wait for this PC's screen as may");
     const challenge = pairChallenge();
-    this.#named.set(challenge, { code, label, key, via, at: this.#now(), ...(codeId === undefined ? {} : { codeId }), ...(serverId === undefined ? {} : { serverId }) });
+    const use = reservation === undefined ? {} : {
+      reservation: { ...reservation, release: reservation.release ?? (() => this.#release(reservation.codeId, key)) },
+    };
+    this.#named.set(challenge, { code, label, key, via, at: this.#now(), ...use });
     return { challenge };
   }
 
@@ -77,16 +87,18 @@ export class PendingRedemptions {
     const named = this.#named.get(challenge);
     this.#named.delete(challenge);
     if (named === undefined) return null;
-    const serverId = named.serverId ?? this.#serverId();
+    const reservation = named.reservation;
+    const serverId = reservation?.serverId ?? this.#serverId();
     if (serverId === null || !await verifyPairProof(serverId, challenge, named.key, signature)) {
-      if (named.codeId !== undefined) this.#release(named.codeId, named.key);
+      reservation?.release();
       return null;
     }
     const entry: PendingRedemption = Object.freeze({
       id: randomBytes(16).toString("hex"), code: named.code, label: named.label, key: named.key, via: named.via, redeemedAt: this.#now(),
-      ...(named.codeId === undefined ? {} : { codeId: named.codeId }),
+      ...(reservation === undefined ? {} : { codeId: reservation.codeId }),
       fingerprint: await pairFingerprint(serverId, challenge, named.key),
     });
+    if (reservation !== undefined) this.#releaseWaiting.set(entry, reservation.release);
     this.#waiting.set(entry.id, entry);
     this.#changed();
     return entry;
@@ -143,7 +155,7 @@ export class PendingRedemptions {
 
   /** The code ended (cancelled, run out, used by an admission, Revoke all): what waits on it goes (DeviceStore.onPairingEnded). */
   dropCode(codeId: string): void {
-    for (const [challenge, named] of this.#named) if (named.codeId === codeId) this.#forgetNamed(challenge);
+    for (const [challenge, named] of this.#named) if (named.reservation?.codeId === codeId) this.#forgetNamed(challenge);
     this.#drop((entry) => entry.codeId === codeId, "code_ended");
   }
 
@@ -152,7 +164,7 @@ export class PendingRedemptions {
     for (const entry of [...this.#waiting.values()]) {
       if (!which(entry)) continue;
       this.#waiting.delete(entry.id);
-      if (entry.codeId !== undefined) this.#release(entry.codeId, entry.key);
+      this.#releaseWaiting.get(entry)?.();
       this.#journalDrop({ key: entry.key, label: entry.label, reason });
       dropped = true;
     }
@@ -162,7 +174,7 @@ export class PendingRedemptions {
   #forgetNamed(challenge: string): void {
     const named = this.#named.get(challenge);
     this.#named.delete(challenge);
-    if (named?.codeId !== undefined) this.#release(named.codeId, named.key);
+    named?.reservation?.release();
   }
 
   #sweep(): void {
