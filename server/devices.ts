@@ -917,7 +917,7 @@ export class DeviceStore {
     const targets = this.devices.filter((d) => d.relay_public_key === record.target);
     // a target this PC has no row of: the block waits, ends nobody, and is judged when its target is here (P19)
     if (targets.length === 0) {
-      this.safety.wait({ record, got, signer_removed: false });
+      safety.wait({ record, got, signer_removed: false });
       return refused("unknown_target");
     }
     let cutoff: AdmissionPosition | null = null;
@@ -946,7 +946,7 @@ export class DeviceStore {
     }
     this.keepOut(affected, false);
     this.dropWaiting([record.target], "block");
-    this.safety.unwait(record.id);
+    safety.unwait(record.id);
     try { this.drop(targets, "pc"); }
     catch (error) { console.error(`[devices] the registry write of a block failed after its deny; the next start finishes it: ${error instanceof Error ? error.message : String(error)}`); }
     return receipt;

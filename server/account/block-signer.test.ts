@@ -221,7 +221,8 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     const local = await block(target.spki, signer);
     expect(await devices.applyBlock(local, "handed")).toMatchObject({ outcome: "applied" });
     const service = await block((await key()).spki, await key());
-    expect(log.append({ record: service, got: "snapshot", asof: { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false } }).outcome).toBe("applied");
+    // the service block freezes nobody here: every row joined before its cutoff (S2-09 refuses a freeze of unknown age)
+    expect(log.append({ record: service, got: "snapshot", asof: { signer_no: null, target_no: 1000, after: 1000, joined: 1000, signer_removed: false } }).outcome).toBe("applied");
     const removal = await signAccountRecord({ v: 1, kind: "remove", account: ACCOUNT, key: signer.spki, id: newRecordId(), issued_at: new Date().toISOString(), signer: signer.spki }, signer.keys.privateKey);
     expect(await applyAccountRecords(devices, [removal], SERVER)).toEqual([{ id: removal.id, outcome: "applied" }]);
     expect(blocksInForce(log)).toEqual([service.id]);
