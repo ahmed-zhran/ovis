@@ -607,9 +607,11 @@ export class DeviceStore {
 
   /** A row whose key was removed at or after the row was made: revoked, whether or not its own write happened yet. */
   private stale(device: StoredDevice): boolean {
-    if (this.evidence !== null) return this.coveredByEvidence(device);
-    return device.relay_public_key !== undefined
+    // main's own rule stays the floor under the evidence: a tombstone of this PC keeps its key out, whatever path took
+    // the evidence in or skipped it (P13, rule 1)
+    const tombstoned = device.relay_public_key !== undefined
       && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || t.removed_at >= device.created_at));
+    return tombstoned || (this.evidence !== null && this.coveredByEvidence(device));
   }
 
   get accountError(): string | null {
