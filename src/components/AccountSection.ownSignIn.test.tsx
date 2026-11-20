@@ -48,11 +48,12 @@ describe("signing in on the PC's own window", () => {
   let loseEnrollAck: boolean;
   let memberKey: string;
   let challenges: number;
+  let membershipReadsBeforeHealthFailure: number | null;
   /** holds the code's exchange until released, and says when it was asked */
   let exchange: { asked: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | null;
 
   beforeEach(() => {
-    fake = new FakeAccountService();
+    fake = new FakeAccountService(() => Date.now());
     fake.offerLinkPage(["google"]);
     popupBlocked = false;
     sent = Promise.withResolvers<string>();
@@ -72,6 +73,7 @@ describe("signing in on the PC's own window", () => {
     loseEnrollAck = false;
     memberKey = "";
     challenges = 0;
+    membershipReadsBeforeHealthFailure = null;
     exchange = null;
     for (const key of ["window", "document", "navigator", "indexedDB", "getComputedStyle", "location", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -122,7 +124,7 @@ describe("signing in on the PC's own window", () => {
           const proof = await (await fake.fetch(SERVICE + "/v1/session", { headers: { authorization: `Bearer ${body.token}` } })).json();
           const lost = lostClaimResponses > 0;
           if (lost) lostClaimResponses--;
-          if (proof.own_sign_in !== true || proof.account !== body.account) {
+          if (proof.own_sign_in !== true || proof.account !== body.account || Date.now() - Date.parse(proof.signed_in_at) > 600_000) {
             if (lost) throw new TypeError("claim response lost");
             return Response.json({ error: { code: "own_sign_in_required" } }, { status: 403 });
           }
@@ -141,9 +143,16 @@ describe("signing in on the PC's own window", () => {
           return Response.json({ results: [] });
         }
         if (url.pathname === "/api/relay/link" && init?.method !== "POST") return Response.json({ url: OFFER });
-        if (url.pathname === "/api/health") return Response.json({ ok: true, bridge_protocol: 1, own_window: { port: PORT }, auth: { required: false, authenticated: true, via: "local", role: "drive" } });
+        if (url.pathname === "/api/health") {
+          if (membershipReadsBeforeHealthFailure !== null && membershipReadsBeforeHealthFailure >= 2 && url.searchParams.get("scope") === "bridge") {
+            membershipReadsBeforeHealthFailure = null;
+            return Response.json({ error: { code: "unavailable" } }, { status: 503 });
+          }
+          return Response.json({ ok: true, bridge_protocol: 1, ...(membershipReadsBeforeHealthFailure === null && { own_window: { port: PORT } }), auth: { required: false, authenticated: true, via: "local", role: "drive" } });
+        }
         if (url.pathname === "/api/relay") return Response.json({ phase: relayPhase, relay: "wss://relay.ovis.example", app: "https://app.ovis.example", sessions: 0, blocked: null, error: null });
         if (url.pathname === "/api/account/status") {
+          if (membershipReadsBeforeHealthFailure !== null) membershipReadsBeforeHealthFailure++;
           if (claimRefusal?.bodyUsed && missingAccountAnswer) return Response.json({});
           const issue = pcAccount && statusAfterClaim;
           if (issue) statusAfterClaim = null;
@@ -304,15 +313,75 @@ describe("signing in on the PC's own window", () => {
     } finally { stop(); }
   });
 
-  for (const lost of [false, true]) it(`lists nothing after a device-code refusal (response lost: ${lost})`, async () => {
-    firstMember = "available";
-    lostClaimResponses = lost ? 1 : 0;
+  const storeDeviceSignIn = async () => {
     const codes = await (await fake.fetch(SERVICE + "/v1/signin/github/device", { method: "POST" })).json();
     fake.approveDevice(codes.user_code, "acct_device");
     const tokens = await (await fake.fetch(SERVICE + "/v1/token", { method: "POST", body: JSON.stringify({
       grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: codes.device_code,
     }) })).json();
     await indexedAccountStore.set("session", { ...tokens, service: SERVICE, expires_at: Date.now() + 3600000 });
+    return tokens;
+  };
+
+  for (const own of [true, false]) it(`lists nothing on a failed ownership read and checks again on retry (own sign-in: ${own})`, async () => {
+    firstMember = "available";
+    if (!own) { await storeDeviceSignIn(); membershipReadsBeforeHealthFailure = 0; }
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    let stop: (() => void) | undefined;
+    if (own) {
+      await until(() => words().includes("Signing in adds this PC to your account."));
+      await press("Continue with Google");
+      const returned = await back(await sent.promise);
+      // The first bridge read after this own-window return gets one 503.
+      membershipReadsBeforeHealthFailure = 2;
+      stop = handOverReturn(returned, () => undefined);
+    } else {
+      await until(() => buttons().includes("Add this PC to my account"));
+      await press("Add this PC to my account");
+    }
+    try {
+      await until(() => buttons().includes("Add this PC to my account") || buttons().includes("Stop waiting"));
+      expect({ listed: fake.pcs(own ? "acct_google" : "acct_device").length, links, enrollments }).toEqual({ listed: 0, links: 0, enrollments: 0 });
+      expect(words()).toContain("This PC could not be listed in your account. Try again.");
+      await press("Add this PC to my account");
+      await until(() => own ? words().includes("This PC is in your account.") : buttons().includes("Continue on another device"));
+      expect(enrollments).toBe(own ? 1 : 0);
+      expect(links).toBe(0);
+    } finally { stop?.(); }
+  });
+
+  for (const sameAccount of [true, false]) it(`asks for a fresh own sign-in when recovery proof expires (same account: ${sameAccount})`, async () => {
+    firstMember = "available";
+    lostClaimResponses = 2;
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Continue with Google"));
+    await press("Continue with Google");
+    const stop = handOverReturn(await back(await sent.promise), () => undefined);
+    try {
+      await until(() => buttons().includes("Try again"));
+      const clock = Date.now;
+      spyOn(Date, "now").mockImplementation(() => clock() + 610_000);
+      await press("Try again");
+      await until(() => buttons().includes("Try again") || buttons().includes("Sign in again"));
+      expect(buttons()).toContain("Sign in again");
+      expect(buttons()).not.toContain("Try again");
+      sent = Promise.withResolvers<string>();
+      if (!sameAccount) fake.signInAs("google", "acct_other");
+      await press("Sign in again");
+      const end = handOverReturn(await back(await sent.promise), () => undefined);
+      try {
+        await until(() => sameAccount ? words().includes("This PC is in your account.") : words().includes("The sign-in did not finish. Try again."));
+        expect((await indexedAccountStore.get("session"))?.account).toBe("acct_google");
+        expect(enrollments).toBe(sameAccount ? 1 : 0);
+        expect(links).toBe(0);
+      } finally { end(); }
+    } finally { stop(); }
+  });
+
+  for (const lost of [false, true]) it(`lists nothing after a device-code refusal (response lost: ${lost})`, async () => {
+    firstMember = "available";
+    lostClaimResponses = lost ? 1 : 0;
+    const tokens = await storeDeviceSignIn();
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
     await until(() => buttons().includes("Add this PC to my account"));
     await press("Add this PC to my account");
@@ -383,6 +452,14 @@ describe("signing in on the PC's own window", () => {
     expect(buttons()).toContain(paired ? "Stop waiting" : "Turn on the relay and add this PC");
     expect(links).toBe(paired ? 1 : 0);
     expect(fake.pcs("acct_existing").map(row => row.server_id)).toEqual(paired ? [SERVER] : []);
+  });
+
+  it("falls back to listing when only the PC knows its opens-all switch is on", async () => {
+    pc = relayFixture(false, { accountOpensAll: true });
+    await pressSignedInAdd();
+    expect(buttons()).toContain("Stop waiting");
+    expect(fake.pcs("acct_existing").map(row => row.server_id)).toEqual([SERVER]);
+    expect(links).toBe(1);
   });
 
   for (const reply of ["coded 409", "unreadable 409", "coded 503", "409 then missing account field"] as const) it(`handles a ${reply} claim response with no account`, async () => {

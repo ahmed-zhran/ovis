@@ -504,7 +504,8 @@ Success returns `{ "device": <member> }` and the `x-ovis-first-enroll` response 
 that header on `POST /api/account/enroll`; it is not a relay credential. It expires after ten minutes and no
 longer works after rotation, revocation, or completion of enrollment. A lost claim response is not permission
 to list the PC or open pairing: the window reads membership before deciding whether enrollment can resume.
-Before the claim, only `409 in_account` or an older PC's `404 not_found` falls back to digit pairing, and
+An unreadable ownership check never opens digit pairing. Before the claim, `409 in_account`, `409 opens_all`
+(the PC's account-opens-all switch is on), or an older PC's `404 not_found` allows the usual listing flow
 only after the PC reports `account: null`. `409 relay_off` offers to start the relay instead. A network
 failure, unreadable or uncoded refusal, or `5xx` (including `503 account_unavailable`) lists nothing.
 

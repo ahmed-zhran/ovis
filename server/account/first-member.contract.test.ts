@@ -5,6 +5,7 @@ import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord } fro
 import { FakeAccountService } from "../../shared/account-service-fake.ts";
 import { readDeviceRegistry } from "../devices.ts";
 import { privateStateFs } from "../private-state.ts";
+import { PcAccountState } from "./pc-binding.ts";
 import { loadRelayIdentity } from "../relay/identity.ts";
 import { relayDevice, relayFixture } from "../relay/test-helpers.ts";
 
@@ -60,6 +61,16 @@ test("a PC with an existing pairing refuses both actions before looking up a cha
   await relayDevice(p.f);
   for (const route of [path + "/challenge", path]) await refused(await p.post(route, {}), 409, "in_account");
   expect(p.calls).toHaveLength(0);
+});
+
+test("a healthy opens-all PC identifies its switch without issuing a challenge or accepting a claim", async () => {
+  const f = relayFixture(false, { accountOpensAll: true });
+  cleanup.push(() => f.close());
+  const base = `http://127.0.0.1:${f.app.port}`;
+  for (const action of [path + "/challenge", path]) {
+    await refused(await fetch(base + action, { method: "POST", headers: { origin: base, "content-type": "application/json", "x-herdr-machine": "1" }, body: "{}" }), 409, "opens_all");
+  }
+  expect(f.app.context.services.devices.list(null)).toEqual([]);
 });
 
 test("the PC makes fresh challenges and rejects an unknown or sixty-second-old challenge", async () => {
@@ -253,8 +264,15 @@ test("a recovery claim never creates a first member on an empty PC", async () =>
   expect(p.devices.list(null)).toEqual([]);
 });
 
-for (const failure of ["open", "write", "full disk"] as const) test(`a first-member journal ${failure} failure leaves no member, grant, barrier or pairing announcement`, async () => {
+for (const failure of ["open", "write", "full disk", "previously closed gate"] as const) test(`a first-member journal ${failure} failure leaves no member, grant, barrier or pairing announcement`, async () => {
   const p = await pc();
+  if (failure === "previously closed gate") { p.devices.closeGate(); await Promise.resolve(); }
+  const registry = join(p.f.stateDir, "devices.json");
+  const before = readDeviceRegistry(registry, false);
+  const gated = p.devices.gated;
+  const othersEver = PcAccountState.open(p.f.stateDir).othersEver();
+  let closures = 0;
+  p.devices.onGateClosed(() => { closures++; });
   const journal = join(p.f.stateDir, "first-member-journal.json");
   if (failure === "open") writeFileSync(journal, "damaged");
   let full = false;
@@ -270,11 +288,13 @@ for (const failure of ["open", "write", "full disk"] as const) test(`a first-mem
   p.devices.onPaired(event => paired.push(event.device_id));
   try {
     const res = await p.claim(await p.challenge());
-    const disk = readDeviceRegistry(join(p.f.stateDir, "devices.json"), false);
+    const disk = readDeviceRegistry(registry, false);
     expect({ rows: p.devices.list(null).length, disk: disk.kind === "ok" ? disk.devices.length : disk.kind === "missing" ? 0 : "bad",
       account: p.devices.account(), enrolling: p.f.app.context.services.accountHolds.enrolling(), grant: res.headers.get("x-ovis-first-enroll"), paired })
       .toEqual({ rows: 0, disk: 0, account: null, enrolling: false, grant: null, paired: [] });
     await refused(res, 409, "account_unavailable");
+    expect({ disk, gated: p.devices.gated, othersEver: PcAccountState.open(p.f.stateDir).othersEver(), closures })
+      .toEqual({ disk: before, gated, othersEver, closures: 0 });
     expect(p.devices.isTombstoned(p.key)).toBe(false);
   } finally { rename?.mockRestore(); sync?.mockRestore(); }
 });

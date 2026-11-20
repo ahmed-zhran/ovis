@@ -37,7 +37,7 @@ import { ownerAccess, type Access } from "./access.ts";
 import { CLEAR_LEGACY_DEVICE_COOKIE, COOKIE_MAX_AGE_SECONDS, DEVICE_COOKIE_CLEARED, deviceCookie, isSecureRequest, noContent, parseCookies } from "./auth.ts";
 import { badRequest, isJsonObject, jsonResponse, setRequestRoute } from "./http.ts";
 import { sameOrigin } from "./machine-security.ts";
-import { preparePrivateState, privateStateRefusal, publishPrivateState, writePrivateState } from "./private-state.ts";
+import { preparePrivateState, privateStateRefusal, publishPrivateState, syncDirectory, writePrivateState } from "./private-state.ts";
 
 /** How long a pairing code pairs new devices. */
 export const CODE_TTL_MS = 10 * 60_000;
@@ -2376,19 +2376,21 @@ export class DeviceStore {
     }, member.id)?.device ?? null;
   }
 
-  /** Stage the closed, memberless registry first: an audit failure may leave no space to write a rollback. */
+  /** Stage the original registry first: an audit failure may leave no space to write a rollback. */
   private saveFirstMember(next: StoredDevice[], gate: string | null, audit: () => void): boolean {
-    const rollback = preparePrivateState(this.path, { gate_closed_at: gate, devices: this.devices });
+    const rollback = existsSync(this.path) ? preparePrivateState(this.path, JSON.parse(readFileSync(this.path, "utf8"))) : null;
     try {
-      this.save(next, gate);
+      // Neither the gate nor its listeners see a new row until the audit also commits.
+      writePrivateState(this.path, { gate_closed_at: gate, devices: next });
       try { audit(); }
       catch {
-        publishPrivateState(rollback, this.path);
-        this.gateClosedAt = gate;
+        if (rollback !== null) publishPrivateState(rollback, this.path);
+        else { rmSync(this.path); syncDirectory(dirname(this.path), process.platform); }
         return false;
       }
+      if (!this.rawGated) this.tellGateClosed();
       return true;
-    } finally { rmSync(rollback, { force: true }); }
+    } finally { if (rollback !== null) rmSync(rollback, { force: true }); }
   }
 
   private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere, account, auditFirstMember }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean; account?: string; auditFirstMember?: () => void }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {

@@ -59,7 +59,8 @@ export async function handleAccountRequest(request: Request, pathname: string, c
     setRequestRoute(pathname);
     if (!ownWindow || peer.kind !== "socket") return fail("own_window_required", "Use this PC's own window", 403);
     if (firstMemberSlot(context.services) === "occupied") return fail("in_account", "This PC already has a member", 409);
-    if (devices.opensAll() || devices.error || devices.accountError || context.services.accountHolds.error) return fail("account_unavailable", "Use the existing pairing flow", 409);
+    if (devices.error || devices.accountError || context.services.accountHolds.error) return fail("account_unavailable", "This PC could not add its first member.", 409);
+    if (devices.opensAll()) return fail("opens_all", "Use the existing pairing flow", 409);
   }
   const body = await readJsonObject(request);
   if (body instanceof Response) return body;
