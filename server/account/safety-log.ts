@@ -223,7 +223,7 @@ export class SafetyLog {
     try { text = readFileSync(this.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.readError = `Cannot read ${this.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
       else if (existsSync(join(this.stateDir, DEVICE_JOURNAL_FILE))) this.readError = `${this.path} is missing beside the device journal`;
-      else if (this.file.next !== 1) this.readError = `${this.path} is missing after this PC wrote it`;
+      else if (this.file.next !== 1 || this.file.waiting.length !== 0) this.readError = `${this.path} is missing after this PC wrote it`;
       else { this.inForce = this.state(); return true; }
       return false;
     }
@@ -288,13 +288,7 @@ export class SafetyLog {
     if (this.file.base.some((line) => line.id === id)) return { outcome: "already_applied", id };
     const entry: SafetyEntry = { n: this.file.next, got, record: { ...record }, ...(asof === undefined ? {} : { asof: { ...asof } }) };
     const next: LogFile = { ...this.file, next: this.file.next + 1, entries: [...this.file.entries, entry] };
-    try { writePrivateState(this.path, next); } catch (error) {
-      this.writeError = `Cannot write ${this.path} (${error instanceof Error ? error.message : String(error)})`;
-      this.inForce = STRICT_STATE;
-      return { outcome: "refused", id, code: "log_unavailable" };
-    }
-    this.file = next;
-    this.inForce = this.state();
+    if (!this.writeFile(next)) return { outcome: "refused", id, code: "log_unavailable" };
     if (record.kind === "lift" && cause !== undefined) {
       const held = this.file.entries.filter(({ record: candidate }) => candidate.account === record.account);
       const block = held.find(({ record: candidate }) => candidate.kind === "block" && candidate.id === record.target);
@@ -384,24 +378,31 @@ export class SafetyLog {
 
   waitingBlocks(): readonly WaitingBlock[] { return this.file.waiting; }
 
-  /** Queues a block whose target this PC cannot place yet; false when the queue is full: none is pushed out (P19). */
+  /** Queues a block whose target this PC cannot place yet; false if the log cannot hold it, without evicting another (P19). */
   wait(item: WaitingBlock): boolean {
-    if (this.readError !== null) return false;
+    if (this.strict !== null || !this.load()) return false;
     if (this.file.waiting.some((kept) => kept.record.id === item.record.id)) return true;
     if (this.file.waiting.length >= WAITING_MAX) return false;
-    this.writeFile({ ...this.file, waiting: [...this.file.waiting, item] });
-    return true;
+    return this.writeFile({ ...this.file, waiting: [...this.file.waiting, item] });
   }
 
   /** A waiting block was judged: applied, or refused for good. */
   unwait(id: string): void {
     if (!this.file.waiting.some((kept) => kept.record.id === id)) return;
-    this.writeFile({ ...this.file, waiting: this.file.waiting.filter((kept) => kept.record.id !== id) });
+    if (this.strict !== null || !this.load()) return;
+    const waiting = this.file.waiting.filter((kept) => kept.record.id !== id);
+    if (waiting.length !== this.file.waiting.length) this.writeFile({ ...this.file, waiting });
   }
 
-  private writeFile(next: LogFile): void {
-    writePrivateState(this.path, next);
+  private writeFile(next: LogFile): boolean {
+    try { writePrivateState(this.path, next); } catch (error) {
+      this.writeError = `Cannot write ${this.path} (${error instanceof Error ? error.message : String(error)})`;
+      this.inForce = STRICT_STATE;
+      return false;
+    }
     this.file = next;
+    this.inForce = this.state();
+    return true;
   }
 
   /** The file as it stands, for a merge. */

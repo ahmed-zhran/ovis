@@ -924,7 +924,13 @@ export class DeviceStore {
     const targets = this.devices.filter((d) => d.relay_public_key === record.target);
     // a target this PC has no row of: the block waits, ends nobody, and is judged when its target is here (P19)
     if (targets.length === 0) {
-      safety.wait({ record, got, signer_removed: false });
+      if (!safety.wait({ record, got, signer_removed: false })) {
+        if (safety.strict === null) {
+          this.failedDenies.add(record.target);
+          this.denyProblem = "A block could not be queued because the waiting queue is full: only this PC itself gets in.";
+        }
+        return refused("record_invalid");
+      }
       return refused("unknown_target");
     }
     let cutoff: AdmissionPosition | null = null;
@@ -1729,7 +1735,11 @@ export class DeviceStore {
     this.gateClosedAt = gate;
     // P19: judge waiting blocks against the new row before returning or announcing it.
     this.applyWaitingBlocks();
-    if (this.safety !== null && (this.failsClosed || !this.has(device.id))) return false;
+    if (this.safety !== null && !this.has(device.id)) {
+      if (codeSpent) this.voidPending();
+      return false;
+    }
+    if (this.safety !== null && this.failsClosed) return false;
     if (codeSpent) this.voidPending();
     if (device.account !== undefined) this.endNoAccountCode();
     // A relay enrollment closes the gate immediately, invalidating every first-cookie candidate.
