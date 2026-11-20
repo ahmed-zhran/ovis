@@ -289,11 +289,12 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(log.wait({ record: queued, got: "mailbox", signer_removed: false })).toBe(true);
     const ids = [accountDeviceId(SERVER, target.spki), accountDeviceId(SERVER, other.spki)];
     const standing = devices.admitListedRows(() => {
-      devices.pairRelayApproved("Listed", target.spki, { path: "code", id: ids[0] });
+      // the other row joins first: a block freezes the rows newer than its target
       devices.pairRelayApproved("Other", other.spki, { path: "code", id: ids[1] });
+      devices.pairRelayApproved("Listed", target.spki, { path: "code", id: ids[0] });
       return ids;
     });
-    expect(standing).toEqual([ids[1]]);
+    expect(standing).toEqual([ids[1]!]);
     expect(devices.has(ids[0]!)).toBe(false);
     // a write that throws publishes nothing
     expect(() => devices.admitListedRows(() => { throw new Error("list write failed"); })).toThrow("list write failed");
