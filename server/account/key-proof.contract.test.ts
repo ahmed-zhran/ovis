@@ -10,7 +10,7 @@ import { bounded, deferred, relayConnection } from "../relay/test-helpers.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOURNAL_FILE } from "./device-journal.ts";
-import { pairingPc, phone, SERVER_ID, type Pc } from "./pairing.test-helpers.ts";
+import { pairingPc, phone, SERVER_ID, setUpFor, type Pc } from "./pairing.test-helpers.ts";
 
 const pcs: Pc[] = [];
 afterEach(async () => { for (const pc of pcs.splice(0)) await pc.close(); });
@@ -144,4 +144,32 @@ test("T71/T72: a decline is journalled as a drop that names the device's key and
   await bounded(paired.link.serverError);
   const entries = (JSON.parse(readFileSync(join(made.stateDir, JOURNAL_FILE), "utf8")) as { entries: { kind: string; key: string | null; label: string }[] }).entries;
   expect(entries.filter((entry) => entry.kind === "drop")).toEqual([expect.objectContaining({ key: paired.device.spki, label: "New phone" })]);
+});
+
+test("S31/T71: while one proved device waits for the screen, a second device with the same code gets its own challenge", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const first = await provingDevice(made, code);
+  await first.pending;
+  const second = await provingDevice(made, code);
+  await second.pending;
+  expect((await made.local("/api/devices/pending")).body.pending).toHaveLength(2);
+});
+
+test("T71: a code that ends (cancelled here) drops the devices that wait on it", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const paired = await provingDevice(made, code);
+  await paired.pending;
+  expect(made.devices.endPairing({ code })).toBe(true);
+  expect((await made.local("/api/devices/pending")).body.pending).toEqual([]);
+  expect(await bounded(paired.link.serverError)).toBe("auth_failed");
+});
+
+test("T71/T72: a first-link QR, from a PC set up for an account and not in it yet, starts the key proof", async () => {
+  const made = await pc(true, "linux");
+  await setUpFor(made, "acct_1");
+  const paired = await provingDevice(made, await made.tabCode());
+  expect((await paired.pending).payload).toEqual({});
+  expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
 });
