@@ -335,4 +335,28 @@ describe("a safe PC state before any listener (T41, T48)", () => {
     dirs.splice(dirs.indexOf(dir), 1);
     expect(f.app.context.services.devices.has(foreign.id)).toBe(false);
   });
+
+  test("LEDGER S2-38 S17-1 (gate r1 at 6894e858, P13/T61, fails closed): after a merge, a forgotten account removal is gone from the sibling's tombstone file too", async () => {
+    const [dir, sibling] = [stateDir(), stateDir()];
+    const k = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE" + "A".repeat(88);
+    writeFileSync(join(sibling, "account-tombstones.json"), JSON.stringify({ tombstones: [{ key: k, account: "acct_1", record_id: "r".repeat(32), removed_at: "2026-10-01T00:00:00.000Z" }] }), { mode: 0o600 });
+    SafetyLog.open(dir).append({ record: { v: 1, id: "f".repeat(32), kind: "forget", account: "acct_1", target: k, signer: "pc", signed_at: "2026-10-02T00:00:00.000Z", signature: "" } as never, got: "pc" });
+    const f = relayFixture(false, { stateDir: dir, siblingStateDir: sibling, accountOpensAll: true });
+    fixtures.push(f);
+    dirs.splice(dirs.indexOf(dir), 1);
+    const siblingTombstones = JSON.parse(readFileSync(join(sibling, "account-tombstones.json"), "utf8")) as { tombstones: { key: string }[] };
+    expect(siblingTombstones.tombstones.some((t) => t.key === k)).toBe(false);
+  });
+
+  test("LEDGER S2-38 S17-2 (gate r1 at 6894e858, P15, history): after a merge, the active journal holds both folders' entries", () => {
+    const [dir, sibling] = [stateDir(), stateDir()];
+    const entry = { kind: "remove" as const, how: "pc", key: null, no: null, row: null, label: "", by: null, account: null };
+    const own = DeviceJournal.open(dir).append({ ...entry, label: "active-history" });
+    const theirs = DeviceJournal.open(sibling).append({ ...entry, label: "sibling-history" });
+    const f = relayFixture(false, { stateDir: dir, siblingStateDir: sibling, accountOpensAll: true });
+    fixtures.push(f);
+    dirs.splice(dirs.indexOf(dir), 1);
+    const ids = DeviceJournal.open(dir).entries().map((e) => e.id);
+    expect(ids).toEqual(expect.arrayContaining([own.id, theirs.id]));
+  });
 });
