@@ -67,6 +67,7 @@ import { openRecoverySocket, RecoveryReleases } from "./account/recovery.ts";
 import { recoveryActs, type RecoverySeams } from "./account/recovery-acts.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
+import { Replacements } from "./account/replacements.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
 import { Telemetry } from "./telemetry.ts";
 import { UsageService } from "./usage.ts";
@@ -571,6 +572,7 @@ export function createServer(
     service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
   });
   const services: RequestServices = {
+    replacements: localConfirms && journal ? new Replacements(devices, localConfirms, journal) : undefined,
     runtimeMove: options.runtimeService ? moveService({
       stateDir, port: server.port ?? DEFAULT_PORT, serving: runtime, facts: () => options.runtimeService?.facts(),
       lock: { path: moveLockPath(herdrSocketPath()) },
@@ -661,6 +663,7 @@ export function createServer(
       });
     },
     stop: () => {
+      services.replacements?.stop();
       services.runtimeMove?.stop();
       accountMailbox.stop();
       void ovisRelay.shutdown();

@@ -6,9 +6,7 @@ import { sameOrigin } from "../machine-security.ts";
 import { parseIntroducedPcs } from "./introductions.ts";
 import { ACCOUNT_HELD_MAX } from "./holds.ts";
 import { applyAccountRecords, applyEnrollment, applyLink, type LinkRefusal } from "./records.ts";
-import { LINK_REPLACEMENT_OPT_IN } from "../../shared/account-devices-api.ts";
-import { pairFingerprint } from "../../shared/pair-fingerprint.ts";
-import { askScreenForReplacement } from "./key-proof.ts";
+import { AccountDevicesApiError, LINK_REPLACEMENT_OPT_IN, parseReplacementProof } from "../../shared/account-devices-api.ts";
 
 const LINK_STATUS: Record<LinkRefusal, number> = {
   record_invalid: 400, signature_invalid: 400, account_mismatch: 409, signer_not_member: 403,
@@ -97,10 +95,15 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       // Nothing of a device that waits to link is written before its link has passed every check: its barrier goes to
       // disk in the turn that writes its row, before it (applyLink). So one whose link is refused, or outlives its
       // time, leaves none
-      if (first && !arrival.provisional) context.services.accountHolds.startEnrolling(peer.device.id, { stale: true });
       const optedIn = body.replacement === LINK_REPLACEMENT_OPT_IN;
-      const linked = await applyLink(devices, body.record, { deviceId: peer.device.id, serverId: peer.serverId, sessionKey: peer.key, sessionId: peer.sessionId }, arrival, {
+      const replacements = context.services.replacements;
+      const deferredBarrier = !optedIn && replacements !== undefined && devices.originOf(peer.device.id)?.from === "pc";
+      if (first && !arrival.provisional && !deferredBarrier) context.services.accountHolds.startEnrolling(peer.device.id, { stale: true });
+      const owner = { deviceId: peer.device.id, serverId: peer.serverId, sessionKey: peer.key, sessionId: peer.sessionId };
+      const linked = await applyLink(devices, body.record, owner, arrival, {
         replacement: optedIn,
+        deferredBarrier,
+        linked: (device, changedKey) => replacements?.linked(owner, device.label, changedKey),
         gates: context.services.accountMailbox.gates(),
         barrier: () => context.services.accountHolds.startEnrollingBeforeRow(peer.device.id),
         setUpFor: () => context.services.relay.savedRelayAccount(),
@@ -114,19 +117,25 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       }
       // the wait is this device's to end: a link refused meanwhile may have named another; the first link that succeeds keeps it
       if (first) context.services.accountHolds.confirmEnrolling(peer.device.id);
-      // a screen-approved key's move is held for this PC's screen (P22, T72): the challenge is the PC's own, minted with
-      // the replacement, so the fingerprint the app computes over its new key is the one the screen shows
-      const held = optedIn ? devices.pendingReplacement(peer.device.id) : null;
-      if (held !== null) {
-        const fingerprint = await pairFingerprint(peer.serverId, held.challenge, held.key);
-        const confirms = context.services.localConfirms;
-        if (confirms === undefined || !askScreenForReplacement(confirms, devices, { id: peer.device.id, label: linked.device.label }, fingerprint)) {
-          devices.declineReplacement(peer.device.id);
-          return fail("account_unavailable", "This PC's screen cannot approve a new key now", LINK_STATUS.account_unavailable);
+      return reply(linked, linked.replacement ? 202 : 200);
+    }
+    case "/api/account/devices/replace": {
+      const replacements = context.services.replacements;
+      if (!replacements) return fail("not_found", "Unknown account action", 404);
+      setRequestRoute(pathname);
+      if (peer.kind !== "relay") return fail("link_not_owner", "Use the connection that linked this device", 403);
+      try {
+        const status = await replacements.prove({ deviceId: peer.device.id, sessionId: peer.sessionId, serverId: peer.serverId, sessionKey: peer.key }, parseReplacementProof(body));
+        switch (status) {
+          case 204: return new Response(null, { status, headers: { "cache-control": "no-store" } });
+          case 403: return fail("replacement_refused", "The connection or proof did not match", status);
+          case 410: return fail("replacement_gone", "This replacement challenge has ended", status);
+          case 503: return fail("account_unavailable", "This PC's screen cannot approve a new key now", status);
         }
-        return reply({ device: linked.device, replacement: { challenge: held.challenge, fingerprint } }, 202);
+      } catch (error) {
+        if (error instanceof AccountDevicesApiError) return fail("record_invalid", error.message, 400);
+        throw error;
       }
-      return reply({ device: linked.device });
     }
     case "/api/account/records": {
       setRequestRoute(pathname);

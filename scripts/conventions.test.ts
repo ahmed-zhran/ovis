@@ -334,6 +334,7 @@ describe("demo transport", () => {
     "/api/account/introduce": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
     "/api/account/introduction": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
     "/api/account/link": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/account/devices/replace": "only after a flag-on link returns a challenge; the demo does not serve account links",
     "/api/account/records": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
     "/api/devices/pending": "devices waiting for this PC's screen: only with the release flag on, which the demo never is",
     "/api/devices/pending/decline": "devices waiting for this PC's screen: only with the release flag on, which the demo never is",

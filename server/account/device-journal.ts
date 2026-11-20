@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DeviceNotice, NoticeKind, NoticeReplay } from "../../shared/account-devices-api.ts";
+import { isAccountKeyEncoding } from "../../shared/account-records.ts";
 import { writePrivateState } from "../private-state.ts";
 import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
@@ -41,6 +42,8 @@ interface Doc {
   entries: JournalEntry[];
   seen: Record<string, number>;
   open: JournalEntry[];
+  /** Audit subjects only, never challenges, proofs or authority to move a key. */
+  replacements?: { row: string; key: string; label: string }[];
   /** the highest seq trimmed so far: a row that had not seen up to it is told how many it missed */
   trimmed: number;
 }
@@ -62,7 +65,9 @@ export class DeviceJournal {
     }
     try {
       const doc = JSON.parse(text) as Partial<Doc>;
-      if (doc.v !== 1 || !Number.isSafeInteger(doc.next_seq) || !Array.isArray(doc.entries) || !Array.isArray(doc.open) || typeof doc.seen !== "object" || doc.seen === null || !Number.isSafeInteger(doc.trimmed)) {
+      const subjects = doc.replacements;
+      const validSubjects = subjects === undefined || (Array.isArray(subjects) && subjects.every((s) => s && typeof s.row === "string" && /^[0-9a-f]{16}$/.test(s.row) && isAccountKeyEncoding(s.key) && typeof s.label === "string"));
+      if (doc.v !== 1 || !Number.isSafeInteger(doc.next_seq) || !Array.isArray(doc.entries) || !Array.isArray(doc.open) || typeof doc.seen !== "object" || doc.seen === null || !Number.isSafeInteger(doc.trimmed) || !validSubjects) {
         journal.problem = `${journal.path} is not this PC's device journal`;
       } else { journal.doc = doc as Doc; journal.exists = true; }
     } catch { journal.problem = `${journal.path} is not JSON`; }
@@ -76,6 +81,17 @@ export class DeviceJournal {
   entries(): readonly JournalEntry[] { return this.doc.entries; }
 
   openNotices(): readonly JournalEntry[] { return this.doc.open; }
+
+  replacementSubjects(): readonly { readonly row: string; readonly key: string; readonly label: string }[] { return this.doc.replacements ?? []; }
+
+  trackReplacement(row: string, subject: { key: string; label: string } | null): void {
+    if (this.problem !== null) throw new Error(this.strict!);
+    const replacements = this.replacementSubjects().filter((entry) => entry.row !== row);
+    if (subject) replacements.push({ row, key: subject.key, label: subject.label });
+    if (!this.exists) this.companions();
+    this.write({ ...this.doc, replacements });
+    this.exists = true;
+  }
 
   /** Whether the list may admit anybody new: fewer than OPEN_NOTICES_MAX join notices wait for an answer (G15). */
   admitsFromList(): boolean { return this.problem === null && this.doc.open.length < OPEN_NOTICES_MAX; }
@@ -93,7 +109,9 @@ export class DeviceJournal {
     }
     const open = entry.kind === "admit" ? [...this.doc.open, entry] : this.doc.open;
     if (!this.exists) this.companions();
-    this.write({ ...this.doc, next_seq: entry.seq + 1, entries, open, trimmed });
+    // The restart receipt and the drop it records change in the same journal write.
+    const replacements = this.doc.replacements;
+    this.write({ ...this.doc, ...(replacements && input.kind === "drop" ? { replacements: replacements.filter((item) => item.row !== input.row || item.key !== input.key) } : {}), next_seq: entry.seq + 1, entries, open, trimmed });
     this.exists = true;
     return entry;
   }

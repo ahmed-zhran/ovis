@@ -54,7 +54,7 @@ export class LocalConfirms {
   }
 
   /** Puts one act on the PC's screen. Asking grants nothing: only an answer on the screen does. */
-  request(action: ScreenAction, shown: ConfirmShown): { id: string; expiresAt: number } {
+  request(action: ScreenAction, shown: ConfirmShown, ttlMs = CONFIRM_MS): { id: string; expiresAt: number } {
     this.#sweep();
     if ([...this.#entries.values()].filter((entry) => entry.state === "open").length >= CONFIRMS_OPEN_MAX) {
       throw new ConfirmsFullError("Too many acts wait for this PC's screen");
@@ -63,10 +63,10 @@ export class LocalConfirms {
     const fingerprint = "fingerprint" in action ? action.fingerprint : undefined;
     shown = frozenCopy({ title: shown.title, lines: shown.lines, ...(fingerprint === undefined ? {} : { fingerprint }) });
     const id = randomBytes(16).toString("hex");
-    const expiresAt = this.#now() + CONFIRM_MS;
+    const expiresAt = this.#now() + ttlMs;
     let settle!: (answer: ConfirmAnswer) => void;
     const answered = new Promise<ConfirmAnswer>((resolve) => { settle = resolve; });
-    const timer = setTimeout(() => this.#end(id, "expired"), CONFIRM_MS);
+    const timer = setTimeout(() => this.#end(id, "expired"), ttlMs);
     timer.unref?.();
     this.#entries.set(id, { id, action, shown, expiresAt, state: "open", settle, answered, timer });
     this.#changed();

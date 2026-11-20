@@ -7,7 +7,7 @@ import { accountDeviceId, AccountRecordError, ACCOUNT_RECORDS_MAX, parseAccountR
 import { ReplacementNeedsAppError, type DeviceStore, type LinkArrival } from "../devices.ts";
 import type { PairedDevice } from "../../shared/protocol.ts";
 import type { Vouch } from "./mailbox.ts";
-import { REPLACEMENT_NEEDS_APP } from "../../shared/account-devices-api.ts";
+import { REPLACEMENT_NEEDS_APP, type LinkReplacement } from "../../shared/account-devices-api.ts";
 
 export type RecordRefusal = "record_invalid" | "signature_invalid" | "account_mismatch" | "signer_not_member" | "tombstoned" | "link_not_owner" | "account_unavailable" | "enrolling" | "removal_pending" | "older_device";
 
@@ -156,6 +156,10 @@ export type LinkRefusal = RecordRefusal | "key_in_use" | "link_required" | "unve
 export interface LinkRules {
   /** the app shows a replacement's fingerprint itself (LINK_REPLACEMENT_OPT_IN): only then may a screen-approved key's move be held for the screen (P22) */
   replacement?: boolean;
+  /** Called synchronously with the successful write: only this link's new slot may be returned to its session. */
+  linked?(device: PairedDevice, changedKey: boolean): LinkReplacement | undefined;
+  /** A legacy app linking a stored screen row starts the barrier only for a link that can write. */
+  deferredBarrier?: boolean;
   /** what holds a key back here (mailbox.ts `gates`) */
   gates?: AddGates;
   /**
@@ -266,7 +270,7 @@ function look(store: DeviceStore, link: LinkRecord, deviceId: string, arrival: L
  * and the write run in one turn, so two links that both passed their waits never both write. `arrival`: what stood
  * when the link arrived, before those waits (DeviceStore.linkArrived).
  */
-export async function applyLink(store: DeviceStore, value: unknown, session: { deviceId: string; serverId: string; sessionKey: string; sessionId?: string }, arrival: LinkArrival, rules: LinkRules = {}): Promise<{ device: PairedDevice } | LinkRefused> {
+export async function applyLink(store: DeviceStore, value: unknown, session: { deviceId: string; serverId: string; sessionKey: string; sessionId?: string }, arrival: LinkArrival, rules: LinkRules = {}): Promise<{ device: PairedDevice; replacement?: LinkReplacement } | LinkRefused> {
   const { deviceId, serverId, sessionKey, sessionId } = session;
   const record = await read(value);
   if ("refused" in record) return { refused: record.refused };
@@ -306,7 +310,8 @@ export async function applyLink(store: DeviceStore, value: unknown, session: { d
   // a row moving to a key this PC holds back would let that key in without anyone approving it here
   if (link.key !== link.old_key && rules.gates?.held(link.key)) return { refused: "removal_pending" };
   if (store.keyHeldByOther(link.key, deviceId)) return { refused: "key_in_use" };
-  const takeBack = waits ? rules.barrier?.() : undefined;
+  const writesStoredRow = rules.deferredBarrier && store.account() === null && (link.key === link.old_key || store.originOf(deviceId)?.from !== "pc");
+  const takeBack = waits || writesStoredRow ? rules.barrier?.() : undefined;
   let device: PairedDevice | null = null;
   try { device = store.linkAccountKey(deviceId, link.old_key, link.key, link.account, sessionId, vouched, rules.replacement === true); }
   catch (error) {
@@ -322,5 +327,7 @@ export async function applyLink(store: DeviceStore, value: unknown, session: { d
       catch (left) { console.error(`[account] the enrollment barrier of a link that was not written could not be taken back: ${left instanceof Error ? left.message : String(left)}`); }
     }
   }
-  return device ? { device } : { refused: "link_not_owner" };
+  if (!device) return { refused: "link_not_owner" };
+  const replacement = rules.linked?.(device, link.key !== link.old_key);
+  return replacement ? { device, replacement } : { device };
 }

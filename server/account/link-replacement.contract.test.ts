@@ -147,7 +147,8 @@ test("P22/T72: the prompt survives two minutes but expires with the five-minute 
   const confirms = made.app.context.services.localConfirms!;
   const start = made.devices.pendingReplacement(device.id)!.at;
   expect(confirms.pending().find((entry) => entry.id === id)?.expiresAt).toBeCloseTo(start + 300_000, -2);
-  using clock = spyOn(Date, "now").mockReturnValue(start + 300_001);
+  using clock = spyOn(Date, "now");
+  clock.mockReturnValue(start + 300_001);
   expect((await replace(device, proof)).status).toBe(410);
   expectDrop(made, device.id, next.spki, "expired");
 });
