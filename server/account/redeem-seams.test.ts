@@ -37,9 +37,9 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     const redeemed = devices.redeemCode(code, "code", named);
     expect(redeemed).toMatchObject({ ok: true });
     const codeId = (redeemed as { codeId: string }).codeId;
-    // nothing is written by the redemption, and the code's one use is taken
+    // nothing is written by the redemption; another key reserves a use of its own (T71: up to five at once)
     expect(devices.list(null)).toHaveLength(0);
-    expect(devices.redeemCode(code, "code", other)).toMatchObject({ ok: false });
+    expect(devices.redeemCode(code, "code", other)).toMatchObject({ ok: true, codeId });
     // another key, or another code id, admits nobody
     expect(devices.admitConfirmed({ codeId, key: other, label: "Other", source: "screen" })).toBeNull();
     expect(devices.admitConfirmed({ codeId: "f".repeat(32), key: named, label: "Phone", source: "screen" })).toBeNull();
@@ -47,8 +47,9 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     const admitted = devices.admitConfirmed({ codeId, key: named, label: "Phone", source: "screen" });
     expect(admitted).not.toBeNull();
     expect(devices.list(null).map((row) => row.id)).toEqual([admitted!.id]);
-    // the use is spent: the same reservation admits nobody again
+    // the use is spent: the same reservation admits nobody again, nor does the other key's, shown on screen or not
     expect(devices.admitConfirmed({ codeId, key: named, label: "Phone", source: "screen" })).toBeNull();
+    expect(devices.admitConfirmed({ codeId, key: other, label: "Other", source: "screen" })).toBeNull();
     // a late release of a reservation already taken frees nothing: the next code is the only way in again
     devices.releaseRedemption(codeId, named);
     expect(devices.redeemCode(code, "code", other)).toMatchObject({ ok: false });
@@ -56,7 +57,8 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     const next = devices.startPairing();
     const { codeId: nextId } = devices.redeemCode(next.code, "code", other) as { codeId: string };
     devices.releaseRedemption(nextId, named);
-    expect(devices.redeemCode(next.code, "code", named)).toMatchObject({ ok: false, reason: "in_use" });
+    expect(devices.redeemCode(next.code, "code", named)).toMatchObject({ ok: true });
+    devices.releaseRedemption(nextId, named);
     devices.releaseRedemption(nextId, other);
     devices.releaseRedemption(nextId, other);
     const third = await key();
@@ -163,5 +165,50 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.admitConfirmed({ codeId, key: gone, label: "Back", source: "screen", unrevokes: [revokeId] })).not.toBeNull();
     expect(internals.evidence.standingRevokes(gone)).toEqual([]);
   });
-});
 
+  test("T71: a code takes five reservations at once, a sixth key is refused, and a release frees its place", async () => {
+    const devices = store(dir());
+    const { code } = devices.startPairing();
+    const keys = await Promise.all(Array.from({ length: 6 }, () => key()));
+    const ids = keys.slice(0, 5).map((k) => (devices.redeemCode(code, "code", k) as { ok: boolean; codeId: string }));
+    expect(ids.every((r) => r.ok)).toBe(true);
+    expect(devices.redeemCode(code, "code", keys[5]!)).toMatchObject({ ok: false, reason: "in_use" });
+    devices.releaseRedemption(ids[0]!.codeId, keys[0]!);
+    expect(devices.redeemCode(code, "code", keys[5]!)).toMatchObject({ ok: true });
+  });
+
+  test("T71, T72: a first-link code is redeemed; a proved key unconfirmed gets no row and no binding, and a confirmed one waits to link", async () => {
+    const devices = store(dir());
+    const { code } = devices.startAccountPairing("acct_1");
+    const k = await key();
+    const redeemed = devices.redeemCode(code, "qr", k);
+    expect(redeemed).toMatchObject({ ok: true });
+    expect(devices.list(null)).toHaveLength(0);
+    expect(devices.account()).toBeNull();
+    const waiting = devices.admitConfirmed({ codeId: (redeemed as { codeId: string }).codeId, key: k, label: "Phone", source: "screen" });
+    expect(waiting).toMatchObject({ role: "watch" });
+    // the confirm makes no member: the row waits for its link, which the first-link rules take as today
+    expect(devices.list(null)).toHaveLength(0);
+    expect(devices.account()).toBeNull();
+  });
+
+  test("T71: every end of a code is heard, and a reservation it dropped is never confirmed after", async () => {
+    const ends: string[] = [];
+    const devices = store(dir());
+    devices.onPairingEnded((codeId) => ends.push(codeId));
+    const cancelled = devices.startPairing();
+    const k = await key();
+    const { codeId } = devices.redeemCode(cancelled.code, "code", k) as { codeId: string };
+    devices.endPairing();
+    expect(ends).toEqual([codeId]);
+    expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
+    const admittedCode = devices.startPairing();
+    const { codeId: second } = devices.redeemCode(admittedCode.code, "code", k) as { codeId: string };
+    devices.admitConfirmed({ codeId: second, key: k, label: "Phone", source: "screen" });
+    expect(ends).toEqual([codeId, second]);
+    const revoked = devices.startPairing();
+    const { codeId: third } = devices.redeemCode(revoked.code, "code", await key()) as { codeId: string };
+    devices.revokeAll();
+    expect(ends).toEqual([codeId, second, third]);
+  });
+});
