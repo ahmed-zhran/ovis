@@ -178,4 +178,17 @@ describe("one admission order per PC (origin and admit_no)", () => {
     store(dir);
     expect(row(dir, late.id).origin).toBeUndefined();
   });
+
+  test("P21: rows that carry numbers beside a missing order file are damage, never a fresh count", async () => {
+    const dir = stateDir();
+    const devices = store(dir);
+    await pairRelay(devices, Date.now());
+    await pairRelay(devices, Date.now());
+    rmSync(join(dir, ADMISSION_FILE));
+    const reopened = store(dir);
+    expect(reopened.accountError).not.toBeNull();
+    expect(reopened.pairRelay(reopened.startPairing().code, "New", (await key()))).toBeNull();
+    expect(rows(dir).every((row) => row.origin?.from !== "legacy")).toBe(true);
+  });
 });
+
