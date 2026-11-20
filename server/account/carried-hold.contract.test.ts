@@ -60,11 +60,20 @@ test.each([
   expect(devices.sessionRow(id)).toMatchObject({ role: "drive", key });
 });
 
-test("T38/P22: confirming the promoted key on the PC screen releases its hold", async () => {
-  const { devices, id, key } = await recentlyPromoted();
+test.each(["held", "timer released"] as const)("P15/T57/P22: the screen confirms the %s promoted key and decides its notice", async state => {
+  const { devices, elder, time, id, key, notice } = await recentlyPromoted();
+  if (state === "timer released") {
+    time.now += 10_000;
+    expect(devices.sessionRow(id)).toMatchObject({ role: "drive", key });
+  }
+  const replay = () => devices.noticeReplay(elder.id)?.notices;
+  expect(replay()?.find(n => n.id === notice)?.open).toBe(true);
   const reservation = devices.redeemCode(devices.startPairing().code, "code", key);
   if (!reservation.ok) throw new Error(`Code reservation failed: ${reservation.reason}`);
   expect(devices.admitConfirmed({ codeId: reservation.codeId, key, label: "Tablet", source: "screen" })?.id).toBe(id);
   expect(devices.originOf(id)?.from).toBe("pc");
   expect(devices.sessionRow(id)).toMatchObject({ role: "drive", key });
+  expect(replay()?.find(n => n.id === notice)?.open).toBe(false);
+  expect(replay()?.filter(n => n.kind === "confirm" && n.key === key)).toMatchObject([{ row: id, how: "confirmed", by: "pc" }]);
+  expect(devices.itsMe(elder.id, notice, elder.publicKey)).toBe(false);
 });
