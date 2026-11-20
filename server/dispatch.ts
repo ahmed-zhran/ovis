@@ -48,7 +48,6 @@ import { handlePortalRequest } from "./portal.ts";
 import { handleRelayRequest } from "./relay/routes.ts";
 import type { LocalConfirms } from "./account/local-confirm.ts";
 import type { RecoveryReleases } from "./account/recovery.ts";
-import type { PendingRedemptions } from "./account/pending.ts";
 import type { PendingRedemption, PendingRedemptions } from "./account/pending.ts";
 import type { KeyProofPairings } from "./account/key-proof.ts";
 import { handlePendingRequest } from "./account/pending-routes.ts";

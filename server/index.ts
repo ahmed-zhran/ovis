@@ -65,7 +65,6 @@ import { AccountIntroductions } from "./account/introductions.ts";
 import { userInfo } from "node:os";
 import { openRecoverySocket, RecoveryReleases } from "./account/recovery.ts";
 import { recoveryActs } from "./account/recovery-acts.ts";
-import { PendingRedemptions } from "./account/pending.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
