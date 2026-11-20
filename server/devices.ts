@@ -528,7 +528,7 @@ export class DeviceStore {
     // a strict order changes nothing on disk, not even a repair: its damage stays visible (S29)
     // a damaged pending file beside a readable tombstone file: the Revokes the readable one holds are evidence at once,
     // and neither file is touched until the damaged one is repaired (T26, S19)
-    if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
+    if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.safety?.strict == null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
       this.evidence.takeIn([...this.carried, ...tombstones], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
     }
     // a time this PC wrote that lies more than a day ahead is no time it wrote: it would push every later stamp past it,
@@ -557,8 +557,9 @@ export class DeviceStore {
    * the evidence covers goes. Nothing of it is told to anyone: no session is open yet.
    */
   private takeInEvidence(found: readonly AccountTombstone[]): void {
-    // evidence that cannot be trusted is never written over: the PC fails closed on it instead (S19)
-    if (this.evidence!.strict !== null) return;
+    // evidence that cannot be trusted is never written over, and nothing is taken in while the safety log cannot be
+    // read: a removal would record no forgettings it outranks, and an old forget redelivered later would end it (S19, T61)
+    if (this.evidence!.strict !== null || this.safety?.strict != null) return;
     this.evidence!.takeIn([...this.carried, ...found], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
     // the tombstone file is written from the evidence before the pending file goes, so nothing pending is lost (T26)
     this.writeTombstones(this.evidence!.tombstones());
