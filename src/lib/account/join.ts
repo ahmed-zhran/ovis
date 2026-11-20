@@ -4,6 +4,8 @@
  */
 import { ACCOUNT_ENROLL_MAX, AccountRecordError, accountDeviceId, isAccountKeyEncoding, newRecordId, readAccountRecord, signAccountRecord } from "../../../shared/account-records.ts";
 import type { AddRecord, LinkRecord, RemoveRecord } from "../../../shared/account-records.ts";
+import { LINK_REPLACEMENT_OPT_IN, parseLinkReplacement } from "../../../shared/account-devices-api.ts";
+import { pairFingerprint } from "../../../shared/pair-fingerprint.ts";
 import { isWssOrigin } from "../../../shared/relay-offer.ts";
 import type { RemotePairingRequest } from "../../../shared/protocol.ts";
 import type { RelayDevice, RelayDeviceStore } from "../relay/device.ts";
@@ -32,6 +34,18 @@ async function refusal(response: Response): Promise<AccountPcError> {
   }
   const seconds = Number(response.headers.get("retry-after") ?? Number.NaN);
   return new AccountPcError(response.status, code, Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null);
+}
+
+/**
+ * The PC holds this link until its screen approves the new key (P22, T72): this device keeps its key, and its next
+ * sign-in after the approval takes the account key (the pairing's pending_key). `fingerprint` is the one this device
+ * computed itself, for the person to compare with the PC's screen.
+ */
+export class ReplacementPendingError extends Error {
+  constructor(readonly fingerprint: string) {
+    super(`This PC's screen must approve this device's new key: compare ${fingerprint}`);
+    this.name = "ReplacementPendingError";
+  }
 }
 
 export async function post(fetch: PcFetch, path: string, body: unknown): Promise<Response> {
@@ -95,7 +109,13 @@ export async function linkThisDevice(options: { fetch: PcFetch; device: RelayDev
   }, key.private_key);
   // kept before sending: if the answer is lost after the PC swapped the key, the next sign-in tries this one
   await options.store.update(device.server_id, (current) => current === undefined ? device : { ...current, pending_key: { private_key: key.private_key, public_spki: key.public_spki } });
-  await post(options.fetch, "/api/account/link", { record });
+  const answer = await post(options.fetch, "/api/account/link", { record, replacement: LINK_REPLACEMENT_OPT_IN });
+  if (answer.status === 202) {
+    // the pairing keeps its key and the pending_key above; the fingerprint shown is this device's own, never the PC's
+    const held = parseLinkReplacement(((await answer.json()) as { replacement?: unknown }).replacement);
+    if (held === null) throw new AccountPcError(202, "record_invalid");
+    throw new ReplacementPendingError(await pairFingerprint(device.server_id, held.challenge, key.public_spki));
+  }
   return options.store.update(device.server_id, (current) => {
     // only the pairing the link was signed for takes the key: one changed meanwhile is left as it is
     if (current === undefined || current.device_id !== device.device_id || current.public_spki !== device.public_spki || current.server_public_key !== device.server_public_key) {
