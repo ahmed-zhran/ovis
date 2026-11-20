@@ -558,6 +558,7 @@ const BASE: Record<string, string> = {
   "It is off, has no network, or Ovis is not running on it.": "전원이 꺼져 있거나, 네트워크가 없거나, Ovis가 실행되고 있지 않습니다.",
   "This device could not reach the relay. Check this device's network.": "이 기기에서 릴레이에 연결하지 못했습니다. 이 기기의 네트워크를 확인하세요.",
   "Account setup is incomplete.": "계정 설정이 완료되지 않았습니다.",
+  "Approve this device on {pc}'s screen": "{pc} 화면에서 이 기기를 승인하세요",
   "Adding it to your account…": "계정에 추가하는 중…",
   "{name} is ready to open on this device.": "이제 이 기기에서 {name}에 연결할 준비가 됐습니다.",
   "In your account": "계정에 추가됨",

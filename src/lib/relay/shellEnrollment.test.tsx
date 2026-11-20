@@ -162,7 +162,7 @@ describe("account pairing completion", () => {
     expect(run.apps()).toBe(1);
     run.retrySuccess();
     run.current().onRetry();
-    await until(() => { const current = run.current().state; return current.kind === "ready" && typeof current.enrollment === "object" && current.enrollment.state === "complete"; });
+    await until(() => { const current = run.current().state; return current.kind === "ready" && typeof current.enrollment === "object" && "state" in current.enrollment && current.enrollment.state === "complete"; });
     expect(run.apps()).toBe(1);
     run.current().onOpenPc?.();
     expect(run.apps()).toBe(2);

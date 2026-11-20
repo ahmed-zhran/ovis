@@ -312,7 +312,7 @@ describe("account enrollment ownership", () => {
     const surfaces = [
       { element: createElement(RelayPcTable, { rows, onSelect() {}, onOpenSheet() {} }), text: "Account setup is incomplete. Open it to try again." },
       { element: createElement(RelayPcDetails, { pc: row, onClose() {} }), text: "Account setup is incomplete." },
-      { element: createElement(EnrollmentStatus, { state: enrollmentOf(pc) }), text: "Account setup is incomplete." },
+      { element: createElement(EnrollmentStatus, { state: enrollmentOf(pc), pc: "Desk" }), text: "Account setup is incomplete." },
     ];
     for (const surface of surfaces) {
       const markup = renderToStaticMarkup(createElement(SettingsProvider, { children: surface.element }));

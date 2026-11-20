@@ -23,7 +23,7 @@ import type { AccountView, Attempt, RelayShellMount, RelayShellState, SheetJoin 
 import { openRelayTransport, type RelayTransport } from "./transport.ts";
 import { offerFromCode, TypedCodeError } from "./pairCode.ts";
 import { ADMISSION_WAIT_MS, ConsentChangedError, createAccountController } from "./accountController.ts";
-import { AccountPcError } from "../account/join.ts";
+import { AccountPcError, ReplacementPendingError } from "../account/join.ts";
 import { refusalOf } from "./firstLink.ts";
 import { createPcSweep } from "./pcSweep.ts";
 import { createUpdateFlow, loadObservedVersions, observedVersions, reloadPage, freshShellNext, forgetSavedPc } from "./updateFlow.ts";
@@ -493,6 +493,11 @@ export async function mountRelayShell(mount: RelayShellMount): Promise<void> {
       if (app === null && last === attempt && shown?.kind === "ready") show({ ...shown, enrollment });
     }, (error: unknown) => {
       if (linkRefused(opened, attempt, error)) return;
+      // the PC's screen decides on this device's new key: the person compares the fingerprint this device computed
+      if (error instanceof ReplacementPendingError) {
+        if (app === null && last === attempt && shown?.kind === "ready") show({ ...shown, enrollment: { kind: "replacement", fingerprint: error.fingerprint } });
+        return;
+      }
       console.warn("Ovis: this PC did not join the account yet", error instanceof Error ? error.name : error);
       if (app === null && last === attempt && shown?.kind === "ready") show({ ...shown, enrollment: "failed" });
     }).finally(() => { enrolling.delete(opened); if (transport !== opened) opened.close(); });

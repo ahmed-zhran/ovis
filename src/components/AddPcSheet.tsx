@@ -212,7 +212,7 @@ export function AddPcSheet({ mode, pc, state, onJoin, onPair, onMatch, onRetry, 
         actions = cancel;
         break;
       case "ready":
-        body = <><p className="relay-shell-copy" role="status">{t("{name} is ready to open on this device.", { name })}</p><EnrollmentStatus state={state.kind === "ready" ? state.enrollment : undefined} {...(onRetry ? { retry: onRetry } : {})} /></>;
+        body = <><p className="relay-shell-copy" role="status">{t("{name} is ready to open on this device.", { name })}</p><EnrollmentStatus state={state.kind === "ready" ? state.enrollment : undefined} pc={name} {...(onRetry ? { retry: onRetry } : {})} /></>;
         actions = pairActions(cancel, <button key="primary" type="button" className="btn btn-primary" data-sheet-primary onClick={() => (onOpenPc ?? onClose)()}>{t("Open PC")}</button>);
         break;
       case "failed": {

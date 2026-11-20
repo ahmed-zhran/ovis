@@ -78,6 +78,8 @@ export type AccountView =
   | { kind: "signed-in"; provider: AccountProvider; pcs: MyPc[] | null; error: string | null; deleteError?: string };
 
 export interface EnrollmentCompletion { readonly state: "complete"; readonly admitted?: number }
+/** P22, T72: the PC holds this device's link until its screen approves the new key; the fingerprint is this device's own. */
+export interface EnrollmentReplacement { readonly kind: "replacement"; readonly fingerprint: string }
 
 export type RelayShellState =
   | { kind: "list"; devices: RelayDevice[]; account?: AccountView | null }
@@ -96,7 +98,7 @@ export type RelayShellState =
    * `pairing`: a new pairing, not a saved PC opening again
    */
   | { kind: "connecting"; name: string | null; approved?: true; pairing?: true }
-  | { kind: "ready"; name: string | null; server_id: string; enrollment?: EnrollmentState | "local" | EnrollmentCompletion }
+  | { kind: "ready"; name: string | null; server_id: string; enrollment?: EnrollmentState | "local" | EnrollmentCompletion | EnrollmentReplacement }
   | { kind: "code-entry"; failure: TypedCodeFailure | null }
   | { kind: "code-looking" }
   /** a typed code found a PC: its full ID to compare with the PC's screen before anything is paired */
