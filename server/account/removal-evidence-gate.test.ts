@@ -205,4 +205,44 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     const repaired = open(dir);
     expect(repaired.isTombstoned(k)).toBe(true);
   });
+
+  test("P13, G6: a Revoke made while the removal evidence cannot be trusted keeps its key out at relay sign-in after each repair", async () => {
+    if (process.platform === "win32") return;
+    const repairs: [string, (path: string, before: Buffer) => void, (path: string, before: Buffer) => void][] = [
+      ["0666, deleted", (path) => chmodSync(path, 0o666), (path) => rmSync(path)],
+      ["0666, chmod 0600", (path) => chmodSync(path, 0o666), (path) => chmodSync(path, 0o600)],
+      ["v 9, restored", (path) => writeFileSync(path, JSON.stringify({ v: 9 }), { mode: 0o600 }), (path, before) => writeFileSync(path, before, { mode: 0o600 })],
+    ];
+    for (const [, damage, repair] of repairs) {
+      const dir = stateDir();
+      const first = startAt(dir, true);
+      const device = await relayDevice(first);
+      stopAt(first);
+      const path = join(dir, REMOVAL_FILE);
+      const before = readFileSync(path);
+      damage(path, before);
+      const damaged = startAt(dir, true);
+      damaged.app.context.services.devices.revoke(device.id);
+      stopAt(damaged);
+      repair(path, before);
+      const repaired = startAt(dir, true);
+      expect(repaired.app.context.services.devices.isTombstoned(device.publicKey)).toBe(true);
+      expect(await signsIn(repaired, device)).toBe(false);
+    }
+  });
+
+  test("PB2: with the tombstone file damaged, a Revoke takes every row of its key, and the second row's sign-in is refused", async () => {
+    const dir = stateDir();
+    const first = startAt(dir, true);
+    const one = await relayDevice(first);
+    const store = first.app.context.services.devices;
+    const second = store.pairRelay(store.startPairing().code, "Second", one.publicKey)!.device.id;
+    stopAt(first);
+    damageFile(join(dir, "account-tombstones.json"));
+    const damaged = startAt(dir, true);
+    damaged.app.context.services.devices.revoke(one.id);
+    stopAt(damaged);
+    rmSync(join(dir, "account-tombstones.json"), { recursive: true, force: true });
+    expect(await signsIn(startAt(dir, true), { ...one, id: second })).toBe(false);
+  });
 });
