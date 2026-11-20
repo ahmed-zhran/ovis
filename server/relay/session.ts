@@ -289,8 +289,8 @@ export class RelaySession {
     // what a code pairing is held to before it makes a device holds before the proof too: a pairing paused for wrong
     // codes (throws, answered auth_failed), and a relay pass that lets in no new session (nothing is answered)
     this.options.services.devices.assertRelayPairing("code");
-    if (this.options.refuseNewDevice?.()) { this.state = "refused"; return; }
-    const started = pairings.pair({ code: pair.code, label: pair.label, publicKey: pair.public_key, how: "code", via: "relay", keyProof: this.keyProof && !this.options.signInOnly, serverId: this.options.serverId });
+    if (!this.admitNewDevice()) return;
+    const started = pairings.pair({ code: pair.code, label: pair.label, publicKey: pair.public_key, how: "code", via: "relay", keyProof: this.keyProof && !this.options.signInOnly, serverId: this.options.serverId, canAdmit: this.admitNewDevice });
     if ("refuse" in started) { this.close(started.refuse); return; }
     this.keyProofSession = started.session;
     this.state = "key-proof";
@@ -299,7 +299,8 @@ export class RelaySession {
     void pairings.decision(started.session).then(({ admitted }) => {
       if (this.keyProofSession !== started.session) return;
       this.keyProofSession = undefined;
-      if (admitted === null) { this.close("auth_failed"); return; }
+      // As with direct and SAS pairing, the pass keeper closes refused carriers without a session error.
+      if (admitted === null) { if (!this.refused) this.close("auth_failed"); return; }
       this.keyProven = true;
       this.enter(admitted);
     });

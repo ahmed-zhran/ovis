@@ -21,7 +21,15 @@ export type PairStart = { session: string; challenge: string } | { refuse: "unsu
 export type ProveResult = { pending: PendingRedemption } | { refuse: "auth_failed" };
 export interface Decision { admitted: DeviceMatch | null }
 
-interface Session { challenge: string; codeId: string; key: string; pendingId?: string; decide(decision: Decision): void; decided: Promise<Decision> }
+interface Session {
+  readonly challenge: string;
+  readonly codeId: string;
+  readonly key: string;
+  readonly canAdmit: (() => boolean) | undefined;
+  pendingId?: string;
+  decide(decision: Decision): void;
+  readonly decided: Promise<Decision>;
+}
 
 export class KeyProofPairings {
   readonly #pending: PendingRedemptions;
@@ -37,7 +45,7 @@ export class KeyProofPairings {
   }
 
   /** A PAIR on a PC that needs the proof. A device that did not offer key-proof-1 is refused, never left waiting. */
-  pair(request: { code: string; label: string; publicKey: string; how: "code" | "qr"; via: PendingVia; keyProof: boolean; serverId?: string }): PairStart {
+  pair(request: { code: string; label: string; publicKey: string; how: "code" | "qr"; via: PendingVia; keyProof: boolean; serverId?: string; canAdmit?: () => boolean }): PairStart {
     // an app without the proof is told to update, in a code every released decoder knows
     if (!request.keyProof) return { refuse: "unsupported_version" };
     const redeemed = this.#seams.redeemCode(request.code, request.how, request.publicKey);
@@ -58,7 +66,7 @@ export class KeyProofPairings {
       return { refuse: "auth_failed" };
     }
     const { promise: decided, resolve: decide } = Promise.withResolvers<Decision>();
-    this.#sessions.set(session, { challenge: named.challenge, codeId: redeemed.codeId, key: request.publicKey, decide, decided });
+    this.#sessions.set(session, { challenge: named.challenge, codeId: redeemed.codeId, key: request.publicKey, canAdmit: request.canAdmit, decide, decided });
     return { session, challenge: named.challenge };
   }
 
@@ -88,10 +96,11 @@ export class KeyProofPairings {
     const sessionId = this.#byPending.get(pendingId);
     if (sessionId === undefined) return null;
     const entry = this.#pending.take(pendingId, fingerprint);
-    if (entry === null || entry.codeId === undefined) return null;
+    const session = this.#sessions.get(sessionId);
+    if (entry === null || entry.codeId === undefined || session === undefined) return null;
     let admitted: DeviceMatch | null = null;
     try {
-      admitted = this.#seams.admitConfirmed({ codeId: entry.codeId, key: entry.key, label: entry.label, source });
+      if (session.canAdmit?.() !== false) admitted = this.#seams.admitConfirmed({ codeId: entry.codeId, key: entry.key, label: entry.label, source });
     } catch (error) {
       console.error("Confirmed key admission failed", { pendingId, error: error instanceof Error ? error.message : "Non-Error thrown" });
     } finally {
