@@ -159,10 +159,11 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
       // the damage holds at every later start until it is repaired: no merge took the numbered rows away meanwhile
       expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
       expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
-      // nor does the healthy sibling's own start, flag on or off, which merges nothing with a damaged folder
+      // nor does the sibling's own start, flag on or off, which merges nothing with a damaged folder
       for (const siblingFlag of [true, false]) {
         const healthy = start(b, a, siblingFlag);
-        expect(healthy.app.context.services.devices.failsClosed).toBe(false);
+        // it is not merged with the damaged folder, and fails closed until that is repaired (S19)
+        expect(() => healthy.app.context.services.devices.startPairing()).toThrow();
         stop(healthy, b);
         expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
         expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
@@ -215,7 +216,8 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
       put(b, [row("bbbbbbbbbbbbbbbb", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
       const devices = start(a, b, flag).app.context.services.devices;
       expect(devices.gated).toBe(true);
-      expect(devices.failsClosed).toBe(true);
+      // the registry is blocked as main blocks one a merge could not make: nothing pairs, nothing is written
+      expect(() => devices.startPairing()).toThrow();
       expect(existsSync(join(a, "devices.json"))).toBe(false);
       expect(persisted(b)).toEqual({ bbbbbbbbbbbbbbbb: expect.objectContaining({ admit_no: 1 }) });
     }

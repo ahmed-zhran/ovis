@@ -266,8 +266,12 @@ export function createServer(
   const admissions = opensAll ? checkedOrder(stateDir) : null;
   // a strict start changes nothing on disk, and nothing is merged with a damaged folder either, flag on or off: the
   // check only reads, and a folder main wrote has no numbered row, so main's merge is unchanged (S29)
-  const damaged = (dir: string) => checkedOrder(dir).strict !== null;
-  const untouched = admissions?.strict != null || (!!options.siblingStateDir && (damaged(options.siblingStateDir) || (!opensAll && damaged(stateDir))));
+  const damage = (dir: string) => checkedOrder(dir).strict;
+  // a merge skipped for damage fails closed like any merge that could not be made: the gate and the rows it would carry
+  // are not lost, and this folder serves nobody but this PC until the damage is repaired (S19)
+  const skipped = options.siblingStateDir ? damage(options.siblingStateDir) ?? (opensAll ? null : damage(stateDir)) : null;
+  if (skipped !== null) console.error(`Not merged with ${options.siblingStateDir}: ${skipped}`);
+  const untouched = admissions?.strict != null || skipped !== null;
   const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {
@@ -282,7 +286,7 @@ export function createServer(
   // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
   try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
   for (const strict of [safetyLog?.strict, admissions?.strict]) if (strict) console.error(strict);
-  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, admissions });
+  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? skipped, accountBlocked, { safety: safetyLog, admissions });
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
   if (options.profile === "machine") devices.closeGate();
   const preferences = new PreferenceStore(stateDir);
