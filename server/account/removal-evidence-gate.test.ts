@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
-import { relayFixture } from "../relay/test-helpers.ts";
+import { relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { REMOVAL_FILE, RemovalEvidence } from "./removal-evidence.ts";
 import { SafetyLog } from "./safety-log.ts";
@@ -73,7 +73,7 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
       const dir = stateDir();
       writeFileSync(join(dir, REMOVAL_FILE), text, { mode: 0o600 });
       const devices = open(dir);
-      expect(devices.failsClosed || devices.accountError !== null).toBe(true);
+      expect(devices.failsClosed).toBe(true);
       expect(readFileSync(join(dir, REMOVAL_FILE), "utf8")).toBe(text);
     }
   });
@@ -82,7 +82,7 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     const dir = stateDir();
     writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
     const devices = open(dir);
-    expect(devices.failsClosed || devices.accountError !== null).toBe(true);
+    expect(devices.failsClosed).toBe(true);
     expect(readFileSync(join(dir, "account-tombstones.pending.json"), "utf8")).toBe("not json");
   });
 
@@ -103,7 +103,7 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     open(dir);
     chmodSync(join(dir, REMOVAL_FILE), 0o666);
     const devices = open(dir);
-    expect(devices.failsClosed || devices.accountError !== null).toBe(true);
+    expect(devices.failsClosed).toBe(true);
   });
 
   test("P13, S19: a Revoke made while the tombstone file is damaged stands as evidence, and its row stays out after a stop", async () => {
@@ -133,5 +133,63 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     devices.revoke(id);
     open(dir);
     expect((JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[] }).revokes).toHaveLength(1);
+  });
+
+  function startAt(dir: string, accountOpensAll: boolean) {
+    const fixture = relayFixture(false, { stateDir: dir, accountOpensAll });
+    fixtures.push(fixture);
+    const at = dirs.indexOf(dir);
+    if (at >= 0) dirs.splice(at, 1);
+    return fixture;
+  }
+  function stopAt(fixture: ReturnType<typeof relayFixture>) {
+    fixture.app.stop();
+    fixtures.splice(fixtures.indexOf(fixture), 1);
+  }
+  async function signsIn(fixture: ReturnType<typeof relayFixture>, device: Awaited<ReturnType<typeof relayDevice>>): Promise<boolean> {
+    const link = await relayConnection(fixture);
+    return link.auth(device).then(() => true, () => false);
+  }
+  const damageFile = (path: string) => { rmSync(path, { recursive: true, force: true }); mkdirSync(path); };
+
+  test("PB1, PB2: with the tombstone file damaged, a Revoke and a stop before its row goes leave that key refused at sign-in", async () => {
+    const dir = stateDir();
+    const first = startAt(dir, true);
+    const device = await relayDevice(first);
+    const kept = readFileSync(join(dir, "devices.json"));
+    stopAt(first);
+    damageFile(join(dir, "account-tombstones.json"));
+    const second = startAt(dir, true);
+    second.app.context.services.devices.revoke(device.id);
+    stopAt(second);
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    expect(await signsIn(startAt(dir, true), device)).toBe(false);
+  });
+
+  test("PB3: a Revoke held only in main's tombstone file holds at the first flag-on start, though the pending file is damaged", async () => {
+    const dir = stateDir();
+    const before = startAt(dir, false);
+    const device = await relayDevice(before);
+    const kept = readFileSync(join(dir, "devices.json"));
+    before.app.context.services.devices.revoke(device.id);
+    stopAt(before);
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
+    expect(await signsIn(startAt(dir, true), device)).toBe(false);
+  });
+
+  test("PB4: a Revoke leaves a damaged pending file byte for byte", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", await key())!.device.id;
+    writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
+    open(dir).revoke(id);
+    expect(readFileSync(join(dir, "account-tombstones.pending.json"), "utf8")).toBe("not json");
+  });
+
+  test("with the flag off a damaged pending file is read as empty, as main reads it", () => {
+    const dir = stateDir();
+    writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
+    expect(new DeviceStore(dir).accountError).toBeNull();
   });
 });
