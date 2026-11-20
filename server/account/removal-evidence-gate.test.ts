@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -282,5 +282,35 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     fixtures.push(fixture);
     dirs.splice(dirs.indexOf(dir), 1);
     expect(await signsIn(fixture, device)).toBe(false);
+  });
+
+  test("T26: a re-pair in the very millisecond of its Revoke is still later than it: a stop before the unrevoke keeps the row", async () => {
+    const dir = stateDir();
+    const k = await key();
+    setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+    try {
+      const devices = open(dir);
+      const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+      devices.revoke(id);
+      const revoked = readFileSync(join(dir, REMOVAL_FILE));
+      const again = devices.pairRelay(devices.startPairing().code, "Again", k)!.device.id;
+      writeFileSync(join(dir, REMOVAL_FILE), revoked, { mode: 0o600 });
+      expect(open(dir).has(again)).toBe(true);
+    } finally { setSystemTime(); }
+  });
+
+  test("P13: a Revoke made after the wall clock stepped back is still later than the row it revoked, which stays out after a stop", async () => {
+    const dir = stateDir();
+    const k = await key();
+    try {
+      setSystemTime(new Date("2026-10-01T00:00:05.000Z"));
+      const devices = open(dir);
+      const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+      const kept = readFileSync(join(dir, "devices.json"));
+      setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      devices.revoke(id);
+      writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+      expect(open(dir).has(id)).toBe(false);
+    } finally { setSystemTime(); }
   });
 });
