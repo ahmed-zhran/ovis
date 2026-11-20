@@ -472,7 +472,6 @@ function pairedHere(device: StoredDevice): boolean {
   return device.added_by === undefined && device.link_moved_key !== true;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** What a thrown value says, for a log line; a value that cannot be told says so. */
 function describe(error: unknown): string {
@@ -627,11 +626,11 @@ export class DeviceStore {
     if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.safety?.strict == null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
       this.evidence.takeIn([...this.carried, ...tombstones], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
     }
-    // a time this PC wrote that lies more than a day ahead is no time it wrote: it would push every later stamp past it,
-    // so the PC fails closed until it is repaired (S19, P13)
+    // a time this PC wrote that is not a time fails it closed until it is repaired (S19, P13). One ahead of the clock is
+    // still its own: a PC with no battery clock may run ahead, and the store's stamps already order after it (L9)
     if (this.evidence !== null) {
-      const ahead = [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t) || Date.parse(t) > Date.now() + DAY_MS);
-      if (ahead !== undefined) this.accountProblem = `A time this PC wrote lies in the future (${ahead}): account records are refused until it is repaired.`;
+      const unreadable = [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t));
+      if (unreadable !== undefined) this.accountProblem = `A time this PC wrote is not a time (${unreadable}): account records are refused until it is repaired.`;
     }
     if (this.error === null && this.accountProblem === null && this.pc?.strict == null && !this.revokeAllIntent?.strict) {
       if (this.evidence !== null) {
