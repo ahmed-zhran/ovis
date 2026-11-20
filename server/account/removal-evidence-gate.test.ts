@@ -2,12 +2,12 @@ import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exportAccountKey } from "../../shared/account-records.ts";
+import { exportAccountKey, type SafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
 import { relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { REMOVAL_FILE, RemovalEvidence } from "./removal-evidence.ts";
-import { SafetyLog } from "./safety-log.ts";
+import { pcRecordId, SafetyLog } from "./safety-log.ts";
 
 const AT = "2026-10-01T00:00:00.000Z";
 const LATER = "2026-10-02T00:00:00.000Z";
@@ -344,5 +344,25 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
       put(dir, "account-tombstones.json", tombstones([{ key: k, account: "", record_id: "local", removed_at: removed }]));
       expect(new DeviceStore(dir).hasKey(k)).toBe(false);
     }
+  });
+
+  test("P13, T61: a removal arriving while the safety log cannot be read is taken in once it can be, outranking the forgets it held", async () => {
+    const dir = stateDir();
+    const k = await key();
+    open(dir);
+    // an old forget of this key's removal in the account, already in the log
+    const forgot = SafetyLog.open(dir).append({ record: { v: 1, id: pcRecordId(), kind: "forget", account: "acct", target: k, signer: "pc", signed_at: AT, signature: "" } as SafetyRecord, got: "pc" });
+    expect(forgot).toMatchObject({ outcome: "applied" });
+    const log = readFileSync(join(dir, "account-log.json"));
+    // the removal arrives while the log cannot be read
+    put(dir, "account-tombstones.json", tombstones([{ key: k, account: "acct", record_id: "r".repeat(32), removed_at: LATER }]));
+    writeFileSync(join(dir, "account-log.json"), "not json", { mode: 0o600 });
+    // a restart: this process keeps one handle per folder, so the old one goes first
+    SafetyLog.open(dir).close();
+    expect(open(dir).failsClosed).toBe(true);
+    SafetyLog.open(dir).close();
+    // repaired: the old forget is read again, and the removal still stands
+    writeFileSync(join(dir, "account-log.json"), log, { mode: 0o600 });
+    expect(open(dir).removedByAccount(k)).toBe(true);
   });
 });
