@@ -560,6 +560,8 @@ export class DeviceStore {
   private migrate(): void {
     if (this.pc === null || this.error !== null) return;
     const numbered = this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no]);
+    try { this.pc.settlePending((binding, key) => this.devices.some((d) => d.account === binding.account && d.relay_public_key === key)); }
+    catch (error) { this.pc.unwritten(error); return; }
     const members = [...new Set(this.devices.flatMap((d) => d.account === undefined ? [] : [d.account]))];
     if (!this.pc.migrating) { this.pc.checkAbove(numbered); this.pc.checkMembers(members); return; }
     // a PC that ever had a device, its rows revoked since, is no first-device PC (T67): its gate stayed closed
@@ -621,7 +623,9 @@ export class DeviceStore {
 
   /** The binding of a first link whose row is on disk stands; one that cannot be marked so leaves the PC strict (S19). */
   private commitBinding(commit: () => void): void {
-    try { commit(); } catch (error) { this.pc?.unwritten(error); }
+    // the row is on disk but its binding cannot be made to stand: the PC fails closed and the link is no success; the
+    // next start finds the binding pending beside its row and makes it stand (settlePending)
+    try { commit(); } catch (error) { this.pc?.unwritten(error); throw error; }
   }
 
   /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */

@@ -174,7 +174,7 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     let writes = 0;
     privateStateFs.renameSync = (from, to) => {
       // the pending binding is written, then the row; the write that makes the binding stand fails
-      if (to === join(dir, ADMISSION_FILE) && ++writes === 3) throw new Error("simulated EIO");
+      if (to === join(dir, ADMISSION_FILE) && ++writes === 2) throw new Error("simulated EIO");
       return rename(from, to);
     };
     try { expect(() => devices.linkAccountKey(id, k, k, ACCOUNT)).toThrow(); } finally { privateStateFs.renameSync = rename; }

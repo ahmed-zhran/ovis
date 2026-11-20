@@ -101,8 +101,7 @@ export class PcAccountState {
     else {
       const { counterOnly, ...doc } = parsed;
       state.upgradingFrom = counterOnly === true;
-      // a first link that stopped before its row was written bound nothing (T13)
-      state.doc = doc.binding?.pending === true ? { ...doc, binding: null, first: null } : doc;
+      state.doc = doc;
     }
     return state;
   }
@@ -116,6 +115,17 @@ export class PcAccountState {
     if (numbers.length === 0) return;
     if (this.fresh) this.missingBeside();
     else this.checkAbove(numbers);
+  }
+
+  /**
+   * A first link's binding left pending by a stop (T13): it stands when its row reached the disk, and bound nothing
+   * when it did not.
+   */
+  settlePending(rowOnDisk: (binding: AccountBinding, firstKey: string | null) => boolean): void {
+    const binding = this.doc.binding;
+    if (binding?.pending !== true || this.problem !== null) return;
+    const { pending: _left, ...standing } = binding;
+    this.write(rowOnDisk(standing, this.doc.first?.key ?? null) ? { ...this.doc, binding: standing } : { ...this.doc, binding: null, first: null });
   }
 
   /** Member rows of an account this PC is not in: the binding and the rows disagree, which is damage (P12, S19). */
@@ -182,7 +192,7 @@ export class PcAccountState {
     const doc = { ...this.doc, binding: own, clears, others_ever: this.doc.others_ever || parsed.others_ever };
     if (this.fresh) { this.doc = doc; return; }
     // a folder in no account beside one that is: the PC is in that account (P12)
-    if (own === null && theirs !== null) doc.binding = theirs;
+    if (own === null && theirs !== null) { doc.binding = theirs; doc.first = this.doc.first ?? parsed.first; }
     if (JSON.stringify(doc) !== JSON.stringify(this.doc)) this.write(doc);
   }
 
