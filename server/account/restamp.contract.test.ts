@@ -4,13 +4,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
+import { accountDeviceId, newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
 import { createServer } from "../index.ts";
 import { privateStateFs } from "../private-state.ts";
 import { loadRelayIdentity } from "../relay/identity.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { askRecovery } from "./recovery.ts";
-import { parseEvidence } from "./removal-evidence.ts";
+import { parseEvidence, RemovalEvidence } from "./removal-evidence.ts";
 import { SafetyLog } from "./safety-log.ts";
 
 const NOW = Date.parse("2026-10-15T12:00:00.000Z");
@@ -634,4 +634,113 @@ posix("r2 M3: a trusted retryable clock refusal is audited once before returning
   }
   const refusals = DeviceJournal.open(active).entries().filter(entry => entry.how === "restamp refused");
   expect(refusals.map(entry => entry.label)).toEqual([expect.stringContaining("too far behind")]);
+});
+
+posix("r3 H2b: a journal-ended pairing cannot end the sibling's local Revoke", () => {
+  const [active, sibling] = [dir(), dir()];
+  const paired = row(stamp(-HOUR));
+  const k = paired.relay_public_key;
+  const running = start(active);
+  running.devices.journalEvent({ kind: "remove", how: "pc", key: k, no: null, row: paired.id, label: paired.label, by: "pc", account: null });
+  running.stop();
+  registry(active, paired); // The stop happened after the journal write and before the row replacement.
+  tombstones(sibling, tomb(k, stamp(-DAY)));
+  const restarted = start(active, sibling);
+  const denied = revoke(k, stamp(-DAY));
+  expect({
+    keyOut: !restarted.devices.hasKey(k),
+    standing: RemovalEvidence.open(active, null).standingRevokes(k),
+    ended: evidence(active)?.unrevokes.some(u => u.revoke === denied.id),
+  }).toEqual({ keyOut: true, standing: [denied], ended: false });
+});
+
+posix("r3 H2a: without a plan the previous identity's listed time is ignored like ordinary startup", () => {
+  const foreignIdentity = loadRelayIdentity(dir()).server_id;
+  const k = key();
+  const startWithList = (withSibling: boolean) => {
+    const active = dir();
+    loadRelayIdentity(active);
+    put(active, "account-devices.json", {
+      v: 1, account, server_id: foreignIdentity, version: 1, snapshot: "1".repeat(32),
+      devices: [{ id: accountDeviceId(foreignIdentity, k), key: k, no: 2, label: "Previous phone", confirmed_at: FUTURE,
+        last_signin_day: null, origin: { from: "remote", how: "list", by: null, admit_no: 1, at: FUTURE }, state: "live", hold_until: null }],
+    });
+    const { devices } = start(active, withSibling ? dir() : undefined);
+    return { closed: devices.failsClosed, reason: devices.accountError, rows: JSON.parse(bytes(active, "account-devices.json")).devices };
+  };
+  const normal = startWithList(false);
+  expect(normal).toEqual({ closed: false, reason: null, rows: [] });
+  expect(startWithList(true)).toEqual(normal);
+});
+
+posix("r3 H3c: a malformed plan for a provably foreign PC does not close this PC", () => {
+  const [active, foreign] = [dir(), dir()];
+  loadRelayIdentity(active);
+  loadRelayIdentity(foreign);
+  writeFileSync(join(foreign, "restamp.json"), "{broken", { mode: 0o600 });
+  const normal = start(active);
+  expect(normal.devices.accountError).toBeNull();
+  normal.stop();
+  const restarted = start(active, foreign);
+  expect({ closed: restarted.devices.failsClosed, reason: restarted.devices.accountError }).toEqual({ closed: false, reason: null });
+  expect(bytes(foreign, "restamp.json")).toBe("{broken");
+});
+
+posix.each([false, true])("r3 M2: a pending link gets the ordinary sibling binding verdict; after queue=%p", async queued => {
+  const [active, sibling, control, controlSibling] = [dir(), dir(), dir(), dir()];
+  const first = { ...row(), account };
+  const bound = { v: 1, next_admit: 1, binding: { account, bind_id: "a".repeat(32) }, clears: [], first: { key: first.relay_public_key, list_key: null }, others_ever: true, gen: 0 };
+  const unbound = { ...bound, binding: null, first: null };
+  const pendingBinding = { ...bound, binding: { ...bound.binding, pending: true } };
+  registry(control, { ...first, created_at: stamp(-HOUR) });
+  put(control, "account-pc.json", pendingBinding);
+  put(controlSibling, "account-pc.json", unbound);
+  const ordinary = start(control, controlSibling);
+  expect(ordinary.devices.accountError).toContain("binds it to no account");
+  ordinary.stop();
+
+  registry(active, first);
+  put(active, "account-pc.json", bound);
+  put(sibling, "account-pc.json", unbound);
+  const running = start(active, sibling);
+  const preview = await askRecovery(active, { act: "restamp" }) as { confirm?: string };
+  expect(preview.confirm).toBeString();
+  if (queued) {
+    expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ queued: true });
+    running.stop();
+  }
+  put(active, "account-pc.json", pendingBinding);
+  put(sibling, "account-pc.json", unbound);
+  if (queued) {
+    const before = bytes(active, "devices.json");
+    expect(start(active, sibling).devices.accountError).toContain("binds it to no account");
+    expect(bytes(active, "devices.json")).toBe(before);
+    expect(pending(active)).toBe(true);
+  } else {
+    expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringContaining("binds it to no account") });
+    expect(pending(active)).toBe(false);
+  }
+});
+
+posix("r3 L9b: changing a folder's filesystem device number does not invalidate its approved repair", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const first = row();
+  for (const folder of [active, sibling]) registry(folder, first);
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  const stat = fs.statSync;
+  const fakeStat = ((...args: Parameters<typeof stat>) => {
+    const result = stat(...args);
+    if (result && (args[0] === active || args[0] === sibling)) {
+      result.dev = typeof result.dev === "bigint" ? result.dev + 1n : result.dev + 1;
+    }
+    return result;
+  }) as typeof stat;
+  const hook = spyOn(fs, "statSync").mockImplementation(fakeStat);
+  try {
+    expect(start(active, sibling).devices.accountError).toBeNull();
+    for (const folder of [active, sibling]) expect(registered(folder)[0]?.created_at).toBe(stamp(1));
+    expect(existsSync(join(active, "restamp-done.json"))).toBe(true);
+  } finally { hook.mockRestore(); }
 });
