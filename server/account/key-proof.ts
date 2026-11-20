@@ -59,6 +59,8 @@ export class KeyProofPairings {
     if (session === undefined || session.pendingId !== undefined) return this.#end(sessionId);
     const entry = await this.#pending.prove(session.challenge, signature);
     if (entry === null) return this.#end(sessionId);
+    // the session ended while the proof was checked: what it proved waits for nobody
+    if (!this.#sessions.has(sessionId)) { this.#pending.decline(entry.id); return { refuse: "auth_failed" }; }
     session.pendingId = entry.id;
     this.#byPending.set(entry.id, sessionId);
     return { pending: entry };
@@ -97,8 +99,21 @@ export class KeyProofPairings {
     const session = this.#sessions.get(sessionId);
     if (session === undefined) return;
     if (session.pendingId !== undefined) this.#pending.decline(session.pendingId);
-    else this.#seams.releaseRedemption(session.codeId, session.key);
+    else {
+      // before its proof: the challenge's slot goes, and the code's held use with it
+      this.#pending.forget(session.challenge);
+      this.#seams.releaseRedemption(session.codeId, session.key);
+    }
     this.#finish(sessionId, null);
+  }
+
+  /** Whether `pendingId` still waits for the screen. */
+  isWaiting(pendingId: string): boolean {
+    return this.#pending.list().some((entry) => entry.id === pendingId);
+  }
+
+  onChange(listener: () => void): () => void {
+    return this.#pending.onChange(listener);
   }
 
   #end(sessionId: string): { refuse: "auth_failed" } {
@@ -138,7 +153,10 @@ export function askScreenForKey(confirms: LocalConfirms, pairings: KeyProofPairi
     pairings.decline(entry.id);
     return;
   }
+  // the waiting entry dropped (declined, its session gone, its code ended, its key removed): the prompt leaves the screen
+  const stop = pairings.onChange(() => { if (!pairings.isWaiting(entry.id)) { stop(); confirms.withdraw(id); } });
   void confirms.answer(id).then((answer) => {
+    stop();
     if (answer === "approved" && confirms.consume(id, action)) pairings.approve(entry.id, entry.fingerprint, "screen");
     else pairings.decline(entry.id);
   });

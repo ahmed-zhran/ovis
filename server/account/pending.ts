@@ -131,6 +131,11 @@ export class PendingRedemptions {
     this.#drop((entry) => entry.id === id, "declined");
   }
 
+  /** A challenge whose device went away before answering: its slot and its held use come back. */
+  forget(challenge: string): void {
+    this.#forgetNamed(challenge);
+  }
+
   /** A removal, block or Revoke of `key` drops what waits for it. */
   dropKey(key: string, reason: string): void {
     this.#drop((entry) => entry.key === key, reason);
