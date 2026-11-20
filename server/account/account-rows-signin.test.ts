@@ -49,6 +49,19 @@ function pc(dir = mkdtempSync(join(tmpdir(), "s2-25-signin-"))) {
   return { devices, rows, clock, dir, evidence };
 }
 
+/** A start as index.ts makes it: the account rows are in the device store before its recovery runs. */
+function startWithRows(dir: string): DeviceStore {
+  const safety = SafetyLog.open(dir);
+  const binding = PcAccountState.open(dir);
+  const journal = DeviceJournal.open(dir, () => safety.ensureFile());
+  const evidence = RemovalEvidence.open(dir, safety);
+  const rows = new AccountDeviceStore(dir, SERVER, {
+    evidence, journal: (entry) => journal.recordAccountRow(entry, evidence), closeSessions: () => {},
+    heldByDevicesJson: () => false, admits: () => false, now: () => Date.now(), admitOrigin: (at) => binding.admit("remote", "list", null, at),
+  });
+  return new DeviceStore(dir, null, null, { safety, pc: binding, removals: evidence, journal, joinedRows: rows });
+}
+
 async function member(devices: DeviceStore): Promise<Key & { id: string }> {
   const k = await key();
   const id = devices.pairRelay(devices.startPairing().code, "Phone", k.spki)!.device.id;
@@ -182,6 +195,23 @@ describe("S2-25 an account-joined row signs in by relay AUTH (S21, S25, T35)", (
     expect(outcome).toMatchObject({ outcome: "applied" });
     expect(rows.rows()).toEqual([]);
     expect((JSON.parse(readFileSync(join(dir, ACCOUNT_DEVICES_FILE), "utf8")) as { devices: unknown[] }).devices).toEqual([]);
+  });
+
+  test("T41, P8, P10: a drop receipt for a re-admitted row must name the current admission's drop", async () => {
+    const { devices, rows, dir, evidence } = pc();
+    await member(devices);
+    const phone = await key();
+    rows.commitList(listed(phone));
+    const [first] = rows.rows();
+    rows.removeRows([first!.id], "remove");
+    const earlier = evidence.dropFor(first!.id, first!.origin.admit_no)?.journalled;
+    rows.commitList(listed(phone));
+    const [current] = rows.rows();
+    const pending = { row: current!.id, admit_no: current!.origin.admit_no, how: "remove" as const };
+    evidence.addRemoval(phone.spki, ACCOUNT, { id: newRecordId(), at: new Date().toISOString(), drop: pending });
+    evidence.markJournalled(pending, earlier!);
+    expect(startWithRows(dir).failsClosed).toBe(true);
+    expect(parseAccountDevicesFile(JSON.parse(readFileSync(join(dir, ACCOUNT_DEVICES_FILE), "utf8"))).devices.map((row) => row.id)).toEqual([current!.id]);
   });
 
   test("Rule B, T19, T36: every target row must have joined after every row of the caller's or signer's key", async () => {
