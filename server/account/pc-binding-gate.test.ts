@@ -126,4 +126,41 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     writeFileSync(join(dir, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 1, binding: { bind_id: "a".repeat(32) }, clears: [], first: null, others_ever: false }), { mode: 0o600 });
     expect(PcAccountState.open(dir).strict).not.toBeNull();
   });
+
+  test("P12, S19: after both folders migrated, a sibling's standing binding is this folder's too, and rows of an account the PC is not in fail closed", async () => {
+    const [a, b] = [stateDir(), stateDir()];
+    store(a);
+    const there = store(b);
+    await linked(there, "acct_x");
+    expect(PcAccountState.open(a).account()).toBeNull();
+    // the sibling's member rows come in with the merge; its binding comes with them
+    const devices = start(a, true, b);
+    expect(devices.account()).toBe("acct_x");
+    expect(() => devices.startPairing()).not.toThrow();
+    // whatever brought them, member rows of an account the PC is not in leave it strict
+    const c = stateDir();
+    store(c);
+    const registry = JSON.parse(readFileSync(join(b, "devices.json"), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(c, "devices.json"), JSON.stringify(registry), { mode: 0o600 });
+    expect(store(c).failsClosed).toBe(true);
+  });
+
+  test("T67, H2: a member a signed add brings in sets others_ever", async () => {
+    const dir = stateDir();
+    const devices = store(dir);
+    const member = await linked(devices);
+    devices.addAccountDevice({ id: "b".repeat(16), key: await key(), label: "Added", role: "drive", account: ACCOUNT, addedBy: member.id });
+    expect(pcFile(dir).others_ever).toBe(true);
+  });
+
+  test("S19: a PC already strict clears no binding it cannot write, and Revoke all and an identity reset still go through", async () => {
+    const dir = stateDir();
+    const devices = store(dir);
+    await linked(devices);
+    writeFileSync(join(dir, ADMISSION_FILE), JSON.stringify({ ...pcFile(dir), next_admit: 1 }), { mode: 0o600 });
+    const strict = store(dir);
+    expect(strict.failsClosed).toBe(true);
+    expect(() => strict.revokeAll()).not.toThrow();
+    expect(strict.clearAccountBinding("identity_reset", "pc")).toBe(false);
+  });
 });
