@@ -62,6 +62,9 @@ import { DeviceJournal } from "./account/device-journal.ts";
 import { mergeAccountState } from "./account/account-merge.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
+import { userInfo } from "node:os";
+import { openRecoverySocket, RecoveryReleases } from "./account/recovery.ts";
+import { recoveryActs } from "./account/recovery-acts.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
 import { Telemetry } from "./telemetry.ts";
 import { UsageService } from "./usage.ts";
@@ -522,6 +525,22 @@ export function createServer(
     catch (error) { console.error(`The local confirm page did not open: ${error instanceof Error ? error.message : String(error)}`); return null; }
   })();
   const desktopOwner = localConfirms && options.desktopOwner ? desktopOwnerChannel(localConfirms, options.desktopOwner) : null;
+  // `ovis recover` (server/account/recovery.ts): this PC's user, at its terminal or over SSH, on a socket no route reaches.
+  // Each release and undo is journalled per row before it takes effect; whether the log can be read is asked live
+  const recoveryReleases = opensAll && journal ? new RecoveryReleases({
+    journal: (entry) => {
+      if (entry.kind === "release") {
+        for (const row of entry.rows) journal.append({ kind: "release", how: "recover", key: row.key, no: null, row: row.id, label: row.id, by: entry.by, account: null });
+      } else {
+        for (const row of entry.rows) journal.append({ kind: "release", how: "recover", key: null, no: null, row, label: row, by: entry.by, account: null, undo: entry.releases.join(",") });
+      }
+    },
+  }) : undefined;
+  const recoverySocket = recoveryReleases ? (() => {
+    const opened = openRecoverySocket({ stateDir, handle: recoveryActs({ releases: recoveryReleases, logReadable: () => !devices.failsClosed, user: userInfo().username }) });
+    if ("refused" in opened) { if (opened.refused !== "windows") console.error(`ovis recover is not available: ${opened.refused}`); return null; }
+    return opened;
+  })() : null;
   const { accountHolds, accountMailbox } = earlyQueues ?? openAccountQueues();
   const services: RequestServices = {
     runtimeMove: options.runtimeService ? moveService({
@@ -537,7 +556,7 @@ export function createServer(
       switchRuntime: () => { const answer = options.runtimeService!.request("herdr-core"); return answer.ok ? null : answer.message; },
       ...(options.herdrCoreInstaller ? { installer: options.herdrCoreInstaller } : {}),
     }) : null,
-    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, safetyLog, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup, localConfirms,
+    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, safetyLog, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup, localConfirms, recoveryReleases,
     get portalStartupResult() { return portalStartupResult; },
   };
   ovisRelay.resume(services, server.port ?? DEFAULT_PORT);
@@ -637,6 +656,7 @@ export function createServer(
       ipv6?.stop(true);
       ownerListener?.stop(true);
       confirmListener?.stop();
+      recoverySocket?.stop();
       desktopOwner?.stop();
       for (const listener of lanListeners) listener.stop(true);
       releaseFilePool();
