@@ -47,6 +47,7 @@ import { handleHerdrUpdateRequest } from "./herdr-update.ts";
 import { handlePortalRequest } from "./portal.ts";
 import { handleRelayRequest } from "./relay/routes.ts";
 import type { LocalConfirms } from "./account/local-confirm.ts";
+import type { RecoveryReleases } from "./account/recovery.ts";
 import { handleAccountRequest } from "./account/routes.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
 import type { AccountHolds } from "./account/holds.ts";
@@ -124,6 +125,8 @@ export interface RequestServices {
   readonly requestLog: RequestLog;
   /** acts waiting for this PC's screen (server/account/local-confirm.ts); only with the Step 2 release flag */
   readonly localConfirms?: LocalConfirms;
+  /** releases `ovis recover` made since this start (server/account/recovery.ts); only with the release flag */
+  readonly recoveryReleases?: RecoveryReleases;
   readonly portalStartupResult: PortalStartup | undefined;
   readonly portalStartup: Promise<PortalStartup>;
 }
