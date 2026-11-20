@@ -340,6 +340,11 @@ function withRecords(records: readonly unknown[] | undefined, more: readonly unk
 }
 
 /** Null for a file that exists and will not parse; an absent file holds no tombstones. */
+/** Every tombstone a folder holds, its pending file's included, as read before any merge coalesces them (T48). */
+export function folderTombstones(dir: string): AccountTombstone[] {
+  return ["account-tombstones.json", "account-tombstones.pending.json"].flatMap((file) => readTombstones(join(dir, file)) ?? []);
+}
+
 function readTombstones(path: string): AccountTombstone[] | null {
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
@@ -481,16 +486,22 @@ export class DeviceStore {
   private readonly safety: { readonly strict: string | null } | null;
   private readonly pc: PcAccountState | null;
   private readonly evidence: RemovalEvidence | null;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null } = {}) {
+  /** every tombstone of this folder and its sibling as read before any coalescing merge (T48): each is evidence */
+  private readonly carried: readonly AccountTombstone[];
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; carried?: readonly AccountTombstone[] } = {}) {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
     this.evidence = account.removals ?? null;
+    this.carried = account.carried ?? [];
     this.path = join(stateDir, "devices.json");
     this.tombstonePath = join(stateDir, "account-tombstones.json");
     this.pendingTombstonePath = join(stateDir, "account-tombstones.pending.json");
     const tombstones = readTombstones(this.tombstonePath);
-    const pending = readTombstones(this.pendingTombstonePath) ?? [];
+    const pendingRead = readTombstones(this.pendingTombstonePath);
+    const pending = pendingRead ?? [];
     if (accountBlocked !== null) this.accountProblem = accountBlocked;
+    // a pending tombstone file that cannot be read holds Revokes nobody can tell: kept, and the PC refuses (S19)
+    if (pendingRead === null) this.accountProblem = `Cannot read ${this.pendingTombstonePath}: account records are refused until it is restored or fixed.`;
     if (tombstones === null) {
       this.accountProblem = `Cannot read ${this.tombstonePath}: account records are refused until it is restored or fixed.`;
       this.tombstones = pending;
@@ -533,8 +544,9 @@ export class DeviceStore {
   private takeInEvidence(found: readonly AccountTombstone[]): void {
     // evidence that cannot be trusted is never written over: the PC fails closed on it instead (S19)
     if (this.evidence!.strict !== null) return;
-    this.evidence!.takeIn(found, this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
-    this.refreshTombstones();
+    this.evidence!.takeIn([...this.carried, ...found], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
+    // the tombstone file is written from the evidence before the pending file goes, so nothing pending is lost (T26)
+    this.writeTombstones(this.evidence!.tombstones());
     rmSync(this.pendingTombstonePath, { force: true });
     const kept = this.devices.filter((d) => !this.coveredByEvidence(d));
     if (kept.length !== this.devices.length) {
@@ -1210,7 +1222,7 @@ export class DeviceStore {
       id: row.id, label: row.label, role: "drive", token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: link.key,
       // made at this write, not at its pairing, and after that removal even on a wall clock set back since: the row
       // is newer than the removal, so a stop before the tombstone is cleared leaves a row that the next start keeps
-      // (finishInterruptedWrites)
+      // (finishInterruptedWrites, or with the flag on RemovalEvidence.takeIn)
       created_at: removedAt !== undefined && removedAt >= at ? new Date(Date.parse(removedAt) + 1).toISOString() : at, last_seen_at: at, account: link.account, linked_at: at, link_moved_key: link.key !== link.oldKey, joined_by: vouched ? "service" : "code",
     };
     // no waiting row from here on: the end of its code, which this write brings, takes the rows that still wait
@@ -1394,7 +1406,8 @@ export class DeviceStore {
     if (approval.id !== undefined && this.has(approval.id)) { this.noteRelayFailure(approval.path, now); return null; }
     if (admit && this.isNewKey(publicKey) && !admit()) return null;
     const paired = this.enrollRelay(label, publicKey, now, false, { addedBy: approval.addedBy, approvedIn: approval.addedBy === undefined ? undefined : this.approverAccount(approval.addedBy) ?? undefined, digits: true }, approval.id);
-    // written after the row, so a stop between the two leaves a row newer than its tombstone (finishInterruptedWrites)
+    // written after the row, so a stop between the two leaves a row newer than its tombstone: the next start ends that
+    // Revoke (finishInterruptedWrites, or with the flag on RemovalEvidence.takeIn)
     if (approval.addedBy === undefined) this.clearTombstone(publicKey);
     return paired;
   }

@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
+import { DeviceStore, folderTombstones, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { SeenStore } from "./seen.ts";
@@ -280,6 +280,8 @@ export function createServer(
   const sameIdentity = (other: string) => { const [mine, theirs] = [savedServerId(stateDir), savedServerId(other)]; return mine === undefined || theirs === undefined || mine === theirs; };
   if (pcAccount !== null && options.siblingStateDir && !untouched && sameIdentity(options.siblingStateDir)) pcAccount.takeSibling(options.siblingStateDir);
   const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
+  // every tombstone of both folders is evidence before the merge below coalesces them one per key (T48, P13)
+  const carried = opensAll && options.siblingStateDir && !untouched ? [...folderTombstones(stateDir), ...folderTombstones(options.siblingStateDir)] : [];
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {
     try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
@@ -293,7 +295,7 @@ export function createServer(
   // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
   if (!untouched) try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
   const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
-  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, { safety: safetyLog, pc: pcAccount, removals });
+  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, { safety: safetyLog, pc: pcAccount, removals, carried });
   for (const strict of [safetyLog?.strict, pcAccount?.strict, removals?.strict]) if (strict) console.error(strict);
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
   if (options.profile === "machine") devices.closeGate();

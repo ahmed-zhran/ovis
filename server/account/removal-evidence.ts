@@ -13,7 +13,7 @@
  * Read only while OVIS_ACCOUNT_OPENS_ALL is on.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateState } from "../private-state.ts";
 import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
@@ -70,6 +70,8 @@ export class RemovalEvidence {
       else if (existsSync(join(stateDir, DEVICE_JOURNAL_FILE))) evidence.problem = `${evidence.path} is missing beside the device journal`;
       return evidence;
     }
+    // evidence anyone else can write is no evidence this PC keeps (S19)
+    if (process.platform !== "win32" && (statSync(evidence.path).mode & 0o022) !== 0) { evidence.problem = `${evidence.path} can be written by others`; return evidence; }
     let value: unknown;
     try { value = JSON.parse(text); } catch { evidence.problem = `${evidence.path} is not JSON`; return evidence; }
     const doc = parseDoc(value);
@@ -154,6 +156,11 @@ export class RemovalEvidence {
       const removal: Removal = { id: tombstone.record_id, over: [...this.forgets(tombstone.key, tombstone.account)], tomb: tombstone.record_id, at: tombstone.removed_at, ...(tombstone.records ? { records: tombstone.records } : {}) };
       const marker = doc.markers.find((m) => m.key === tombstone.key && m.account === tombstone.account);
       doc = { ...doc, markers: marker ? doc.markers.map((m) => m === marker ? { ...m, removals: [...m.removals, removal] } : m) : [...doc.markers, { key: tombstone.key, account: tombstone.account, removals: [removal] }] };
+    }
+    // a re-pair whose row reached the disk before its unrevoke did ends the Revoke it outlived (T26)
+    for (const revoke of doc.revokes) {
+      if (doc.unrevokes.some((u) => u.revoke === revoke.id)) continue;
+      if (rows.some((row) => row.relay_public_key === revoke.key && row.pairedHere && row.created_at > revoke.at)) doc = { ...doc, unrevokes: [...doc.unrevokes, { id: randomBytes(16).toString("hex"), revoke: revoke.id, at, by: "pc" }] };
     }
     if (doc !== this.doc || !this.written) this.write(doc);
   }
