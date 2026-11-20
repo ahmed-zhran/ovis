@@ -163,6 +163,7 @@ export class RelaySession {
       close: (code) => options.channel.close(code),
       onClose: (error) => {
         this.state = "closed";
+        this.leaveKeyProof();
         this.endPairing(false);
         this.unwatch?.();
         this.unwatch = undefined;
@@ -234,7 +235,8 @@ export class RelaySession {
 
   get verifying(): boolean { return this.state === "verifying"; }
 
-  get pairing(): boolean { return this.state === "pair-commit" || this.state === "pair-wait"; }
+  /** a pairing under way, a key proof and its wait for the PC's screen too: the relay link keeps it past its setup deadline */
+  get pairing(): boolean { return this.state === "pair-commit" || this.state === "pair-wait" || this.state === "key-proof" || this.state === "key-wait"; }
 
   get bufferedBytes(): number { return this.sourceBytes + this.mux.stats.bufferedBytes; }
 
@@ -253,7 +255,7 @@ export class RelaySession {
   close(code: SessionError = "auth_revoked"): void {
     if (this.state === "closed") return;
     this.state = "closed";
-    if (this.keyProofSession !== undefined) this.options.services.keyProofPairings?.leave(this.keyProofSession);
+    this.leaveKeyProof();
     this.endPairing(false);
     this.unwatch?.();
     this.unwatch = undefined;
@@ -270,6 +272,13 @@ export class RelaySession {
     }
     if (closing.length) void Promise.all(closing).then(() => this.mux.flush()).then(() => this.mux.fail(code, code));
     else this.mux.fail(code, code);
+  }
+
+  /** A key proof ends with its session, however the session ends: the code's held use and the waiting entry go. */
+  private leaveKeyProof(): void {
+    const session = this.keyProofSession;
+    this.keyProofSession = undefined;
+    if (session !== undefined) this.options.services.keyProofPairings?.leave(session);
   }
 
   /**
