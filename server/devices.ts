@@ -672,7 +672,7 @@ export class DeviceStore {
   get failsClosed(): boolean {
     // with the flag on, an account tombstone file that cannot be read is a key out nobody can tell: only this PC gets in (S19)
     if (this.evidence !== null && this.accountProblem !== null) return true;
-    return (this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? null) !== null;
+    return (this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.denyProblem) !== null;
   }
 
   /**
