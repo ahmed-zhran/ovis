@@ -8,7 +8,6 @@ import type { DeviceStore, LinkArrival } from "../devices.ts";
 import type { PairedDevice } from "../../shared/protocol.ts";
 import type { Vouch } from "./mailbox.ts";
 
-import { handedLift } from "./handed-lift.ts";
 import type { SafetyLog } from "./safety-log.ts";
 
 export type RecordRefusal = "record_invalid" | "signature_invalid" | "account_mismatch" | "signer_not_member" | "tombstoned" | "link_not_owner" | "account_unavailable" | "enrolling" | "removal_pending" | "closed" | "read_pending" | "older_device";
@@ -99,7 +98,7 @@ export async function applyAccountRecords(store: DeviceStore, values: readonly u
   for (const value of values) {
     // a denial while this record is verified means its add no longer stands on what was checked (P14)
     if (gates?.safetyLog && typeof value === "object" && value !== null && "kind" in value && value.kind === "lift") {
-      outcomes.push(await handedLift(value, store, gates.safetyLog));
+      outcomes.push(await store.handedLifts.receive(value, store, gates.safetyLog));
       continue;
     }
     const noted = store.gen();

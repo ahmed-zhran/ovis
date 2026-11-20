@@ -70,10 +70,12 @@ export function snapshotPorts(deps: SnapshotDeps): SnapshotPorts {
         if (receipt.outcome !== "applied") throw new Error("Cannot record the snapshot freeze line");
         pc.raiseGen();
       }
-      const added = safetyLog.commitLifts(stage.lifts, stage.snapshot.lifts);
-      if (typeof added !== "number") throw new SnapshotWriteRefused(added.code);
+      const { added, receipts } = safetyLog.commitLifts(stage.lifts);
+      const refused = receipts.find((receipt) => receipt.outcome === "refused");
+      if (refused) throw new SnapshotWriteRefused(refused.code);
       if (added > 0) pc.raiseGen();
       recordOrder();
+      devices.handedLifts.decide(stage.snapshot.lifts);
     },
     methodsVersion: () => deps.order.methodsVersion(),
     journalMethod(version) {
