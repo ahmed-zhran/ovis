@@ -85,6 +85,14 @@ export class RemovalEvidence {
     return evidence;
   }
 
+  /** Whether the file is on disk. */
+  get onDisk(): boolean { return existsSync(this.path); }
+
+  /** A missing file this PC once wrote is damage, not a fresh start (S19). */
+  missingAfterWritten(): void {
+    if (this.problem === null && !this.onDisk) this.problem = `${this.path} is missing, though this PC wrote it before`;
+  }
+
   /** Why this PC fails closed, or null: a key may be out that this PC cannot tell any more. */
   get strict(): string | null {
     return this.problem === null ? null : `${this.problem}: only this PC itself gets in until the removal evidence is restored.`;

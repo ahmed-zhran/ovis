@@ -503,6 +503,8 @@ export class DeviceStore {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
     this.evidence = account.removals ?? null;
+    // removal evidence this PC wrote once and that is gone now is damage, never a fresh start (S19)
+    if (this.evidence !== null && this.pc?.evidenceWritten() === true) this.evidence.missingAfterWritten();
     this.carried = account.carried ?? [];
     this.journal = account.journal ?? null;
     this.path = join(stateDir, "devices.json");
@@ -570,6 +572,8 @@ export class DeviceStore {
     }
     // the one-time legacy pass asks only whether the registry could be read: nothing is admitted before it (T50)
     if (this.error === null) this.migrate();
+    // evidence on disk at start counts as written, also for a PC that wrote it before this mark existed (S19)
+    if (this.error === null && this.evidence?.onDisk === true && this.evidence.strict === null) this.pc?.noteEvidenceWritten();
   }
 
   /**
@@ -1812,6 +1816,7 @@ export class DeviceStore {
     try {
       write();
       this.pc?.raiseGen();
+      if (this.evidence?.onDisk === true) this.pc?.noteEvidenceWritten();
       // only the deny of the very key that failed ends its closing, and never while a Revoke all is unfinished on disk
       for (const key of keys) this.failedDenies.delete(key);
       this.settleDenies();
