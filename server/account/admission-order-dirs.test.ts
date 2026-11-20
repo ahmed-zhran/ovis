@@ -145,8 +145,37 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
       stop(there, b);
       if (damage === "missing") rmSync(join(a, ADMISSION_FILE));
       else writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+      stop(start(a, b, true), a);
+      // the damage holds at every later start until it is repaired: no merge took the numbered rows away meanwhile
       expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
+      expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
     }
+  });
+
+  test("P21: a key this folder numbers on an imported row makes it its own, and the order is checked against it", async () => {
+    const [a, b] = [dir(), dir()];
+    const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const oldKey = await newKey();
+    put(a, []);
+    writeFileSync(join(b, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+    put(b, [row("bbbbbbbbbbbbbbbb", { relay_public_key: oldKey, origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
+    const first = start(a, b, true);
+    first.app.context.services.devices.linkAccountKey("bbbbbbbbbbbbbbbb", oldKey, await newKey(), "acct");
+    stop(first, a);
+    const linked = (readDeviceRegistry(join(a, "devices.json")) as { devices: StoredDevice[] }).devices[0]!;
+    expect(linked).toMatchObject({ origin: { how: "link", admit_no: 1 } });
+    expect(linked.imported).toBeUndefined();
+    rmSync(join(a, ADMISSION_FILE));
+    expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
+  });
+
+  test("P22: a key replaced with the release flag off keeps no age of the key before it", async () => {
+    const at = dir();
+    const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const oldKey = await newKey();
+    put(at, [row("aaaaaaaaaaaaaaaa", { relay_public_key: oldKey, origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
+    start(at, undefined, false).app.context.services.devices.linkAccountKey("aaaaaaaaaaaaaaaa", oldKey, await newKey(), "acct");
+    expect(persisted(at)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
   });
 
   test("P22: two folders that each numbered a row 1 keep only their own after a flag-off merge and a flag-on start", () => {
