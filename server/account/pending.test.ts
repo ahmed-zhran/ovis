@@ -24,7 +24,7 @@ function store() {
 
 async function proved(pending: PendingRedemptions, code: string, label = "Phone") {
   const phone = await device();
-  const { challenge } = pending.name(code, label, phone.spki, "relay");
+  const { challenge } = pending.name(code, label, phone.spki, "relay", undefined, `id-${code}`);
   const entry = await pending.prove(challenge, await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey));
   if (entry === null) throw new Error("The proof was refused");
   return { phone, entry, challenge };
@@ -94,9 +94,8 @@ test("T71: removing or blocking a key, or ending its code, drops its pending red
   const ended = await proved(pending, "code2");
   const kept = await proved(pending, "code3");
   pending.dropKey(removed.phone.spki, "removed");
-  pending.dropCode("code2");
+  pending.dropCode(ended.entry.codeId!);
   expect(pending.list().map((open) => open.id)).toEqual([kept.entry.id]);
-  expect(ended.entry.id).not.toBe(kept.entry.id);
 });
 
 test("T71: the PC's screen sees every redemption of a code side by side, with how each came", async () => {

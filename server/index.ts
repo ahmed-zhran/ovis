@@ -519,6 +519,8 @@ export function createServer(
     journalDrop: (entry) => { journal?.append({ kind: "drop", how: entry.reason, key: entry.key, no: null, row: null, label: entry.label, by: "pc", account: null }); },
     release: (codeId, key) => devices.releaseRedemption(codeId, key),
   }) : undefined;
+  // a code that ends takes what waits on it, however it ends
+  if (pendingRedemptions) devices.onPairingEnded((codeId) => pendingRedemptions.dropCode(codeId));
   // a key confirm needs a screen this PC can prove: Linux in this release; elsewhere pairing is as before
   const keyProofPairings = localConfirms && pendingRedemptions && (options.platform ?? process.platform) === "linux"
     ? new KeyProofPairings({ pending: pendingRedemptions, seams: devices }) : undefined;
