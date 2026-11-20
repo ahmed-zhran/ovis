@@ -192,4 +192,17 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     writeFileSync(join(dir, "account-tombstones.pending.json"), "not json", { mode: 0o600 });
     expect(new DeviceStore(dir).accountError).toBeNull();
   });
+
+  test("P13, rule 1: a Revoke made while the removal evidence cannot be trusted leaves a tombstone, which holds once the evidence file is deleted", async () => {
+    if (process.platform === "win32") return;
+    const dir = stateDir();
+    const k = await key();
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+    chmodSync(join(dir, REMOVAL_FILE), 0o666);
+    open(dir).revoke(id);
+    rmSync(join(dir, REMOVAL_FILE));
+    const repaired = open(dir);
+    expect(repaired.isTombstoned(k)).toBe(true);
+  });
 });
