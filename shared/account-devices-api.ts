@@ -200,3 +200,24 @@ export function parseRecoveryAction(value: unknown): RecoveryAction {
   if (!ok) fail("Invalid recovery action");
   return action as unknown as RecoveryAction;
 }
+
+/**
+ * Device table P22, T7, T72: a link that would move the key of a row this PC's screen approved is held until the
+ * screen approves the new key by its fingerprint. Only an app that shows that fingerprint itself asks for it, with
+ * `replacement: LINK_REPLACEMENT_OPT_IN` beside the record; one that does not is refused REPLACEMENT_NEEDS_APP and
+ * keeps its key. The app shows pairFingerprint(server_id, challenge, its new key), never the body's `fingerprint`.
+ */
+export const LINK_REPLACEMENT_OPT_IN = 1;
+export const REPLACEMENT_NEEDS_APP = "replacement_needs_app";
+export interface LinkReplacement { readonly challenge: string; readonly fingerprint: string }
+
+const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+
+export function parseLinkReplacement(value: unknown): LinkReplacement | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  if (Object.keys(body).some((field) => field !== "challenge" && field !== "fingerprint")) return null;
+  if (typeof body.challenge !== "string" || !CHALLENGE.test(body.challenge)) return null;
+  if (typeof body.fingerprint !== "string" || !PAIR_FINGERPRINT_PATTERN.test(body.fingerprint)) return null;
+  return { challenge: body.challenge, fingerprint: body.fingerprint };
+}
