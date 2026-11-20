@@ -435,13 +435,18 @@ export function createServer(
     };
   });
 
-  // the holds and the records waiting to apply are on hand before any listener opens: no request is served on less (T41)
-  const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
-  const accountMailbox = new AccountMailbox({
-    pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
-    devices, identity: () => ovisRelay.currentIdentity(),
-    service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
-  });
+  // with the flag on, the holds and the records waiting to apply are on hand before any listener opens, so no request is
+  // served on less (T41); with it off they open where main opens them
+  const openAccountQueues = () => {
+    const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
+    const accountMailbox = new AccountMailbox({
+      pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
+      devices, identity: () => ovisRelay.currentIdentity(),
+      service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
+    });
+    return { accountHolds, accountMailbox };
+  };
+  const earlyQueues = opensAll ? openAccountQueues() : null;
 
   const envPort = process.env["PORT"];
   const clientConnectionLog = new ClientConnectionLog();
@@ -517,6 +522,7 @@ export function createServer(
     catch (error) { console.error(`The local confirm page did not open: ${error instanceof Error ? error.message : String(error)}`); return null; }
   })();
   const desktopOwner = localConfirms && options.desktopOwner ? desktopOwnerChannel(localConfirms, options.desktopOwner) : null;
+  const { accountHolds, accountMailbox } = earlyQueues ?? openAccountQueues();
   const services: RequestServices = {
     runtimeMove: options.runtimeService ? moveService({
       stateDir, port: server.port ?? DEFAULT_PORT, serving: runtime, facts: () => options.runtimeService?.facts(),
