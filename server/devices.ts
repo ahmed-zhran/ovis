@@ -12,7 +12,7 @@
  */
 import { createHash, createPublicKey, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { admissionPosition, compareAdmission, compareAdmissionPositions, isRowOrigin, legacyOrigin, type AdmissionPosition, type RowOrigin } from "./account/admission-order.ts";
 import { type ClearReason, PcAccountState } from "./account/pc-binding.ts";
 import type { BlockAsOf, LiftCause, SafetyGot, SafetyLog } from "./account/safety-log.ts";
@@ -20,7 +20,7 @@ import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import { rowDrop } from "./account/row-drop-evidence.ts";
 import { RevokeAllIntent } from "./account/revoke-all-intent.ts";
 import type { RecoveryCandidate, RecoveryReleases } from "./account/recovery.ts";
-import type { DeviceJournal, JournalEntry, JournalInput } from "./account/device-journal.ts";
+import { DeviceJournal, type JournalEntry, type JournalInput } from "./account/device-journal.ts";
 import type { AccountOrder, LiftOrder } from "./account/account-order.ts";
 import { HandedLifts } from "./account/handed-lift.ts";
 import type { AccessAnswer, AccountRow, AccountRowSource } from "./account/account-devices.ts";
@@ -2363,10 +2363,20 @@ export class DeviceStore {
     return this.isAccountApprover(id) ? this.devices.find((d) => d.id === id)?.account ?? null : null;
   }
 
-  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {
+  enrollFirstMember(member: { id: string; key: string; account: string; label: string }): DeviceMatch | null {
+    if (this.opensAll() || this.error || this.accountError || this.devices.length !== 0 || this.isTombstoned(member.key)) return null;
+    // The flag-on journal implies companion safety files. Keep the same audit format without manufacturing that state.
+    const journal = DeviceJournal.open(dirname(this.path), undefined, "first-member-journal.json");
+    journal.append({ kind: "account", how: "first member added on this PC", key: member.key, row: member.id,
+      label: normalizeLabel(member.label, "Device"), account: member.account, by: null, no: null });
+    return this.enrollRelay(member.label, member.key, Date.now(), false, { pairingHere: true, account: member.account }, member.id)?.device ?? null;
+  }
+
+  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere, account }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean; account?: string }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {
     const device: StoredDevice = {
       id, label: normalizeLabel(label, "Device"), role: "drive",
       token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: publicKey,
+      ...(account === undefined ? {} : { account }),
       // PAIR authenticates this relay session too, so the device is seen as it pairs.
       created_at: new Date(now).toISOString(), last_seen_at: new Date(now).toISOString(),
       ...(addedBy === undefined ? {} : { added_by: addedBy }),

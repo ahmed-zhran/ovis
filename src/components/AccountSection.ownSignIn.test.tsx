@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:te
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { FakeAccountService } from "../../shared/account-service-fake.ts";
+import { accountDeviceId, newRecordId, readAccountRecord } from "../../shared/account-records.ts";
 import { exportPublicKey, generateKeyPair, importPublicKey } from "../../shared/relay-e2ee.ts";
 import { encodeOffer } from "../../shared/relay-offer.ts";
 import { deriveServerId } from "../../shared/relay-server-proof.ts";
@@ -32,6 +33,9 @@ describe("signing in on the PC's own window", () => {
   let relayPhase: "online" | "off";
   let pcAccount: string | null;
   let enrolling: boolean;
+  let firstMember: "missing" | "available";
+  let challenge: string;
+  let enrollments: number;
   /** holds the code's exchange until released, and says when it was asked */
   let exchange: { asked: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | null;
 
@@ -44,6 +48,9 @@ describe("signing in on the PC's own window", () => {
     relayPhase = "online";
     pcAccount = null;
     enrolling = false;
+    firstMember = "missing";
+    challenge = newRecordId();
+    enrollments = 0;
     exchange = null;
     for (const key of ["window", "document", "navigator", "indexedDB", "getComputedStyle", "location", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -74,6 +81,23 @@ describe("signing in on the PC's own window", () => {
     const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input instanceof Request ? input.url : input), `http://127.0.0.1:${PORT}`);
       if (url.origin !== SERVICE) {
+        if (firstMember === "available" && url.pathname === "/api/account/first-member/challenge") return Response.json({ challenge });
+        if (firstMember === "available" && url.pathname === "/api/account/first-member") {
+          const body = JSON.parse(String(init?.body));
+          const proof = await (await fake.fetch(SERVICE + "/v1/session", { headers: { authorization: `Bearer ${body.token}` } })).json();
+          if (proof.own_sign_in !== true || proof.account !== body.account) return Response.json({ error: { code: "own_sign_in_required" } }, { status: 403 });
+          const record = await readAccountRecord(body.record);
+          const key = await indexedAccountStore.key();
+          if (record?.kind !== "link" || record.id !== challenge || record.server_id !== SERVER || record.signer !== key.public_spki) return new Response(null, { status: 400 });
+          pcAccount = record.account;
+          enrolling = true;
+          return Response.json({ device: { id: accountDeviceId(SERVER, key.public_spki), label: "Linux · Chrome", role: "drive" } }, { headers: { "x-ovis-first-enroll": "for-this-window" } });
+        }
+        if (url.pathname === "/api/account/enroll" && enrolling && new Headers(init?.headers).get("x-ovis-first-enroll") === "for-this-window") {
+          enrollments++; enrolling = false;
+          return Response.json({ results: [] });
+        }
+        if (url.pathname === "/api/relay/link" && init?.method !== "POST") return Response.json({ url: OFFER });
         if (url.pathname === "/api/health") return Response.json({ ok: true, bridge_protocol: 1, own_window: { port: PORT }, auth: { required: false, authenticated: true, via: "local", role: "drive" } });
         if (url.pathname === "/api/relay") return Response.json({ phase: relayPhase, relay: "wss://relay.ovis.example", app: "https://app.ovis.example", sessions: 0, blocked: null, error: null });
         if (url.pathname === "/api/account/status") return Response.json({ account: pcAccount, enrolling, unlinked: [], removals: [], adds: [], blocked: [] });
@@ -118,6 +142,55 @@ describe("signing in on the PC's own window", () => {
     await act(async () => { (found[0]!.props as { onClick: () => void }).onClick(); });
   };
   const back = async (start: string): Promise<string> => new URL((await fake.fetch(start)).headers.get("location") ?? "").search;
+
+  it("adds and enrolls from an own redirect without opening the digit window", async () => {
+    firstMember = "available";
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Continue with Google"));
+    await press("Continue with Google");
+    const stop = handOverReturn(await back(await sent.promise), () => undefined);
+    try { await until(() => words().includes("This PC is in your account.") || buttons().includes("Stop waiting")); }
+    finally { stop(); }
+    expect(words()).toContain("This PC is in your account.");
+    expect(links).toBe(0);
+    expect(enrollments).toBe(1);
+    expect(fake.pcs("acct_google").map(pc => pc.server_id)).toEqual([SERVER]);
+  });
+
+  it("does not admit or list the key while this browser is leaving the account", async () => {
+    firstMember = "available";
+    const key = await indexedAccountStore.key();
+    await indexedAccountStore.set("leaving", { leave: key.public_spki });
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Continue with Google"));
+    await press("Continue with Google");
+    const stop = handOverReturn(await back(await sent.promise), () => undefined);
+    try { await until(() => buttons().includes("Add this PC to my account") || words().includes("This PC is in your account.")); }
+    finally { stop(); }
+    expect(pcAccount).toBeNull();
+    expect(fake.pcs("acct_google")).toEqual([]);
+  });
+
+  it("explains a device-code refusal and lists nothing until the separate digit flow is chosen", async () => {
+    firstMember = "available";
+    const codes = await (await fake.fetch(SERVICE + "/v1/signin/github/device", { method: "POST" })).json();
+    fake.approveDevice(codes.user_code, "acct_device");
+    const tokens = await (await fake.fetch(SERVICE + "/v1/token", { method: "POST", body: JSON.stringify({
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: codes.device_code,
+    }) })).json();
+    await indexedAccountStore.set("session", { ...tokens, service: SERVICE, expires_at: Date.now() + 3600000 });
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Add this PC to my account"));
+    await press("Add this PC to my account");
+    await until(() => buttons().includes("Continue on another device") || buttons().includes("Stop waiting"));
+    expect(fake.pcs("acct_device")).toEqual([]);
+    for (const query of ["", "?include=unconfirmed"]) expect(await (await fake.fetch(SERVICE + "/v1/pcs" + query, { headers: { authorization: `Bearer ${tokens.access_token}` } })).json()).toEqual({ pcs: [] });
+    expect(pcAccount).toBeNull();
+    expect(words()).toContain("This sign-in can't add this PC by itself.");
+    await press("Continue on another device");
+    await until(() => buttons().includes("Stop waiting"));
+    expect(fake.pcs("acct_device").map(pc => pc.server_id)).toEqual([SERVER]);
+  });
 
   it("offers the providers, says it adds this PC, and lists the PC once the return comes back", async () => {
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });

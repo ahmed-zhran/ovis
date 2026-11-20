@@ -646,6 +646,14 @@ How a person adds a PC to the account in the apps (WhatsApp's linked devices and
 Tailnet Lock follow the same idea: an existing device approves once, and the server only carries
 messages):
 
+**From the PC's own browser window.** On a PC with no account or paired devices, **Add this PC to
+my account** can use the window's account key as the first drive member. The window signs the PC's
+single-use, 60-second challenge. The PC uses the access token once, without saving it, to ask
+`GET /v1/session` whether this account signed in on its own device in the last ten minutes. Only
+then does the window list and enroll the PC; no digits or second device are needed. A remote
+window or an unverified sign-in uses the existing digit flow. A sign-in refused this proof lists
+nothing until the person chooses to continue on another device.
+
 **By QR code.** On the new PC, Settings → Devices and PCs → Add a connection → Ovis relay →
 **Show the QR code**, with the relay on and an account named for the PC: signing in on the PC's
 own page and adding it there names one, and so does `ovis add`. A device that is signed in to that

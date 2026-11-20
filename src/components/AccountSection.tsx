@@ -15,8 +15,9 @@ import { desktopAccount, desktopProviders, desktopSignIn } from "../lib/account/
 import { ApiError, fetchBridgeHealth, fetchRelay, requestRelay } from "../lib/api.ts";
 import { startDeviceSignIn, startLinkPageSignIn, type DeviceSignInProvider } from "../lib/account/deviceSignIn.ts";
 import { AccountPcError, within } from "../lib/account/join.ts";
+import { firstMember, type FirstEnrollment } from "../lib/account/firstMember.ts";
 import { myPcs, type MyPc } from "../lib/account/myPcs.ts";
-import { ownWindowSignIn, useOwnWindowRedirect } from "../lib/account/ownWindow.ts";
+import { ownWindowRedirect, ownWindowSignIn, useOwnWindowRedirect } from "../lib/account/ownWindow.ts";
 import { AccountServiceError, DEVICE_PROVIDERS, indexedAccountService, offeredProviders, pcAccountServiceOf, sameSignIn, SignedOutError, type AccountIdentity, type AccountService, type DeviceProvider, type OfferedProviders } from "../lib/account/service.ts";
 import { SignInError } from "../lib/account/signin.ts";
 import { indexedAccountStore, type AccountProvider, type AccountSession, type AccountStore } from "../lib/account/store.ts";
@@ -118,6 +119,8 @@ type AddThisPcState =
   | { kind: "hidden" }
   | { kind: "offer" }
   | { kind: "adding" }
+  | { kind: "digits"; account: string }
+  | { kind: "unfinished"; enrollment: FirstEnrollment }
   /**
    * that listing found the relay off: one button turns it on and lists, under `account` (the sign-in that just
    * finished) and no other; `error`: why the last press did neither
@@ -200,6 +203,7 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
 }) {
   const t = useT();
   const [state, setState] = useState<AddThisPcState>({ kind: "hidden" });
+  const ownRedirect = useOwnWindowRedirect(typeof window !== "undefined" && window.location?.hostname === "127.0.0.1");
   const accountService = useCallback((): AccountService => service?.() ?? indexedAccountService, [service]);
   /** What the screen shows of a PC that has an account: "in your account" only when it is the one signed in to now, else nothing here is true of it. */
   const joinedAs = useCallback(async (account: string, enrolling: boolean): Promise<AddThisPcState> => {
@@ -501,11 +505,17 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
    * `ADDING_MS` (the button again) or when its screen goes, and a relay that is off is offered with one button,
    * never started. The window such an attempt opened is closed again when nobody comes to wait on it.
    */
-  const add = (as: string | null = null): void => {
+  const finish = async (enrollment: FirstEnrollment): Promise<AddThisPcState> => {
+    try { await enrollment.finish(); }
+    catch { return { kind: "unfinished", enrollment }; }
+    onListed?.();
+    return joinedAs(enrollment.account, false);
+  };
+  const add = (as: string | null = null, digits = false): void => {
     const mine = ++attempt.current;
     const began = ++starts.current;
     const current = (): boolean => attempt.current === mine;
-    if (as !== null) setState({ kind: "adding" });
+    if (as !== null || ownRedirect) setState({ kind: "adding" });
     let opened = false;
     let writing = false;
     let closed = false;
@@ -524,7 +534,30 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
       const { account: joined, enrolling } = await thisPcMembership();
       if (!current()) return null;
       if (joined !== null) { keepAddPcWaiting(null); return await joinedAs(joined, enrolling); }
-      const { name, serverId, account } = await listThisPc(accountService(), { relistMs: RELIST_MS, ...(as === null ? {} : { as: { account: as, running: current, reached } }) });
+      // The sign-in that just returned can start adding before the hook's health read is rendered.
+      const direct = ownRedirect === undefined ? await fetchBridgeHealth().then(h => ownWindowRedirect(h, window.location), () => null) : ownRedirect;
+      let listAs = as;
+      if (direct && !digits) {
+        const service = accountService();
+        const session = await service.session();
+        if (!current()) return null;
+        if (session && (as === null || session.account === as)) {
+          try {
+            const enrollment = await firstMember(service, session, current);
+            if (enrollment !== null) return await finish(enrollment);
+          } catch (error) {
+            if (!current()) return null;
+            if (error instanceof AddPcWaitOver) throw error;
+            if (error instanceof AccountPcError && error.code === "own_sign_in_required") return { kind: "digits", account: session.account };
+            // A lost answer may follow a committed row. Don't open a window or list under a different sign-in.
+            const status = await thisPcMembership();
+            if (status.account !== null) return joinedAs(status.account, status.enrolling);
+          }
+          if (!current()) return null;
+          listAs = session.account;
+        }
+      }
+      const { name, serverId, account } = await listThisPc(accountService(), { relistMs: RELIST_MS, ...(listAs === null ? {} : { as: { account: listAs, running: current, reached } }) });
       if (!current()) return null;
       // in one press when the account service admits it; the window this listing opened is then needed no more
       if (account !== null && await addInOnePress(accountService(), serverId, account, current, opensAll())) {
@@ -664,6 +697,16 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
           {closesGate && gateNote && <p className="settings-condition">{t("Turning on the relay closes the device gate: a new browser then needs a pairing code or the access token.")}</p>}
           <button type="button" className="btn btn-primary" onClick={() => startRelayAndAdd(state.account)}>{t("Turn on the relay and add this PC")}</button>
           {state.error !== null && <p className="settings-condition" role="alert">{state.error}</p>}
+        </>
+      ) : state.kind === "digits" ? (
+        <>
+          <p className="settings-description">{t("This sign-in can't add this PC by itself. Continue on another device to compare digits.")}</p>
+          <button type="button" className="btn btn-primary" onClick={() => add(state.account, true)}>{t("Continue on another device")}</button>
+        </>
+      ) : state.kind === "unfinished" ? (
+        <>
+          <p className="settings-description" role="status">{t("This PC has its first member, but setup didn't finish. Try again.")}</p>
+          <button type="button" className="btn" onClick={() => { setState({ kind: "adding" }); void finish(state.enrollment).then(setState); }}>{t("Try again")}</button>
         </>
       ) : state.kind === "waiting" ? (
         <>
