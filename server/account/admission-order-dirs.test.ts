@@ -95,6 +95,41 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, [paired]: undefined });
   });
 
+  test("P21: a missing order file beside numbered rows fails closed before a sibling merge can touch them", () => {
+    const [a, b] = [dir(), dir()];
+    const at = (admit_no: number) => ({ from: "remote" as const, how: "code" as const, by: null, admit_no, at: AT });
+    put(a, [row("aaaaaaaaaaaaaaaa", { origin: at(1) }), row("bbbbbbbbbbbbbbbb", { origin: at(2) }), row("cccccccccccccccc", { origin: at(3) })]);
+    put(b, []);
+    expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
+    expect(Object.values(persisted(a)!).map((origin) => origin?.admit_no)).toEqual([1, 2, 3]);
+  });
+
+  test("T50: a key a merge brings to an old row on its first start is no key this folder held before the upgrade", async () => {
+    const [a, b] = [dir(), dir()];
+    const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const [oldKey, linkedKey] = [await newKey(), await newKey()];
+    put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: oldKey })]);
+    writeFileSync(join(b, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 5 }), { mode: 0o600 });
+    put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: linkedKey, account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true, origin: { from: "remote", how: "link", by: null, admit_no: 4, at: AT } })]);
+    start(a, b, true);
+    expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ how: "link", admit_no: 4 }) });
+  });
+
+  test("P22: a link that moves a key names no approver, whoever approved the key before it", async () => {
+    const [a, b] = [dir(), dir()];
+    const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const memberKey = await newKey();
+    put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: memberKey, account: "acct", linked_at: AT })]);
+    put(b, []);
+    const devices = start(a, b, true).app.context.services.devices;
+    const oldKey = await newKey();
+    const id = devices.pairRelay(devices.startPairing(Date.now(), { remote: true, startedBy: "aaaaaaaaaaaaaaaa", memberRequired: true, by: null }).code, "Phone", oldKey)!.device.id;
+    expect(persisted(a)?.[id]).toMatchObject({ how: "member", by: memberKey, admit_no: 1 });
+    devices.linkAccountKey(id, oldKey, await newKey(), "acct");
+    expect(persisted(a)?.[id]).toMatchObject({ how: "link", by: null, admit_no: 2 });
+  });
+
   test("P22: with the release flag off a twin keeps this folder's own origin as main does, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
