@@ -165,4 +165,40 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     devices.revoke(id);
     expect(onDisk).toBe(false);
   });
+
+  test("P8, S19: a cookie Revoke whose deny fails keeps that row out until its own removal lands, whatever other key is denied", async () => {
+    const at = dir();
+    const devices = store(at);
+    const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    devices.match(cookie.token);
+    const other = devices.pairRelay(devices.startPairing().code, "B", await key())!.device.id;
+    const counter = join(at, "account-pc.json");
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === counter) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revoke(cookie.device.id)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    devices.revoke(other);
+    expect(devices.failsClosed).toBe(true);
+    expect(devices.match(cookie.token)).toBeNull();
+  });
+
+  test("P8: a cookie Revoke whose registry write fails is never told as removed, and after a restart the row is live", () => {
+    const at = dir();
+    const devices = store(at);
+    const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    devices.match(cookie.token);
+    const told: string[] = [];
+    devices.onRemoved((event) => told.push(event.id));
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "devices.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revoke(cookie.device.id)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(told).toEqual([]);
+    expect(devices.match(cookie.token)).toBeNull();
+    expect(store(at).match(cookie.token)).not.toBeNull();
+  });
 });
