@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
+import { relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { applyAccountRecords } from "./records.ts";
@@ -47,6 +48,58 @@ const add = (signer: Awaited<ReturnType<typeof accountKey>>, key: string) =>
   signAccountRecord({ v: 1, kind: "add", account: ACCOUNT, key, label: "New phone", role: "drive", issued_at: new Date().toISOString(), id: newRecordId(), signer: signer.spki }, signer.keys.privateKey);
 
 describe("one final admission guard (G3, rule R1)", () => {
+  test("G3: admits refuses a key held by the account mailbox", async () => {
+    const { spki } = await accountKey();
+    const fixture = relayFixture(false, { accountOpensAll: true });
+    try {
+      const { devices, accountHolds, accountMailbox } = fixture.app.context.services;
+      expect(devices.admits(spki)).toBe(true);
+      accountHolds.hold([spki]);
+      expect(accountMailbox.gates().held(spki)).toBe(true);
+      expect(devices.admits(spki)).toBe(false);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  test("G3: admits refuses a key removed by the account", async () => {
+    const { devices } = pc();
+    const { spki } = await accountKey();
+    expect(devices.admits(spki)).toBe(true);
+    devices.removeAccountKey(spki, ACCOUNT, { id: newRecordId(), issuedAt: new Date().toISOString() });
+    expect(devices.removedByAccount(spki)).toBe(true);
+    expect(devices.admits(spki)).toBe(false);
+  });
+
+  test("G3: admits and a signed add refuse a key revoked on this PC", async () => {
+    const { devices } = pc();
+    const signer = await member(devices);
+    const { spki } = await accountKey();
+    const paired = devices.pairRelay(devices.startPairing().code, "Phone", spki);
+    if (paired === null) throw new Error("Initial pairing failed");
+    devices.revoke(paired.device.id);
+    expect(devices.isTombstoned(spki)).toBe(true);
+    expect(devices.removedByAccount(spki)).toBe(false);
+
+    const record = await add(signer.key, spki);
+    expect(await applyAccountRecords(devices, [record], SERVER_ID)).toEqual([{ id: record.id, outcome: "refused", code: "tombstoned" }]);
+    expect(devices.hasKey(spki)).toBe(false);
+    expect(devices.admits(spki)).toBe(false);
+  });
+
+  test("G3: a code started on this PC can re-pair a locally revoked key", async () => {
+    const { devices } = pc();
+    const { spki } = await accountKey();
+    const paired = devices.pairRelay(devices.startPairing().code, "Phone", spki);
+    if (paired === null) throw new Error("Initial pairing failed");
+    devices.revoke(paired.device.id);
+    expect(devices.isTombstoned(spki)).toBe(true);
+
+    expect(devices.pairRelay(devices.startPairing().code, "Phone", spki)).not.toBeNull();
+    expect(devices.isTombstoned(spki)).toBe(false);
+    expect(devices.hasKey(spki)).toBe(true);
+  });
+
   test("T10: digits approval rechecks member authority and the freeze for this key at commit", async () => {
     const { devices, log } = pc();
     const approver = await member(devices);

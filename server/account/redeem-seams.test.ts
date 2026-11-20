@@ -240,6 +240,18 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
   });
 
+  test("with the flag off, an expired code is recorded as main records it", () => {
+    const devices = store(dir(), false);
+    const clock = new TestClock();
+    devices.useClock(clock);
+    const { pairing: { id } } = devices.startAccountPairing("acct_1");
+    clock.advance(10 * 60 * 1000 + 1);
+
+    const cancelled = devices.endPairing({ id });
+    expect(devices.accountPairingState(id)).toMatchObject({ state: "ended", ended: { why: "cancelled" } });
+    expect(cancelled).toBe(true);
+  });
+
   test("P24, T70: a key admitted by ovis recover is journalled as a recovery, by the OS user who ran it", async () => {
     const at = dir();
     const devices = store(at);
@@ -279,5 +291,37 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
       const created = (id: string) => Date.parse(rows.find((row) => row.id === id)!.created_at);
       expect(created(cookie.device.id)).toBeGreaterThan(created(relay));
     } finally { setSystemTime(); }
+  });
+
+  test("T26: first use of a first-pair cookie is stamped after prior Revoke evidence", async () => {
+    const at = dir();
+    const relayKey = await key();
+    const ahead = Date.parse("2026-10-01T00:00:05.000Z");
+    try {
+      setSystemTime(ahead);
+      const earlier = store(at);
+      const relay = earlier.pairRelay(earlier.startPairing().code, "Phone", relayKey);
+      if (relay === null) throw new Error("Initial relay pairing failed");
+      earlier.revoke(relay.device.id);
+      const revoke = RemovalEvidence.open(at, SafetyLog.open(at)).standingRevokes(relayKey)[0];
+      if (revoke === undefined) throw new Error("Expected retained Revoke evidence");
+      // Start with a fresh registry, retaining the Revoke of the relay row made while the clock was ahead.
+      rmSync(join(at, "devices.json"));
+      setSystemTime(ahead - 5_000);
+      const devices = store(at);
+      expect(devices.gated).toBe(false);
+      const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive");
+      if (cookie === null) throw new Error("First cookie pairing failed");
+      expect(devices.gated).toBe(false);
+      expect(devices.list(null)).toHaveLength(0);
+
+      expect(devices.match(cookie.token)).toEqual(cookie.device);
+      expect(devices.gated).toBe(true);
+      const row = devices.list(null).find((listed) => listed.id === cookie.device.id);
+      if (row === undefined) throw new Error("First use did not save the cookie row");
+      expect(Date.parse(row.created_at)).toBeGreaterThan(Date.parse(revoke.at));
+    } finally {
+      setSystemTime();
+    }
   });
 });
