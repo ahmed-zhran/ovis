@@ -2243,8 +2243,10 @@ export class DeviceStore {
     this.resumeRevokeAll();
     const now = new Date().toISOString();
     const gone = this.devices;
-    // a registry that will not read may hold listed rows: count it as some, so the intent outlives it
-    const listed = this.joinedRows?.blocked() ? 1 : this.joinedRows?.rows().length ?? 0;
+    // a registry that will not read, or is missing on a PC in an account, may hold listed rows: count it as some, so
+    // the intent outlives it. A PC never bound has none
+    const unknown = this.joinedRows?.blocked() || (this.joinedRows?.missing() && this.pc?.binding());
+    const listed = unknown ? 1 : this.joinedRows?.rows().length ?? 0;
     const denied = this.deny(() => intent.begin(gone, now, listed));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? now;
     this.devices = [];
