@@ -199,3 +199,74 @@ test("T71: a relay pass that lets in no new device starts no key proof and puts 
   expect(made.devices.redeemCode(code, "code", device.spki)).toMatchObject({ ok: true });
   expect(made.screen.keyConfirm()).toBeUndefined();
 });
+
+/** The approve_key prompts the PC's screen shows now. */
+const prompts = (made: Awaited<ReturnType<typeof pc>>) => (made.screen.told.at(-1)?.pending ?? []).filter((entry) => entry.action.kind === "approve_key");
+
+test("S31/T72: a device that goes away before its proof frees its slot: five other devices can still wait on the code", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const gone = await relayConnection(made);
+  const challenged = deferred<void>();
+  gone.onFrame = (frame) => { if (frame.type === FrameType.KEY_CHALLENGE) challenged.resolve(); };
+  await gone.hello([KEY_PROOF_FEATURE]);
+  gone.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code, label: "Gone", public_key: (await phone()).spki } });
+  await bounded(challenged.promise);
+  gone.stop();
+  await bounded(gone.closed);
+  for (let index = 0; index < 5; index++) await (await provingDevice(made, code)).pending;
+  expect((await made.local("/api/devices/pending")).body.pending).toHaveLength(5);
+});
+
+test("T71/T72: Revoke all while a prompt is up withdraws it; approving it then admits nobody and writes no row", async () => {
+  const made = await pc(true, "linux");
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  const stale = made.screen.keyConfirm()!;
+  made.devices.revokeAll();
+  expect(prompts(made)).toEqual([]);
+  made.screen.approve(stale.id);
+  expect(await bounded(paired.link.serverError)).toBe("auth_failed");
+  expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
+});
+
+test("T71/T72: a relay identity reset while a prompt is up withdraws it; approving it then admits nobody", async () => {
+  const made = await pc(true, "linux");
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  const stale = made.screen.keyConfirm()!;
+  await made.app.context.services.relay.resetIdentity();
+  expect(prompts(made)).toEqual([]);
+  made.screen.approve(stale.id);
+  expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
+});
+
+test("T71/T72: a device that goes away withdraws its prompt", async () => {
+  const made = await pc(true, "linux");
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  expect(prompts(made)).toHaveLength(1);
+  paired.link.stop();
+  await bounded(paired.link.closed);
+  expect(prompts(made)).toEqual([]);
+});
+
+test("S31/T71: admitting one of two devices on a code withdraws the other's prompt, and approving that stale prompt admits nobody", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const first = await provingDevice(made, code);
+  await first.pending;
+  const second = await provingDevice(made, code);
+  await second.pending;
+  const [one, two] = prompts(made);
+  const admitted = deferred<void>();
+  first.link.onFrame = (frame) => { if (frame.type === FrameType.AUTH_OK) admitted.resolve(); };
+  const firstPrompt = [one, two].find((entry) => entry!.action.fingerprint === first.fingerprint)!;
+  const secondPrompt = [one, two].find((entry) => entry!.action.fingerprint === second.fingerprint)!;
+  made.screen.approve(firstPrompt.id);
+  await bounded(admitted.promise);
+  expect(await bounded(second.link.serverError)).toBe("auth_failed");
+  expect(prompts(made)).toEqual([]);
+  made.screen.approve(secondPrompt.id);
+  expect(made.stored().some((row) => row.relay_public_key === second.device.spki)).toBe(false);
+});
