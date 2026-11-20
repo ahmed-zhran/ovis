@@ -149,7 +149,7 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(devices.admitConfirmed({ codeId: id5, key: late, label: "Late", source: "screen" })).toBeNull();
   });
 
-  test("P13: with the flag on, only a screen confirm naming it ends a local Revoke; a relay-started code never does", async () => {
+  test("P13: a screen confirm naming a local Revoke ends it; a relay-started code never does", async () => {
     const devices = store(dir());
     const internals = devices as unknown as { evidence: RemovalEvidence };
     const gone = await key();
@@ -278,7 +278,7 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     } finally { setSystemTime(); }
   });
 
-  test("T26: a cookie confirmed at its first use is stamped after every row the store holds, whatever the clock", async () => {
+  test("T26: a cookie paired after the gate closes is stamped after every row the store holds", async () => {
     const at = dir();
     try {
       setSystemTime(new Date("2026-10-01T00:00:05.000Z"));

@@ -515,6 +515,7 @@ export class DeviceStore {
   private readonly safety: SafetyLog | null;
   private readonly pc: PcAccountState | null;
   private readonly evidence: RemovalEvidence | null;
+  private readonly accountHeld: ((key: string) => boolean) | undefined;
   /** every tombstone of this folder and its sibling as read before any coalescing merge (T48): each is evidence */
   private readonly carried: readonly AccountTombstone[];
   private readonly journal: DeviceJournal | null;
@@ -524,11 +525,12 @@ export class DeviceStore {
   private denyProblem: string | null = null;
   private readonly revokeAllPath: string;
   private readonly stateDirPath: string;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[] } = {}) {
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; held?: (key: string) => boolean } = {}) {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
     this.stateDirPath = stateDir;
     this.evidence = account.removals ?? null;
+    this.accountHeld = account.held;
     // removal evidence this PC wrote once and that is gone now is damage, never a fresh start (S19)
     if (this.evidence !== null && this.pc?.evidenceWritten() === true) this.evidence.missingAfterWritten();
     this.carried = account.carried ?? [];
@@ -754,11 +756,16 @@ export class DeviceStore {
    * The one final admission guard (G3, rule R1), asked in the commit turn of every admission and widening: false while
    * the PC fails closed or is locked, and while a block or a freeze stands that `key` is newer than. Newer is decided
    * on this PC by admission order: a key with no row here, or a row with no place in the order, counts as newer.
+   * Holds and account removals always deny the key; only a pairing on this PC can end a local Revoke (P13).
    */
-  admits(key: string | undefined, confirm?: ConfirmProof): boolean {
+  admits(key: string | undefined, confirm?: ConfirmProof, options?: { pairingHere?: boolean }): boolean {
     if (this.failsClosed) return false;
     const state = this.safety?.state();
     if (state === undefined) return true;
+    if (key !== undefined) {
+      if (this.accountHeld?.(key) || this.removedByAccount(key)) return false;
+      if (!options?.pairingHere && (this.isTombstoned(key) || (this.evidence?.standingRevokes(key).length ?? 0) > 0)) return false;
+    }
     // only a proof admitConfirmed minted from a live reservation counts: a hand-built one passes nothing
     const confirmed = confirm !== undefined && MINTED_PROOFS.has(confirm) && key !== undefined && confirm.key === key;
     // a locked PC admits only the key approved on its own screen (P11); a recover admit is ended by the lock (P22)
@@ -819,7 +826,8 @@ export class DeviceStore {
     if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || reserved === undefined || this.codeOver(pending, now)) return null;
     const proof: ConfirmProof = { codeId: confirm.codeId, key: confirm.key, source: confirm.source };
     MINTED_PROOFS.add(Object.freeze(proof));
-    if (!this.admits(confirm.key, proof)) return null;
+    const pairingHere = confirm.source === "screen";
+    if (!this.admits(confirm.key, proof, { pairingHere })) return null;
     // a Revoke that stands keeps the key out unless this confirm names it (P13)
     const revokes = this.evidence?.standingRevokes(confirm.key) ?? [];
     if (revokes.some((revoke) => !(confirm.unrevokes ?? []).includes(revoke.id))) return null;
@@ -839,7 +847,7 @@ export class DeviceStore {
       return { id: existing.id, label: existing.label, role: existing.role };
     }
     const device: StoredDevice = { id: randomBytes(8).toString("hex"), label: normalizeLabel(confirm.label, "Device"), role: "drive", token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: confirm.key, created_at: new Date(now).toISOString(), last_seen_at: null, origin };
-    this.enroll(device, now, [], true, { confirm: proof, ...(confirm.by === undefined ? {} : { by: confirm.by }) });
+    this.enroll(device, now, [], true, { confirm: proof, pairingHere, ...(confirm.by === undefined ? {} : { by: confirm.by }) });
     if (revokes.length > 0) this.clearTombstone(confirm.key);
     return { id: device.id, label: device.label, role: device.role };
   }
@@ -1054,13 +1062,15 @@ export class DeviceStore {
       ...(how.noAccountOnly === true && account !== undefined ? { named: { account } } : {}),
       ...(how.noAccountOnly === true && issuedUnder !== undefined ? { issuedUnder } : {}),
     };
-    // the code ends on the store's own clock when its ten minutes are over, not at the next look (T71)
-    const pending = this.pending;
-    pending.cancelExpiry = this.clock.setTimeout(() => {
-      if (this.pending !== pending) return;
-      pending.over = true;
-      this.expirePending();
-    }, CODE_TTL_MS + 1);
+    if (this.safety !== null) {
+      // the code ends on the store's own clock when its ten minutes are over, not at the next look (T71)
+      const pending = this.pending;
+      pending.cancelExpiry = this.clock.setTimeout(() => {
+        if (this.pending !== pending) return;
+        pending.over = true;
+        this.expirePending();
+      }, CODE_TTL_MS + 1);
+    }
     const started = { code, expires_at: new Date(this.pending.expires).toISOString() };
     for (const listener of this.codeStarts) listener();
     return started;
@@ -1522,9 +1532,9 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof; by?: string } = {}): void {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof; by?: string; pairingHere?: boolean } = {}): void {
     // the final guard, in the commit turn: nothing waits between it and the write
-    if (!this.admits(admitting.relay_public_key, path.confirm)) throw new AdmissionRefusedError();
+    if (!this.admits(admitting.relay_public_key, path.confirm, path)) throw new AdmissionRefusedError();
     const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
     // with the flag on a row is stamped after everything this store ordered before it (T26, P13)
     const device = this.evidence === null ? admitted : { ...admitted, created_at: this.nextStamp(Date.parse(admitted.created_at)) };
@@ -1548,7 +1558,8 @@ export class DeviceStore {
    * key new to this PC (isNewKey).
    */
   pairRelay(code: string, label: string, publicKey: string, now = Date.now(), admit?: () => boolean): { device: DeviceMatch } | null {
-    if (!this.admits(publicKey)) return null;
+    const pairingHere = this.pending?.remote === false;
+    if (!this.admits(publicKey, undefined, { pairingHere })) return null;
     this.assertRelayPairing("code", now);
     // a code made for a PC in no account makes no device: the one that pairs with it waits to link
     const waiting = this.pending?.waiting;
@@ -1564,8 +1575,6 @@ export class DeviceStore {
     // On a PC in no account such a code may bring back a key this PC revoked itself, as before account linking;
     // never one the account removed
     const accountless = this.account() === null;
-    // with the release flag on only a key confirm on this PC's screen naming it ends a local Revoke (P13): no code does
-    if (this.evidence !== null && this.evidence.standingRevokes(publicKey).length > 0) { this.noteRelayFailure("code", now); return null; }
     const refusedKey = accountless ? this.removedByAccount(publicKey) : this.isTombstoned(publicKey);
     if ((remote && (this.accountError !== null || refusedKey)) || (this.pending?.memberRequired && (startedBy === null || !this.isAccountApprover(startedBy)))) {
       this.noteRelayFailure("code", now);
@@ -1578,7 +1587,7 @@ export class DeviceStore {
     if (admit && this.isNewKey(publicKey) && !admit()) return null;
     // the starter's approval stands only while it is still a member of the account it approved for
     const approvedIn = startedBy !== null && this.pending?.approvedIn !== undefined && this.approverAccount(startedBy) === this.pending.approvedIn ? this.pending.approvedIn : undefined;
-    const paired = this.enrollRelay(label, publicKey, now, true, undoesRevoke ? {} : { addedBy: startedBy ?? undefined, approvedIn });
+    const paired = this.enrollRelay(label, publicKey, now, true, undoesRevoke ? { pairingHere } : { addedBy: startedBy ?? undefined, approvedIn, pairingHere });
     if (!remote || accountless) this.clearTombstone(publicKey);
     return paired;
   }
@@ -1634,16 +1643,17 @@ export class DeviceStore {
    * a key new to this PC, false makes no device and counts no failure.
    */
   pairRelayApproved(label: string, publicKey: string, approval: { path: PairingPath; addedBy?: string; id?: string }, now = Date.now(), admit?: () => boolean): { device: DeviceMatch } | null {
-    if (!this.admits(publicKey)) return null;
+    const pairingHere = approval.addedBy === undefined;
+    if (!this.admits(publicKey, undefined, { pairingHere })) return null;
     this.assertRelayPairing(approval.path, now);
     if (!isRelayPublicKey(publicKey)) { this.noteRelayFailure(approval.path, now); return null; }
     // an approver revoked or demoted while the device waited approves nothing
     if (approval.addedBy !== undefined && !this.isAccountApprover(approval.addedBy)) { this.noteRelayFailure(approval.path, now); return null; }
-    // only this PC lets a key removed through the account back in
+    // Legacy account-member approvals never take a tombstoned key.
     if (approval.addedBy !== undefined && (this.accountError !== null || this.isTombstoned(publicKey))) { this.noteRelayFailure(approval.path, now); return null; }
     if (approval.id !== undefined && this.has(approval.id)) { this.noteRelayFailure(approval.path, now); return null; }
     if (admit && this.isNewKey(publicKey) && !admit()) return null;
-    const paired = this.enrollRelay(label, publicKey, now, false, { addedBy: approval.addedBy, approvedIn: approval.addedBy === undefined ? undefined : this.approverAccount(approval.addedBy) ?? undefined, digits: true }, approval.id);
+    const paired = this.enrollRelay(label, publicKey, now, false, { addedBy: approval.addedBy, approvedIn: approval.addedBy === undefined ? undefined : this.approverAccount(approval.addedBy) ?? undefined, digits: true, pairingHere }, approval.id);
     // written after the row, so a stop between the two leaves a row newer than its tombstone: the next start ends that
     // Revoke (finishInterruptedWrites, or with the flag on RemovalEvidence.takeIn)
     if (approval.addedBy === undefined) this.clearTombstone(publicKey);
@@ -1692,7 +1702,7 @@ export class DeviceStore {
     return this.isAccountApprover(id) ? this.devices.find((d) => d.id === id)?.account ?? null : null;
   }
 
-  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } {
+  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } {
     const device: StoredDevice = {
       id, label: normalizeLabel(label, "Device"), role: "drive",
       token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: publicKey,
@@ -1702,7 +1712,7 @@ export class DeviceStore {
       // what a later link reads to tell a member's approval from a code a device outside the account started
       ...(addedBy !== undefined && approvedIn !== undefined ? { member_approved_in: approvedIn } : {}),
     };
-    this.enroll(device, now, [], codeSpent, { ...(digits === undefined ? {} : { digits }) });
+    this.enroll(device, now, [], codeSpent, { ...(digits === undefined ? {} : { digits }), pairingHere });
     return { device: { id: device.id, label: device.label, role: device.role } };
   }
 
@@ -1744,7 +1754,8 @@ export class DeviceStore {
     if (candidateIndex !== -1) {
       const { device: candidate, origin } = this.unconfirmedFirstPairs[candidateIndex]!;
       if (!this.admits(undefined)) return null;
-      const confirmed = this.admitted({ ...candidate, last_seen_at: new Date(now).toISOString() }, now);
+      const admitted = this.admitted({ ...candidate, last_seen_at: new Date(now).toISOString() }, now);
+      const confirmed = this.safety === null ? admitted : { ...admitted, created_at: this.nextStamp(Date.parse(admitted.created_at)) };
       this.journalAdmission(confirmed);
       const next = [...this.devices, confirmed];
       const gate = this.gateClosedAt ?? confirmed.created_at;
