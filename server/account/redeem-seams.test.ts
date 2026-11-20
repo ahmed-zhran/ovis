@@ -239,4 +239,14 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     expect(ends).toEqual([codeId]);
     expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
   });
+
+  test("P24, T70: a key admitted by ovis recover is journalled as a recovery, by the OS user who ran it", async () => {
+    const at = dir();
+    const devices = store(at);
+    const k = await key();
+    const { codeId } = devices.redeemCode(devices.startPairing().code, "code", k) as { codeId: string };
+    devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "recover", by: "alice" });
+    const entries = (JSON.parse(readFileSync(join(at, "device-journal.json"), "utf8")) as { entries: { kind: string; how: string; by: string | null }[] }).entries;
+    expect(entries.filter((entry) => entry.kind === "admit")).toEqual([expect.objectContaining({ how: "recover", by: "alice" })]);
+  });
 });
