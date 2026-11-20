@@ -92,6 +92,12 @@ export class AdmissionOrder {
   }
 
   /** Ends the one-time legacy stamping: the rows went to disk first, so a stop in between stamps them again, not twice. */
+  /** A folder whose rows already carry numbers lost its order file: damage, not a fresh count (P21, S19). */
+  missingBeside(): void {
+    (this as { fresh: boolean }).fresh = false;
+    this.problem = `${this.path} is missing beside rows this PC numbered`;
+  }
+
   settleFresh(): void {
     if (!this.fresh || this.problem !== null) return;
     writePrivateState(this.path, { v: 1, next_admit: this.nextAdmit });
@@ -101,6 +107,8 @@ export class AdmissionOrder {
   /** The origin of a row being admitted now; its number is on disk before the row is, so none is ever used twice. */
   admit(from: OriginFrom, how: OriginHow, by: string | null, now: number): RowOrigin {
     if (this.problem !== null) throw new Error(this.strict!);
+    // nothing is numbered before the one-time legacy pass has run (T50): it decides where the count starts
+    if (this.fresh) throw new Error(`${this.path}: the rows from before the upgrade are not stamped yet`);
     const admitNo = this.nextAdmit;
     writePrivateState(this.path, { v: 1, next_admit: admitNo + 1 });
     this.nextAdmit = admitNo + 1;

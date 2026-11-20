@@ -190,5 +190,13 @@ describe("one admission order per PC (origin and admit_no)", () => {
     expect(reopened.pairRelay(reopened.startPairing().code, "New", (await key()))).toBeNull();
     expect(rows(dir).every((row) => row.origin?.from !== "legacy")).toBe(true);
   });
+
+  test("T50: nothing is numbered before the one-time legacy pass has run", () => {
+    const order = AdmissionOrder.open(stateDir());
+    expect(order.fresh).toBe(true);
+    expect(() => order.admit("remote", "code", null, Date.now())).toThrow();
+    order.settleFresh();
+    expect(order.admit("remote", "code", null, Date.now()).admit_no).toBe(1);
+  });
 });
 

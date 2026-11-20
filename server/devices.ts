@@ -550,6 +550,8 @@ export class DeviceStore {
    */
   private stampLegacy(): void {
     if (!this.admissions?.fresh || this.error !== null) return;
+    // a row numbered here means this folder had an order file: its loss is damage, and nothing is stamped (P21)
+    if (this.devices.some((d) => d.origin !== undefined && d.origin.from !== "legacy")) { this.admissions.missingBeside(); return; }
     if (this.devices.some((d) => d.origin === undefined)) {
       const next = this.devices.map((d) => d.origin === undefined ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
       this.save(next);
