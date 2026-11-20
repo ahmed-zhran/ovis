@@ -105,8 +105,8 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(log.strict).not.toBeNull();
   });
 
-  test("T51: a block that finds the waiting queue full fails the PC closed", async () => {
-    const { devices, log } = pc();
+  test("P19, S19: a full waiting queue fails the PC closed across a restart", async () => {
+    const { dir, devices, log } = pc();
     const signer = await member(devices);
     const absent = await key();
     for (let i = 0; i < WAITING_MAX; i += 1) {
@@ -116,8 +116,18 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(log.waitingBlocks()).toHaveLength(WAITING_MAX);
     expect(devices.failsClosed).toBe(false);
 
-    await devices.applyBlock(await block(absent.spki, signer), "mailbox");
+    const overflow = await block((await key()).spki, signer);
+    expect(await devices.applyBlock(overflow, "mailbox")).toEqual({ outcome: "refused", id: overflow.id, reason: "record_invalid" });
     expect(devices.failsClosed).toBe(true);
+
+    log.close();
+    const reopened = open(dir);
+    try {
+      expect(reopened.devices.failsClosed).toBe(true);
+      expect(reopened.log.strict).not.toBeNull();
+    } finally {
+      reopened.log.close();
+    }
   });
 
   test("T51: a pairing whose row a waiting block removes still spends its code", async () => {
