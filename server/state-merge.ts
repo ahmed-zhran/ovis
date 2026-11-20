@@ -91,7 +91,7 @@ const earliest = (values: (string | null | undefined)[]): string | null =>
  */
 export function mergeRegistries(own: Registry | null, other: Registry | null,
   bases: { own: ReadonlySet<string> | null; other: ReadonlySet<string> | null },
-  incomplete: { own: boolean; other: boolean } = { own: false, other: false }, perDirOrigins = false): Registry {
+  incomplete: { own: boolean; other: boolean } = { own: false, other: false }): Registry {
   const mine = own?.devices ?? [];
   const theirs = other?.devices ?? [];
   const theirIds = new Set(theirs.map((device) => device.id));
@@ -115,13 +115,13 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // link undoes it. Otherwise the kept copy's mark, or, where both copies are in that account, the other's when the
     // kept one has none: a vouched mark goes with its own account only. Only a missing mark is none
     const { joined_by: own, origin: ownOrigin, ...rest } = device;
-    // with the release flag on this dir keeps its own origin for the key it admitted; only a copy that carries another
-    // origin, or another key, takes it away: a copy with none erases nothing (P22, T27 in 2d). With it off this dir's
-    // own copy is kept, as main does
+    // this dir keeps its own origin for the key it admitted; only a copy that carries another origin, or another key,
+    // takes it away: a copy with none erases nothing, and the sibling's never comes here (P22, T27 in 2d). Main never
+    // writes an origin, so this holds with the release flag off too
     const mergedKey = takes ? twin.relay_public_key : device.relay_public_key;
-    const origin = !perDirOrigins ? ownOrigin : keptOrigin(device, twin, mergedKey);
+    const origin = keptOrigin(device, twin, mergedKey);
     // a key this dir never held is no row of its own here: its one-time legacy pass never stamps it (T50)
-    const notOwnKey = perDirOrigins && mergedKey !== device.relay_public_key;
+    const notOwnKey = mergedKey !== device.relay_public_key;
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -145,9 +145,9 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // revoked here since the last merge
     if (myIds.has(device.id) || own !== null && !incomplete.own && bases.own?.has(device.id)) continue;
     // a row only the other dir holds has no place in this dir's order, and is marked as no row of this dir's own, so
-    // this dir's one-time legacy pass never stamps it (with the release flag on; T50)
+    // this dir's one-time legacy pass never stamps it (T50)
     const { origin: _elsewhere, ...copied } = device;
-    devices.push(perDirOrigins ? { ...copied, imported: true } : device);
+    devices.push({ ...copied, imported: true });
   }
   // every piece of evidence that either side was ever gated keeps the merge gated
   const gate = earliest([own?.gate_closed_at, other?.gate_closed_at, ...mine.map((d) => d.created_at), ...theirs.map((d) => d.created_at)]);
@@ -251,7 +251,7 @@ function keptOrigin(copy: StoredDevice, other: StoredDevice, key: string | undef
   return other.relay_public_key === key && own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
 }
 
-function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date, perDirOrigins: boolean): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
+function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
   const ownPath = join(active, "devices.json");
   const otherPath = join(sibling, "devices.json");
   const baseOf = (dir: string, path: string): ReadonlySet<string> | null => {
@@ -281,12 +281,12 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
     }
     return { blocked: null, ids: [], changed: 0 };
   }
-  const merged = mergeRegistries(mine, theirs, bases, { own: ownIncomplete, other: otherIncomplete }, perDirOrigins);
-  // with the release flag on the sibling's file is its own word on its own rows: a row only it held keeps its origin
+  const merged = mergeRegistries(mine, theirs, bases, { own: ownIncomplete, other: otherIncomplete });
+  // the sibling's file is its own word on its own rows: a row only it held keeps its origin
   // and mark there, a twin the origin both copies agree on, and a row only this dir held is a copy there (P22, T50)
   const myCopy = new Map((mine?.devices ?? []).map((device) => [device.id, device]));
   const theirCopy = new Map((theirs?.devices ?? []).map((device) => [device.id, device]));
-  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin: _here, imported: _marked, ...device }) => {
+  const otherMerged = { ...merged, devices: merged.devices.map(({ origin: _here, imported: _marked, ...device }) => {
     const copy = theirCopy.get(device.id);
     if (copy === undefined) return { ...device, imported: true as const };
     const mineToo = myCopy.get(device.id);
@@ -526,11 +526,11 @@ function mergePush(active: string, sibling: string, base: MergeRecord | null, st
   }
 }
 
-export function mergeSiblingState(active: string, sibling: string, now = new Date(), perDirOrigins = false): SiblingMerge {
+export function mergeSiblingState(active: string, sibling: string, now = new Date()): SiblingMerge {
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   let blocked: string | null;
   try {
-    blocked = merge(active, sibling, now, stamp, perDirOrigins);
+    blocked = merge(active, sibling, now, stamp);
   } catch (error) {
     // whatever went wrong, the server still starts, gated: a start that failed would fall back to an older release
     blocked = `Cannot merge the state of ${sibling} into ${active} (${error instanceof Error ? error.message : String(error)}). External access without a token or trusted Tailscale login remains blocked; restart the server once it is fixed.`;
@@ -539,7 +539,7 @@ export function mergeSiblingState(active: string, sibling: string, now = new Dat
   return { devicesBlocked: blocked };
 }
 
-function merge(active: string, sibling: string, now: Date, stamp: string, perDirOrigins: boolean): string | null {
+function merge(active: string, sibling: string, now: Date, stamp: string): string | null {
   const pair = [realpath(active), realpath(sibling)].sort();
   let base: MergeRecord | null;
   try {
@@ -561,7 +561,7 @@ function merge(active: string, sibling: string, now: Date, stamp: string, perDir
     try { writePrivateState(join(sibling, RECORD), intent); } catch {}
     return null;
   };
-  const devices = mergeDevices(active, sibling, base, stamp, intend, now, perDirOrigins);
+  const devices = mergeDevices(active, sibling, base, stamp, intend, now);
   const written = intent as MergeRecord | null;
   const preferences = mergePreferences(active, sibling, base, stamp);
   const push = mergePush(active, sibling, base, stamp);

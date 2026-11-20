@@ -108,7 +108,6 @@ export class AdmissionOrder {
     return { from: "legacy", how: "legacy", by: null, admit_no: 0, at: createdAt };
   }
 
-  /** Ends the one-time legacy stamping: the rows went to disk first, so a stop in between stamps them again, not twice. */
   /** A folder whose rows already carry numbers lost its order file: damage, not a fresh count (P21, S19). */
   missingBeside(): void {
     (this as { fresh: boolean }).fresh = false;
@@ -121,6 +120,7 @@ export class AdmissionOrder {
     this.problem = `The rows from before the upgrade could not be stamped in ${this.path} (${error instanceof Error ? error.message : String(error)})`;
   }
 
+  /** Ends the one-time legacy stamping: the rows went to disk first, so a stop in between stamps them again, not twice. */
   settleFresh(): void {
     if (!this.fresh || this.problem !== null) return;
     writePrivateState(this.path, { v: 1, next_admit: this.nextAdmit });

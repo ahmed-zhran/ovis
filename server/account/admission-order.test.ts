@@ -134,14 +134,14 @@ describe("one admission order per PC (origin and admit_no)", () => {
     // (P22, T27 in 2d)
     const other = { ...at(newer), origin: { ...at(newer).origin!, admit_no: 9 } };
     const onlyThere = { ...at(caller), id: randomBytes(8).toString("hex") };
-    const merged = mergeRegistries({ gate_closed_at: null, devices: [at(caller), at(newer)] }, { gate_closed_at: null, devices: [at(caller), other, onlyThere] }, { own: null, other: null }, undefined, true);
+    const merged = mergeRegistries({ gate_closed_at: null, devices: [at(caller), at(newer)] }, { gate_closed_at: null, devices: [at(caller), other, onlyThere] }, { own: null, other: null });
     expect(merged.devices.find((d) => d.id === caller)?.origin).toEqual(at(caller).origin);
     expect(merged.devices.find((d) => d.id === newer)?.origin).toBeUndefined();
     expect(merged.devices.find((d) => d.id === onlyThere.id)?.origin).toBeUndefined();
     // a copy linked later in the other folder brings a key this folder never admitted: the row keeps no origin here,
     // so that key reaches no row admitted in between (P22: an origin describes the key the row holds)
     const relinked = { ...at(caller), relay_public_key: "moved-key", account: "acct", linked_at: new Date(Date.now() + 1000).toISOString(), link_moved_key: true };
-    const taken = mergeRegistries({ gate_closed_at: null, devices: [at(caller)] }, { gate_closed_at: null, devices: [relinked] }, { own: null, other: null }, undefined, true).devices[0]!;
+    const taken = mergeRegistries({ gate_closed_at: null, devices: [at(caller)] }, { gate_closed_at: null, devices: [relinked] }, { own: null, other: null }).devices[0]!;
     expect(taken.relay_public_key).toBe("moved-key");
     expect(taken.origin).toBeUndefined();
   });
@@ -171,7 +171,7 @@ describe("one admission order per PC (origin and admit_no)", () => {
     const ours = { ...legacyRow(at), origin: { from: "remote" as const, how: "code" as const, by: null, admit_no: 3, at } };
     const claimed = { ...ours, origin: { from: "legacy" as const, how: "legacy" as const, by: null, admit_no: 0, at } };
     const stranger = { ...legacyRow(at), origin: claimed.origin };
-    const merged = mergeRegistries({ gate_closed_at: null, devices: [ours] }, { gate_closed_at: null, devices: [claimed, stranger] }, { own: null, other: null }, undefined, true);
+    const merged = mergeRegistries({ gate_closed_at: null, devices: [ours] }, { gate_closed_at: null, devices: [claimed, stranger] }, { own: null, other: null });
     expect(merged.devices.find((d) => d.id === ours.id)?.origin).toBeUndefined();
     expect(merged.devices.find((d) => d.id === stranger.id)?.origin).toBeUndefined();
     // (c) after the pass every admission takes a number of its own, and a row added by hand later is never stamped

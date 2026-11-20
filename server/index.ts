@@ -257,7 +257,7 @@ export function createServer(
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   const opensAll = provided.accountOpensAll ?? accountOpensAll();
   const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
-  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir, undefined, opensAll) : null;
+  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir) {
     try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
