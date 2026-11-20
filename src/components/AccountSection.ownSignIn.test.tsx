@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
+import { relayDevice, relayFixture } from "../../server/relay/test-helpers.ts";
 import { FakeAccountService } from "../../shared/account-service-fake.ts";
 import { accountDeviceId, newRecordId, readAccountRecord } from "../../shared/account-records.ts";
 import { exportPublicKey, generateKeyPair, importPublicKey } from "../../shared/relay-e2ee.ts";
@@ -39,6 +40,13 @@ describe("signing in on the PC's own window", () => {
   let enrollments: number;
   let lostClaimResponses: number;
   let loseGrantOnly: boolean;
+  let pc: ReturnType<typeof relayFixture> | null;
+  let claimRefusal: Response | null;
+  let missingAccountAnswer: boolean;
+  let statusAfterClaim: "fail" | "empty" | null;
+  let loseEnrollAck: boolean;
+  let memberKey: string;
+  let challenges: number;
   /** holds the code's exchange until released, and says when it was asked */
   let exchange: { asked: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | null;
 
@@ -55,6 +63,13 @@ describe("signing in on the PC's own window", () => {
     enrollments = 0;
     lostClaimResponses = 0;
     loseGrantOnly = false;
+    pc = null;
+    claimRefusal = null;
+    missingAccountAnswer = false;
+    statusAfterClaim = null;
+    loseEnrollAck = false;
+    memberKey = "";
+    challenges = 0;
     exchange = null;
     for (const key of ["window", "document", "navigator", "indexedDB", "getComputedStyle", "location", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -82,14 +97,24 @@ describe("signing in on the PC's own window", () => {
       querySelector: (selector: string) => selector === 'meta[name="ovis-pc-account-service"]' ? { getAttribute: () => SERVICE } : null,
       addEventListener: () => {}, removeEventListener: () => {},
     } });
+    const network = globalThis.fetch;
     const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input instanceof Request ? input.url : input), `http://127.0.0.1:${PORT}`);
       if (url.origin !== SERVICE) {
+        if (pc && (url.pathname === "/api/account/first-member/challenge" || url.pathname === "/api/account/status" || (url.pathname === "/api/relay/link" && init?.method !== "POST"))) {
+          const origin = `http://127.0.0.1:${pc.app.port}`;
+          const headers = new Headers(init?.headers);
+          headers.set("origin", origin);
+          return network(origin + url.pathname, { ...init, headers });
+        }
         if (firstMember === "available" && url.pathname === "/api/account/first-member/challenge") {
+          challenges++;
+          if (pcAccount && !enrolling) return Response.json({ error: { code: "in_account" } }, { status: 409 });
           challenge = newRecordId();
           return Response.json({ challenge });
         }
         if (firstMember === "available" && url.pathname === "/api/account/first-member") {
+          if (claimRefusal) return claimRefusal;
           const body = JSON.parse(String(init?.body));
           const proof = await (await fake.fetch(SERVICE + "/v1/session", { headers: { authorization: `Bearer ${body.token}` } })).json();
           const lost = lostClaimResponses > 0;
@@ -102,19 +127,27 @@ describe("signing in on the PC's own window", () => {
           const key = await indexedAccountStore.key();
           if (record?.kind !== "link" || record.id !== challenge || record.server_id !== SERVER || record.signer !== key.public_spki) return new Response(null, { status: 400 });
           pcAccount = record.account;
+          memberKey = key.public_spki;
           enrolling = true;
           if (lost && !loseGrantOnly) throw new TypeError("claim response lost");
           return Response.json({ device: { id: accountDeviceId(SERVER, key.public_spki), label: "Linux · Chrome", role: "drive" } }, { headers: lost ? {} : { "x-ovis-first-enroll": "for-this-window" } });
         }
         if (url.pathname === "/api/account/enroll" && enrolling && new Headers(init?.headers).get("x-ovis-first-enroll") === "for-this-window") {
           enrollments++; enrolling = false;
+          if (loseEnrollAck) throw new TypeError("last enrollment response lost");
           return Response.json({ results: [] });
         }
         if (url.pathname === "/api/relay/link" && init?.method !== "POST") return Response.json({ url: OFFER });
         if (url.pathname === "/api/health") return Response.json({ ok: true, bridge_protocol: 1, own_window: { port: PORT }, auth: { required: false, authenticated: true, via: "local", role: "drive" } });
         if (url.pathname === "/api/relay") return Response.json({ phase: relayPhase, relay: "wss://relay.ovis.example", app: "https://app.ovis.example", sessions: 0, blocked: null, error: null });
-        if (url.pathname === "/api/account/status") return Response.json({ account: pcAccount, enrolling, unlinked: [], removals: [], adds: [], blocked: [] });
-        if (url.pathname === "/api/devices") return Response.json({ devices: pcAccount ? [{ id: "first", label: "Study browser", role: "drive", current: false }] : [] });
+        if (url.pathname === "/api/account/status") {
+          if (claimRefusal?.bodyUsed && missingAccountAnswer) return Response.json({});
+          const issue = pcAccount && statusAfterClaim;
+          if (issue) statusAfterClaim = null;
+          if (issue === "fail") throw new TypeError("membership response lost");
+          return Response.json({ account: issue === "empty" ? null : pcAccount, enrolling, unlinked: [], removals: [], adds: [], blocked: [] });
+        }
+        if (url.pathname === "/api/devices") return Response.json({ devices: pcAccount ? [{ id: accountDeviceId(SERVER, memberKey), account: pcAccount, account_key: memberKey, label: "Study browser", role: "drive", current: false }] : [] });
         if (url.pathname === "/api/relay/link") { links++; return Response.json({ url: OFFER }); }
         if (url.pathname === "/api/relay/link/close") return Response.json({ ok: true });
         return Response.json({ error: { code: "not_found", message: "no such route" } }, { status: 404 });
@@ -129,6 +162,7 @@ describe("signing in on the PC's own window", () => {
 
   afterEach(async () => {
     await act(async () => { renderer?.unmount(); });
+    pc?.close();
     renderer = undefined;
     setTransport(nativeTransport);
     mock.restore();
@@ -212,6 +246,40 @@ describe("signing in on the PC's own window", () => {
     expect(fake.pcs("acct_google")).toEqual([]);
   });
 
+  for (const issue of ["failed read", "late membership", "lost enroll acknowledgment", "different member"] as const) it(`recovers a lost claim with ${issue}`, async () => {
+    firstMember = "available";
+    lostClaimResponses = 1;
+    statusAfterClaim = issue === "failed read" ? "fail" : issue === "late membership" ? "empty" : null;
+    loseEnrollAck = issue === "lost enroll acknowledgment" || issue === "different member";
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Continue with Google"));
+    await press("Continue with Google");
+    const stop = handOverReturn(await back(await sent.promise), () => undefined);
+    const done = () => words().includes("This PC is in your account.");
+    try {
+      await until(() => buttons().includes("Try again") || words().includes("This PC could not be listed"));
+      const retry = issue === "late membership" ? "Add this PC to my account" : "Try again";
+      expect(buttons()).toContain(retry);
+      if (loseEnrollAck) {
+        expect(enrolling).toBe(false);
+        expect((await indexedAccountStore.get("enrolls"))?.[SERVER]?.account).toBe("acct_google");
+      }
+      if (issue === "different member") memberKey = publicKey;
+      await press(retry);
+      await until(() => done() || buttons().includes("Try again") || words().includes("Not finished yet"));
+      if (issue === "different member") {
+        expect(done()).toBe(false);
+        expect((await indexedAccountStore.get("enrolls"))?.[SERVER]).toBeDefined();
+      } else {
+        expect(done()).toBe(true);
+        expect(enrollments).toBe(1);
+        expect((await indexedAccountStore.get("enrolls"))?.[SERVER]).toBeUndefined();
+      }
+      expect(challenges).toBe(2);
+      expect(links).toBe(0);
+    } finally { stop(); }
+  });
+
   for (const lost of [false, true]) it(`lists nothing after a device-code refusal (response lost: ${lost})`, async () => {
     firstMember = "available";
     lostClaimResponses = lost ? 1 : 0;
@@ -242,7 +310,7 @@ describe("signing in on the PC's own window", () => {
     expect(words()).not.toContain("Signed in. Adding this PC to your account…");
   });
 
-  it("offers the providers and completes sign-in, but lists nothing when the PC has no first-member route", async () => {
+  it("offers the providers and lists after sign-in when the PC has no first-member route", async () => {
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
     await until(() => words().includes("Signing in adds this PC to your account."));
     expect(buttons()).toContain("Continue with Google");
@@ -251,11 +319,42 @@ describe("signing in on the PC's own window", () => {
     const start = await sent.promise;
     expect(new URL(start).searchParams.get("redirect_uri")).toBe(`http://127.0.0.1:${PORT}/callback`);
     const stop = handOverReturn(await back(start), () => undefined);
-    try { await until(() => words().includes("This PC could not be listed in your account. Try again.")); }
+    try { await until(() => words().includes("This PC could not be listed") || buttons().includes("Stop waiting")); }
     finally { stop(); }
     expect((await indexedAccountStore.get("session"))?.provider).toBe("google");
-    expect(fake.pcs("acct_google")).toEqual([]);
-    expect(links).toBe(0);
+    expect(buttons()).toContain("Stop waiting");
+    expect(fake.pcs("acct_google").map(pc => pc.server_id)).toEqual([SERVER]);
+    expect(links).toBe(1);
+  });
+
+  const pressSignedInAdd = async () => {
+    await indexedAccountStore.set("session", { account: "acct_existing", provider: "github", service: SERVICE,
+      access_token: fake.issueToken("acct_existing"), refresh_token: "refresh", expires_at: Date.now() + 3_600_000 });
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Add this PC to my account"));
+    await press("Add this PC to my account");
+    await until(() => buttons().includes("Stop waiting") || buttons().includes("Turn on the relay and add this PC") || words().includes("This PC could not be listed"));
+  };
+
+  for (const paired of [true, false]) it(paired ? "lists a paired PC in no account after its challenge is refused" : "offers to turn on the relay after GET /api/relay/link answers relay_off", async () => {
+    pc = relayFixture(false, { accountOpensAll: false });
+    if (paired) await relayDevice(pc);
+    await pressSignedInAdd();
+    expect(buttons()).toContain(paired ? "Stop waiting" : "Turn on the relay and add this PC");
+    expect(links).toBe(paired ? 1 : 0);
+    expect(fake.pcs("acct_existing").map(row => row.server_id)).toEqual(paired ? [SERVER] : []);
+  });
+
+  for (const reply of ["coded 409", "unreadable 409", "coded 503", "409 then missing account field"] as const) it(`handles a ${reply} claim response with no account`, async () => {
+    firstMember = "available";
+    missingAccountAnswer = reply === "409 then missing account field";
+    claimRefusal = reply === "unreadable 409" ? new Response("unreadable", { status: 409 })
+      : Response.json({ error: { code: "in_account" } }, { status: reply === "coded 503" ? 503 : 409 });
+    await pressSignedInAdd();
+    const listed = reply === "coded 409";
+    expect(buttons()).toContain(listed ? "Stop waiting" : "Add this PC to my account");
+    expect(links).toBe(listed ? 1 : 0);
+    expect(fake.pcs("acct_existing").map(row => row.server_id)).toEqual(listed ? [SERVER] : []);
   });
 
   it("offers the provider's page as a link when the tab was blocked, and keeps no sign-in cancelled while its code was exchanged", async () => {

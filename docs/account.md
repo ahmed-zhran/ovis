@@ -474,10 +474,32 @@ only what the prompt says and which failure count a comparison spends.
 
 ## PC API
 
-All under `/api/account/`, JSON, `cache-control: no-store`. Every route needs drive access; through
+The account routes are under `/api/account/`, JSON, `cache-control: no-store`. Every route needs drive access; through
 the relay too. Mutations need the app's mutation guard, like the other routes. A device that waits
 to link ([Who may admit a device](#who-may-admit-a-device)) reaches its own status and its link,
 and nothing else.
+
+**Adding the first member from this PC's own window** (with account-opens-all off):
+
+- `POST /api/account/first-member/challenge` `{ "label": "Study browser" }` returns `{ "challenge": "<nonce>" }`.
+  Only one challenge stands per PC. It is single-use, expires after 60 seconds, and a new one replaces it.
+- `GET /api/relay/link` returns `{ "url": "<code-free relay offer>" }` to the PC's own window. This reads the
+  relay identity used to sign the claim. Unlike `POST /api/relay/link`, it does **not** open a pairing window.
+  An off or blocked relay answers `409 relay_off`.
+- `POST /api/account/first-member` takes `{ "account": "acct_1", "record": <signed link>, "token": "<access token>" }`.
+  Both first-member POSTs require the unforwarded own window, same origin, and `x-herdr-machine: 1`. The link's
+  `id` is the challenge; `key` and `old_key` are the signing key, and `device_id` derives from this PC and that key.
+  The PC checks the bearer with its account service's `GET /v1/session`: same account, `own_sign_in: true`, and a
+  sign-in within ten minutes (up to one minute ahead for clock skew). Failed proof answers `403 own_sign_in_required`.
+  An empty PC adds and journals one drive member and starts its enrollment. A PC with existing rows refuses
+  `409 in_account`, except that the same sole member, while still enrolling, can prove a fresh claim to rotate
+  its grant without writing another row or journal entry. Adding `"recover": true` requests rotation only:
+  it cannot add a row to an empty PC.
+
+Success returns `{ "device": <member> }` and the `x-ovis-first-enroll` response header. The own window sends
+that header on `POST /api/account/enroll`; it is not a relay credential. It expires after ten minutes and no
+longer works after rotation, revocation, or completion of enrollment. A lost claim response is not permission
+to list the PC or open pairing: the window reads membership before deciding whether enrollment can resume.
 
 `GET /api/account/status`
 

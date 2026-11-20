@@ -1,5 +1,7 @@
 import { accountDeviceId, newRecordId, signAccountRecord } from "../../../shared/account-records.ts";
 import { decodeOffer } from "../../../shared/relay-offer.ts";
+import type { PairedDevice } from "../../../shared/protocol.ts";
+import { errorFrom } from "../api.ts";
 import { indexedDeviceStore } from "../relay/device.ts";
 import { deviceLabel } from "../phone.ts";
 import { accountDevice } from "./accountDevice.ts";
@@ -13,10 +15,24 @@ import { PEER_STATUS_MS } from "./join.ts";
 
 /** Deliberately not the selected PC transport: a window's bearer never goes through a relay, a machine proxy or a redirect. */
 const local = (path: string, init?: RequestInit) => fetch(path, { ...init, mode: "same-origin", redirect: "error", cache: "no-store" });
+/** Only a received HTTP refusal becomes an ApiError; an invalid or missing success reply is not a refusal. */
+const checkedLocal = async (path: string, init?: RequestInit) => {
+  const response = await local(path, init);
+  if (!response.ok) throw await errorFrom(path, response);
+  return response;
+};
 export interface FirstEnrollment { readonly account: string; finish(): Promise<void> }
+export interface FirstClaim { readonly serverId: string; readonly id: string }
+
+/** The legacy listing needs an explicit null, not a missing field; reconciliation needs an explicit false. */
+export async function firstMemberMembership() {
+  const status: { account?: unknown; enrolling?: unknown } = await (await checkedLocal("/api/account/status")).json();
+  if (status.account !== null && typeof status.account !== "string") throw new AccountPcError(502, "status_invalid");
+  return { account: status.account, enrolling: typeof status.enrolling === "boolean" ? status.enrolling : undefined };
+}
 
 export async function firstMember(service: AccountService, session: AccountSession, running: () => boolean,
-  attempt: { sent: (id: string) => void } | { recover: string }): Promise<FirstEnrollment> {
+  attempt: { sent: (claim: FirstClaim) => void } | { recover: FirstClaim }): Promise<FirstEnrollment> {
   if (session.service !== pcAccountServiceOf(document, window.isSecureContext)) throw new AccountPcError(409, "account_mismatch");
   const account = session.account;
   const own = async () => {
@@ -27,17 +43,42 @@ export async function firstMember(service: AccountService, session: AccountSessi
   const label = deviceLabel(navigator.userAgent, navigator.maxTouchPoints);
   const base = "/api/account/first-member";
   await own();
-  const { challenge } = await (await post(local, base + "/challenge", { label })).json();
+  if ("recover" in attempt) {
+    const { serverId, id } = attempt.recover;
+    const status = await firstMemberMembership();
+    if (status.account === null) throw new AccountPcError(409, "claim_not_applied");
+    if (status.account !== account) throw new AddPcWaitOver("sign-in");
+    if (status.enrolling !== true) {
+      if (status.enrolling !== false) throw new AccountPcError(409, "account_unavailable");
+      // The final enroll may have committed before its acknowledgment was lost. Account identity alone isn't proof.
+      const { public_spki: key } = await indexedAccountStore.key();
+      const { devices }: { devices: PairedDevice[] } = await (await checkedLocal("/api/devices")).json();
+      if (accountDeviceId(serverId, key) !== id || !devices.some(row => row.id === id && row.account === account && row.account_key === key && row.role === "drive")) {
+        throw new AccountPcError(403, "account_required");
+      }
+      return { account, async finish() {
+        await own();
+        let owned = false;
+        await indexedAccountStore.updateMany(["session", "leaving", "enrolls"], current => {
+          owned = running() && current.session !== undefined && sameSignIn(current.session, session) && current.session.account === account && !Object.values(current.leaving ?? {}).includes(key);
+          if (!owned || current.enrolls?.[serverId]?.account !== account) return current;
+          const { [serverId]: _finished, ...rest } = current.enrolls;
+          return { ...current, enrolls: Object.keys(rest).length ? rest : undefined };
+        });
+        if (!owned) throw new AddPcWaitOver("sign-in");
+      } };
+    }
+  }
+  const { challenge } = await (await post(checkedLocal, base + "/challenge", { label })).json();
   if (typeof challenge !== "string" || !/^[0-9a-f]{32}$/.test(challenge)) throw new AccountPcError(400, "challenge_invalid");
-  const response = await local("/api/relay/link");
-  if (!response.ok) throw new AccountPcError(response.status, "link_unavailable");
+  const response = await checkedLocal("/api/relay/link");
   const offer = decodeOffer((await response.json()).url);
   if (!offer || offer.code || forgedOffer(offer)) throw new AccountPcError(400, "record_invalid");
   const key = await indexedAccountStore.key();
   const device = { ...accountDevice(offer, key), label, account };
   const serverId = offer.server_id;
   const id = accountDeviceId(serverId, key.public_spki);
-  if ("recover" in attempt && attempt.recover !== id) throw new AddPcWaitOver("pc");
+  if ("recover" in attempt && (attempt.recover.serverId !== serverId || attempt.recover.id !== id)) throw new AddPcWaitOver("pc");
   const record = await signAccountRecord({ v: 1, kind: "link", account, key: key.public_spki, signer: key.public_spki, old_key: key.public_spki,
     server_id: serverId, device_id: id, issued_at: new Date().toISOString(), id: challenge }, key.private_key);
   await own();
@@ -50,8 +91,8 @@ export async function firstMember(service: AccountService, session: AccountSessi
     return reserved ? { ...current, linking: { ...current.linking, [link]: serverId } } : current;
   });
   if (!reserved) throw new AddPcWaitOver("sign-in");
-  if ("sent" in attempt) attempt.sent(id);
-  const admitted = await post(local, base, { account, record, token: session.access_token, ...("recover" in attempt ? { recover: true } : {}) }).finally(() =>
+  if ("sent" in attempt) attempt.sent({ serverId, id });
+  const admitted = await post(checkedLocal, base, { account, record, token: session.access_token, ...("recover" in attempt ? { recover: true } : {}) }).finally(() =>
     indexedAccountStore.update("linking", current => {
       const { [link]: _ended, ...rest } = current ?? {};
       return Object.keys(rest).length ? rest : undefined;

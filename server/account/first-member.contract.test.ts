@@ -1,8 +1,10 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, fsyncSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord } from "../../shared/account-records.ts";
 import { FakeAccountService } from "../../shared/account-service-fake.ts";
+import { readDeviceRegistry } from "../devices.ts";
+import { privateStateFs } from "../private-state.ts";
 import { loadRelayIdentity } from "../relay/identity.ts";
 import { relayDevice, relayFixture } from "../relay/test-helpers.ts";
 
@@ -249,4 +251,30 @@ test("a recovery claim never creates a first member on an empty PC", async () =>
   const p = await pc();
   await refused(await p.post(path, { account, record: await p.record(await p.challenge()), token: p.token, recover: true }), 409, "in_account");
   expect(p.devices.list(null)).toEqual([]);
+});
+
+for (const failure of ["open", "write", "full disk"] as const) test(`a first-member journal ${failure} failure leaves no member, grant, barrier or pairing announcement`, async () => {
+  const p = await pc();
+  const journal = join(p.f.stateDir, "first-member-journal.json");
+  if (failure === "open") writeFileSync(journal, "damaged");
+  let full = false;
+  const sync = failure === "full disk" ? spyOn(privateStateFs, "fsyncSync").mockImplementation(fd => {
+    if (full) throw new Error("no space left to flush a new file");
+    fsyncSync(fd);
+  }) : null;
+  const rename = failure !== "open" ? spyOn(privateStateFs, "renameSync").mockImplementation((from, to) => {
+    if (to === journal) { full = failure === "full disk"; throw new Error("journal replacement failed"); }
+    renameSync(from, to);
+  }) : null;
+  const paired: string[] = [];
+  p.devices.onPaired(event => paired.push(event.device_id));
+  try {
+    const res = await p.claim(await p.challenge());
+    const disk = readDeviceRegistry(join(p.f.stateDir, "devices.json"), false);
+    expect({ rows: p.devices.list(null).length, disk: disk.kind === "ok" ? disk.devices.length : disk.kind === "missing" ? 0 : "bad",
+      account: p.devices.account(), enrolling: p.f.app.context.services.accountHolds.enrolling(), grant: res.headers.get("x-ovis-first-enroll"), paired })
+      .toEqual({ rows: 0, disk: 0, account: null, enrolling: false, grant: null, paired: [] });
+    await refused(res, 409, "account_unavailable");
+    expect(p.devices.isTombstoned(p.key)).toBe(false);
+  } finally { rename?.mockRestore(); sync?.mockRestore(); }
 });

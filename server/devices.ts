@@ -37,7 +37,7 @@ import { ownerAccess, type Access } from "./access.ts";
 import { CLEAR_LEGACY_DEVICE_COOKIE, COOKIE_MAX_AGE_SECONDS, DEVICE_COOKIE_CLEARED, deviceCookie, isSecureRequest, noContent, parseCookies } from "./auth.ts";
 import { badRequest, isJsonObject, jsonResponse, setRequestRoute } from "./http.ts";
 import { sameOrigin } from "./machine-security.ts";
-import { privateStateRefusal, writePrivateState } from "./private-state.ts";
+import { preparePrivateState, privateStateRefusal, publishPrivateState, writePrivateState } from "./private-state.ts";
 
 /** How long a pairing code pairs new devices. */
 export const CODE_TTL_MS = 10 * 60_000;
@@ -2143,7 +2143,7 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof; by?: string; pairingHere?: boolean; replaces?: StoredDevice } = {}, signerKey?: string): boolean {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof; by?: string; pairingHere?: boolean; replaces?: StoredDevice; auditFirstMember?: () => void } = {}, signerKey?: string): boolean {
     // the final guard, in the commit turn: nothing waits between it and the write
     if (!this.admits(admitting.relay_public_key, path.confirm, path)) throw new AdmissionRefusedError();
     const initial = this.knowingRemovals(this.admitted(admitting, now, path));
@@ -2166,7 +2166,9 @@ export class DeviceStore {
       entry = this.journalAdmission(device, joined, notice, path.by);
       const next = path.replaces ? this.devices.map(row => row === path.replaces ? device : row) : [...this.devices, device];
       const gate = path.replaces && !this.opensAll() ? this.gateClosedAt : this.gateClosedAt ?? device.created_at;
-      this.save(next, gate);
+      if (path.auditFirstMember) {
+        if (!this.saveFirstMember(next, gate, path.auditFirstMember)) return [];
+      } else this.save(next, gate);
       this.devices = next;
       this.gateClosedAt = gate;
       return [device.id];
@@ -2366,15 +2368,30 @@ export class DeviceStore {
   enrollFirstMember(member: { id: string; key: string; account: string; label: string }): DeviceMatch | null {
     if (this.opensAll() || this.error || this.accountError || this.devices.length !== 0 || this.isTombstoned(member.key)) return null;
     // The flag-on journal implies companion safety files. Keep the same audit format without manufacturing that state.
-    const device = this.enrollRelay(member.label, member.key, Date.now(), false, { pairingHere: true, account: member.account }, member.id)?.device ?? null;
-    if (device === null) return null;
     const journal = DeviceJournal.open(dirname(this.path), undefined, "first-member-journal.json");
-    journal.append({ kind: "account", how: "first member added on this PC", key: member.key, row: member.id,
-      label: normalizeLabel(member.label, "Device"), account: member.account, by: null, no: null });
-    return device;
+    if (journal.strict !== null) return null;
+    return this.enrollRelay(member.label, member.key, Date.now(), false, { pairingHere: true, account: member.account,
+      auditFirstMember: () => journal.append({ kind: "account", how: "first member added on this PC", key: member.key, row: member.id,
+        label: normalizeLabel(member.label, "Device"), account: member.account, by: null, no: null }),
+    }, member.id)?.device ?? null;
   }
 
-  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere, account }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean; account?: string }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {
+  /** Stage the closed, memberless registry first: an audit failure may leave no space to write a rollback. */
+  private saveFirstMember(next: StoredDevice[], gate: string | null, audit: () => void): boolean {
+    const rollback = preparePrivateState(this.path, { gate_closed_at: gate, devices: this.devices });
+    try {
+      this.save(next, gate);
+      try { audit(); }
+      catch {
+        publishPrivateState(rollback, this.path);
+        this.gateClosedAt = gate;
+        return false;
+      }
+      return true;
+    } finally { rmSync(rollback, { force: true }); }
+  }
+
+  private enrollRelay(label: string, publicKey: string, now: number, codeSpent: boolean, { addedBy, approvedIn, digits, pairingHere, account, auditFirstMember }: { addedBy?: string | undefined; approvedIn?: string | undefined; digits?: boolean; pairingHere: boolean; account?: string; auditFirstMember?: () => void }, id = randomBytes(8).toString("hex")): { device: DeviceMatch } | null {
     const device: StoredDevice = {
       id, label: normalizeLabel(label, "Device"), role: "drive",
       token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: publicKey,
@@ -2387,7 +2404,7 @@ export class DeviceStore {
     };
     const enrolled = !codeSpent && addedBy !== undefined && approvedIn !== undefined
       ? this.enrollApproved(device, this.relayKeyOf(addedBy), now)
-      : this.enroll(device, now, [], codeSpent, { ...(digits === undefined ? {} : { digits }), pairingHere });
+      : this.enroll(device, now, [], codeSpent, { ...(digits === undefined ? {} : { digits }), pairingHere, ...(auditFirstMember && { auditFirstMember }) });
     if (!enrolled) return null;
     return { device: { id: device.id, label: device.label, role: device.role } };
   }

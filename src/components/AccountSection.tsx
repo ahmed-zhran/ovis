@@ -15,7 +15,7 @@ import { desktopAccount, desktopProviders, desktopSignIn } from "../lib/account/
 import { ApiError, fetchBridgeHealth, fetchRelay, requestRelay } from "../lib/api.ts";
 import { startDeviceSignIn, startLinkPageSignIn, type DeviceSignInProvider } from "../lib/account/deviceSignIn.ts";
 import { AccountPcError, within } from "../lib/account/join.ts";
-import { firstMember, type FirstEnrollment } from "../lib/account/firstMember.ts";
+import { firstMember, firstMemberMembership, type FirstClaim, type FirstEnrollment } from "../lib/account/firstMember.ts";
 import { myPcs, type MyPc } from "../lib/account/myPcs.ts";
 import { ownWindowRedirect, ownWindowSignIn, useOwnWindowRedirect } from "../lib/account/ownWindow.ts";
 import { AccountServiceError, DEVICE_PROVIDERS, indexedAccountService, offeredProviders, pcAccountServiceOf, sameSignIn, SignedOutError, type AccountIdentity, type AccountService, type DeviceProvider, type OfferedProviders } from "../lib/account/service.ts";
@@ -500,19 +500,29 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
    */
   const dropped = useRef<(() => void) | null>(null);
   useEffect(() => () => { dropped.current?.(); dropped.current = null; }, []);
+  type PendingFirst = { session: AccountSession; claim: FirstClaim };
+  const pendingFirst = useRef<PendingFirst | null>(null);
+  const resume = ({ session, claim }: PendingFirst, running: () => boolean): FirstEnrollment => ({
+    account: session.account, async finish() {
+      const enrollment = await firstMember(accountService(), session, running, { recover: claim });
+      await enrollment.finish();
+    },
+  });
   /**
    * Lists this PC and waits, thirty minutes from this press, or from the sign-in that just finished here
    * (`as`, its account): that one says what it is doing, lists under that account alone, is given up after
    * `ADDING_MS` (the button again) or when its screen goes, and a relay that is off is offered with one button,
    * never started. The window such an attempt opened is closed again when nobody comes to wait on it.
    */
-  const finish = async (enrollment: FirstEnrollment): Promise<AddThisPcState> => {
+  const finish = async (enrollment: FirstEnrollment, retry = enrollment): Promise<AddThisPcState> => {
     try { await enrollment.finish(); }
     catch (error) {
       // another sign-in, or a cancelled attempt: the offer again, not a retry that cannot succeed
-      if (error instanceof AddPcWaitOver) return { kind: "offer" };
-      return { kind: "unfinished", enrollment };
+      if (error instanceof AddPcWaitOver) { pendingFirst.current = null; return { kind: "offer" }; }
+      if (error instanceof AccountPcError && error.code === "claim_not_applied") return { kind: "error", message: t("This PC could not be listed in your account. Try again.") };
+      return { kind: "unfinished", enrollment: retry };
     }
+    pendingFirst.current = null;
     window.dispatchEvent(new Event(DEVICES_CHANGED_EVENT));
     onListed?.();
     return joinedAs(enrollment.account, false);
@@ -539,7 +549,11 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
       // the window outlives a wait that stopped by up to ten minutes: a device may have added this PC through it, and then nothing is listed again
       const { account: joined, enrolling } = await thisPcMembership();
       if (!current()) return null;
-      if (joined !== null) { keepAddPcWaiting(null); return await joinedAs(joined, enrolling); }
+      if (joined !== null) {
+        keepAddPcWaiting(null);
+        const pending = pendingFirst.current;
+        return pending?.session.account === joined ? finish(resume(pending, current)) : joinedAs(joined, enrolling);
+      }
       // The sign-in that just returned can start adding before the hook's health read is rendered.
       const direct = ownRedirect === undefined ? await fetchBridgeHealth().then(h => ownWindowRedirect(h, window.location), () => null) : ownRedirect;
       let listAs = as;
@@ -550,26 +564,31 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
         if (!session || (as !== null && session.account !== as)) throw new AddPcWaitOver("sign-in");
         listAs = session.account;
         if (!opensAll()) {
-          let claimed: string | undefined;
+          let recovery: FirstEnrollment | undefined;
           try {
-            const enrollment = await firstMember(service, session, current, { sent: id => { claimed = id; } });
-            return finish(enrollment);
+            const enrollment = await firstMember(service, session, current, { sent: claim => {
+              pendingFirst.current = { session, claim };
+              recovery = resume(pendingFirst.current, current);
+            } });
+            return finish(enrollment, recovery);
           } catch (error) {
             if (!current()) return null;
             if (error instanceof AddPcWaitOver) throw error;
-            if (claimed !== undefined && error instanceof AccountPcError && error.status === 403 && error.code === "own_sign_in_required") return { kind: "digits", account: session.account };
-            const status = await thisPcMembership();
-            if (!current()) return null;
-            if (status.account === null) throw error;
-            const recover = claimed;
-            if (recover !== undefined && status.account === session.account && status.enrolling) {
-              // The PC may have committed before the reply was lost. Try again repeats only this member's recovery.
-              return finish({ account: session.account, async finish() {
-                const enrollment = await firstMember(service, session, current, { recover });
-                await enrollment.finish();
-              } });
+            if (recovery !== undefined) {
+              // Only a coded client error from the claim itself rules out a lost acceptance.
+              if (!(error instanceof ApiError && error.status >= 400 && error.status < 500 && typeof error.code === "string" && /^[a-z_]{1,40}$/.test(error.code))) return finish(recovery);
+              pendingFirst.current = null;
+              if (error.code === "own_sign_in_required") {
+                if (error.status === 403) return { kind: "digits", account: session.account };
+                throw error;
+              }
             }
-            return joinedAs(status.account, status.enrolling);
+            if (!(error instanceof ApiError)) throw error;
+            const status = await firstMemberMembership();
+            if (!current()) return null;
+            if (status.account !== null) return joinedAs(status.account, status.enrolling === true);
+            if (error.code === "relay_off") return { kind: "relay-off", account: session.account, error: null };
+            // The PC refused definitively and still has no account. Use the existing listing and digit flow.
           }
         }
       }
