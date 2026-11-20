@@ -14,7 +14,7 @@ import { createHash, createPublicKey, randomBytes, randomInt, timingSafeEqual } 
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isRowOrigin, legacyOrigin, type RowOrigin } from "./account/admission-order.ts";
-import type { ClearReason, PcAccountState } from "./account/pc-binding.ts";
+import { type ClearReason, PcAccountState } from "./account/pc-binding.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import type { DeviceJournal, JournalEntry } from "./account/device-journal.ts";
 import type { DeviceNotice, NoticeReplay } from "../shared/account-devices-api.ts";
@@ -499,9 +499,12 @@ export class DeviceStore {
   /** A deny that could not reach the disk (P8 step 1): only this PC itself gets in until one is written. */
   private denyProblem: string | null = null;
   private readonly revokeAllPath: string;
+  private readonly stateDirPath: string;
+
   constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: { readonly strict: string | null } | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[] } = {}) {
     this.safety = account.safety ?? null;
     this.pc = account.pc ?? null;
+    this.stateDirPath = stateDir;
     this.evidence = account.removals ?? null;
     // removal evidence this PC wrote once and that is gone now is damage, never a fresh start (S19)
     if (this.evidence !== null && this.pc?.evidenceWritten() === true) this.evidence.missingAfterWritten();
@@ -726,7 +729,10 @@ export class DeviceStore {
 
   /** The PC leaves its account, for one of the three named reasons (P12); nothing else clears the binding. */
   clearAccountBinding(reason: ClearReason, by: string): boolean {
-    return this.pc?.clear(reason, by) ?? false;
+    if (this.pc !== null) return this.pc.clear(reason, by);
+    // with the flag off nothing of the account is read, but a binding a flag-on run left is still cleared, so the next
+    // flag-on start is in no account (P12); a folder that never had one is not touched
+    return existsSync(join(this.stateDirPath, "account-pc.json")) ? PcAccountState.open(this.stateDirPath).clear(reason, by) : false;
   }
 
   /**
