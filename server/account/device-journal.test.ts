@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DeviceNotice, NoticeReplay } from "../../shared/account-devices-api.ts";
@@ -50,6 +50,15 @@ async function frames(port: number, cookie: string, count: number): Promise<{ li
 }
 
 describe("the device journal (P10, P15)", () => {
+  test("P22/T72: malformed restart subjects leave the journal in its normal damaged state", () => {
+    const dir = stateDir(), path = join(dir, JOURNAL_FILE);
+    admit(DeviceJournal.open(dir), "a".repeat(16), 1);
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    for (const replacements of [{}, [null], [{ row: "a".repeat(16), label: "Phone" }]]) {
+      writeFileSync(path, JSON.stringify({ ...doc, replacements }));
+      expect(DeviceJournal.open(dir).strict).not.toBeNull();
+    }
+  });
   test("T57: reconnect replays unseen notices before other events and ack never decides a notice", async () => {
     const f = relayFixture(false, { accountOpensAll: true, token: "a-token-long-enough-to-be-a-real-one" });
     fixtures.push(f);
