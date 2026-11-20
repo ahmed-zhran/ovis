@@ -264,9 +264,10 @@ export function createServer(
     return order;
   };
   const admissions = opensAll ? checkedOrder(stateDir) : null;
-  // a strict start changes nothing on disk, and nothing is merged with a damaged sibling either: the damage stays for
-  // every later start of either folder to see until it is repaired (S29)
-  const untouched = admissions?.strict != null || (opensAll && !!options.siblingStateDir && checkedOrder(options.siblingStateDir).strict !== null);
+  // a strict start changes nothing on disk, and nothing is merged with a damaged folder either, flag on or off: the
+  // check only reads, and a folder main wrote has no numbered row, so main's merge is unchanged (S29)
+  const damaged = (dir: string) => checkedOrder(dir).strict !== null;
+  const untouched = admissions?.strict != null || (!!options.siblingStateDir && (damaged(options.siblingStateDir) || (!opensAll && damaged(stateDir))));
   const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {
