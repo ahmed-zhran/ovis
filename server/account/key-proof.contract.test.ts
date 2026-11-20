@@ -7,6 +7,9 @@ import { afterEach, expect, test } from "bun:test";
 import { FrameType, KEY_PROOF_FEATURE, type MuxFrame } from "../../shared/relay-mux.ts";
 import { pairFingerprint, signPairProof } from "../../shared/pair-fingerprint.ts";
 import { bounded, deferred, relayConnection } from "../relay/test-helpers.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { JOURNAL_FILE } from "./device-journal.ts";
 import { pairingPc, phone, SERVER_ID, type Pc } from "./pairing.test-helpers.ts";
 
 const pcs: Pc[] = [];
@@ -68,13 +71,14 @@ test("T72: a decline on the screen ends the pairing and lets nobody in", async (
   expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
 });
 
-test("T71: an app that does not offer the proof is refused key_proof_required, not left waiting", async () => {
+test("T71: an app that does not offer the proof is refused with a code an app from before it already shows, not left waiting", async () => {
   const made = await pc(true);
   const device = await phone();
   const link = await relayConnection(made);
   await link.hello();
   link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code: await made.offerCode(), label: "Old app", public_key: device.spki } });
-  expect(await bounded(link.serverError)).toBe("key_proof_required");
+  // unsupported_version is in every released decoder's list (shared/relay-mux.ts SESSION_ERRORS before key-proof-1)
+  expect(await bounded(link.serverError)).toBe("unsupported_version");
 });
 
 test("T71: with the release flag off, pairing is today's: no challenge, the device is let in", async () => {
@@ -104,4 +108,40 @@ test("T71: on a PC with no screen proof (macOS, Windows), pairing is today's, fl
     const admitted = await link.pair(await made.offerCode(), device.spki);
     expect(admitted.device_id).toMatch(/^[0-9a-f]{16}$/);
   }
+});
+
+test("T72/S31: a device that goes away before it proves its key gives the code's use back, and its relay link counted it as pairing", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const device = await phone();
+  const link = await relayConnection(made);
+  const challenged = deferred<void>();
+  link.onFrame = (frame) => { if (frame.type === FrameType.KEY_CHALLENGE) challenged.resolve(); };
+  await link.hello([KEY_PROOF_FEATURE]);
+  link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code, label: "New phone", public_key: device.spki } });
+  await bounded(challenged.promise);
+  expect(link.session.pairing).toBe(true);
+  link.stop();
+  await bounded(link.closed);
+  expect(made.devices.redeemCode(code, "code", device.spki)).toMatchObject({ ok: true });
+});
+
+test("T72/S31: a proved device waiting for the screen counts as pairing, and once it goes away it is no longer listed", async () => {
+  const made = await pc(true, "linux");
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  expect(paired.link.session.pairing).toBe(true);
+  paired.link.stop();
+  await bounded(paired.link.closed);
+  expect((await made.local("/api/devices/pending")).body.pending).toEqual([]);
+});
+
+test("T71/T72: a decline is journalled as a drop that names the device's key and name", async () => {
+  const made = await pc(true, "linux");
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  made.screen.decline(made.screen.keyConfirm()!.id);
+  await bounded(paired.link.serverError);
+  const entries = (JSON.parse(readFileSync(join(made.stateDir, JOURNAL_FILE), "utf8")) as { entries: { kind: string; key: string | null; label: string }[] }).entries;
+  expect(entries.filter((entry) => entry.kind === "drop")).toEqual([expect.objectContaining({ key: paired.device.spki, label: "New phone" })]);
 });
