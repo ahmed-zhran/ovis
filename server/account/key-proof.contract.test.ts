@@ -173,3 +173,29 @@ test("T71/T72: a first-link QR, from a PC set up for an account and not in it ye
   expect((await paired.pending).payload).toEqual({});
   expect(made.stored().some((row) => row.relay_public_key === paired.device.spki)).toBe(false);
 });
+
+test("T5/T71: a PC whose code pairing is paused for too many wrong codes starts no key proof", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  for (let index = 0; index < 20; index++) made.devices.noteRelayFailure("code");
+  const device = await phone();
+  const link = await relayConnection(made);
+  await link.hello([KEY_PROOF_FEATURE]);
+  link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code, label: "New phone", public_key: device.spki } });
+  expect(await bounded(link.serverError)).toBe("auth_failed");
+  expect(made.screen.keyConfirm()).toBeUndefined();
+});
+
+test("T71: a relay pass that lets in no new device starts no key proof and puts nothing on the screen", async () => {
+  const made = await pc(true, "linux");
+  const code = await made.offerCode();
+  const asked = deferred<void>();
+  const link = await relayConnection(made, { refuseNewDevice: () => { asked.resolve(); return true; } });
+  const device = await phone();
+  await link.hello([KEY_PROOF_FEATURE]);
+  link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code, label: "New phone", public_key: device.spki } });
+  await bounded(asked.promise);
+  expect((await made.local("/api/devices/pending")).body.pending).toEqual([]);
+  expect(made.devices.redeemCode(code, "code", device.spki)).toMatchObject({ ok: true });
+  expect(made.screen.keyConfirm()).toBeUndefined();
+});
