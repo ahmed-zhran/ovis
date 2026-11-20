@@ -89,8 +89,14 @@ export class KeyProofPairings {
     if (sessionId === undefined) return null;
     const entry = this.#pending.take(pendingId, fingerprint);
     if (entry === null || entry.codeId === undefined) return null;
-    const admitted = this.#seams.admitConfirmed({ codeId: entry.codeId, key: entry.key, label: entry.label, source });
-    this.#finish(sessionId, admitted);
+    let admitted: DeviceMatch | null = null;
+    try {
+      admitted = this.#seams.admitConfirmed({ codeId: entry.codeId, key: entry.key, label: entry.label, source });
+    } catch (error) {
+      console.error("Confirmed key admission failed", { pendingId, error: error instanceof Error ? error.message : "Non-Error thrown" });
+    } finally {
+      this.#finish(sessionId, admitted);
+    }
     return admitted;
   }
 
