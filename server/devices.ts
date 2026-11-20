@@ -613,6 +613,8 @@ export class DeviceStore {
 
   /** The safety log or the admission order fails closed: no device gets in by a row or a code. */
   get failsClosed(): boolean {
+    // with the flag on, an account tombstone file that cannot be read is a key out nobody can tell: only this PC gets in (S19)
+    if (this.evidence !== null && this.accountProblem !== null) return true;
     return (this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? null) !== null;
   }
 
@@ -1875,9 +1877,12 @@ export class DeviceStore {
    * link with one of those keys go next, before the revoke as well (dropWaiting).
    */
   private tombstone(rows: readonly StoredDevice[], now: number): void {
-    if (this.evidence !== null && this.accountError === null) {
-      // each Revoke is its own evidence, also of a key that already has a tombstone (P13)
+    // each Revoke is its own evidence, also of a key that already has a tombstone, and also while the tombstone files
+    // cannot be read, so it outlives their repair (P13)
+    if (this.evidence !== null && this.evidence.strict === null) {
       for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
+    }
+    if (this.evidence !== null && this.accountError === null) {
       this.refreshTombstones();
       this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
       return;

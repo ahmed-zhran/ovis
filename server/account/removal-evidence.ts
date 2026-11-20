@@ -55,6 +55,11 @@ function parseDoc(value: unknown): Doc | null {
 /** The forgettings the safety log holds for a key and account (server/account/safety-log.ts). */
 export interface Forgettings { forgets(key: string, account: string): readonly string[] }
 
+/** The id of a local Revoke, the same whether it is made here or read back from a tombstone (P13). */
+function localRevokeId(key: string, account: string, at: string): string {
+  return createHash("sha256").update(`${key}\n${account}\n${at}`).digest("hex").slice(0, 32);
+}
+
 export class RemovalEvidence {
   private doc: Doc = { v: 1, markers: [], revokes: [], unrevokes: [] };
   private problem: string | null = null;
@@ -122,7 +127,9 @@ export class RemovalEvidence {
 
   /** A Revoke on this PC of a row holding `key`: its own entry, the deny that goes to disk before anything else. */
   addRevoke(key: string, account: string | null, now: number): void {
-    this.write({ ...this.doc, revokes: [...this.doc.revokes, { id: randomBytes(16).toString("hex"), key, account, at: new Date(now).toISOString() }] });
+    const at = new Date(now).toISOString();
+    // the id a later start reads this Revoke back under from the tombstone file, so it is taken in once (P13)
+    this.write({ ...this.doc, revokes: [...this.doc.revokes, { id: localRevokeId(key, account ?? "", at), key, account, at }] });
   }
 
   /** A pairing of `key` on this PC: it ends each Revoke of that key by name, and never touches a marker (T21, T23). */
@@ -145,7 +152,7 @@ export class RemovalEvidence {
     const at = new Date(now).toISOString();
     for (const tombstone of tombstones) {
       if (tombstone.record_id === "local") {
-        const id = createHash("sha256").update(`${tombstone.key}\n${tombstone.account}\n${tombstone.removed_at}`).digest("hex").slice(0, 32);
+        const id = localRevokeId(tombstone.key, tombstone.account, tombstone.removed_at);
         if (doc.revokes.some((r) => r.id === id)) continue;
         const ended = rows.some((row) => row.relay_public_key === tombstone.key && row.pairedHere && row.created_at > tombstone.removed_at);
         doc = { ...doc, revokes: [...doc.revokes, { id, key: tombstone.key, account: tombstone.account === "" ? null : tombstone.account, at: tombstone.removed_at }],
