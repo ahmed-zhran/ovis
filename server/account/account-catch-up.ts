@@ -22,9 +22,15 @@ export class AccountCatchUp {
 
   commitList(snapshot: AccountSnapshot): void {
     const store = this.rows?.store();
-    store?.commitList(snapshot);
-    store?.expire();
-    this.gate?.wholeRead(this.devices.list(null).filter(row => !this.devices.admits(this.devices.relayKeyOf(row.id))).map(row => row.id));
+    try {
+      store?.commitList(snapshot);
+      store?.expire();
+      this.gate?.wholeRead(this.devices.list(null).filter(row => !this.devices.admits(this.devices.relayKeyOf(row.id))).map(row => row.id));
+    } catch (error) {
+      // A list write may already have changed some rows. They cannot serve on a partial read.
+      store?.waitForRead();
+      throw error;
+    }
     // Only an applied whole read renews the deadline. Failed pulls never postpone it, and a hung service cannot
     // prevent the PC from closing idle sessions at the deadline.
     this.clearDeadline();

@@ -106,8 +106,8 @@ export function snapshotPorts(deps: SnapshotDeps): SnapshotPorts {
       devices.handedLifts.decide(stage.snapshot.lifts);
     },
     commitList(snapshot) {
-      deps.commitList?.(snapshot);
       devices.resumePromotedHolds();
+      deps.commitList?.(snapshot);
     },
     methodsVersion: () => deps.order.methodsVersion(),
     journalMethod(version) {
