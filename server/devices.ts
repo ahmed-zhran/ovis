@@ -533,7 +533,7 @@ export class DeviceStore {
     if (this.error === null && this.evidence !== null && existsSync(this.revokeAllPath)) {
       const gate = this.gateClosedAt ?? new Date().toISOString();
       // a deny recovered at start raises the generation, as the live path does (P8, T41)
-      try { this.pc?.raiseGen(); this.finishRevokeAll(this.devices, gate); } catch (error) {
+      try { this.pc?.raiseGen(); this.finishRevokeAll(this.revokeAllRows(), gate); } catch (error) {
         // what could not be finished on disk is finished in memory, and the PC fails closed until a start finishes it
         this.devices = [];
         this.gateClosedAt = gate;
@@ -1818,8 +1818,10 @@ export class DeviceStore {
    */
   private revokeAllInOrder(): string[] {
     const now = new Date().toISOString();
-    const denied = this.deny(this.devices.flatMap((d) => d.relay_public_key ?? []), () => writePrivateState(this.revokeAllPath, { id: randomBytes(16).toString("hex"), by: "pc", at: now }));
-    const gone = this.devices;
+    // the file names every row it covers, a pending one's too, so it is finished from itself and never from less (T20)
+    const gone = this.revokeAllRows();
+    const gateWasOpen = !this.rawGated;
+    const denied = this.deny(gone.flatMap((d) => d.relay_public_key ?? []), () => writePrivateState(this.revokeAllPath, { id: randomBytes(16).toString("hex"), by: "pc", at: now, rows: gone }));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? now;
     this.devices = [];
     this.gateClosedAt = gate;
@@ -1829,8 +1831,10 @@ export class DeviceStore {
     this.revocations.clear();
     for (const closes of listeners) for (const close of closes) close();
     for (const listener of [...this.revokeAllListeners]) listener();
-    for (const device of gone) this.announceRemoval(device, "pc");
+    // a gate that was open closes here, whatever the writes below do: what the open LAN let in ends (T3)
+    if (gateWasOpen) this.tellGateClosed();
     if (denied !== null) throw denied;
+    for (const device of gone) this.announceRemoval(device, "pc");
     // its intent is on disk: any write after it that fails leaves the PC closed until a start finishes it (P8, T20)
     try { this.finishRevokeAll(gone, gate); } catch (error) {
       this.denyProblem = `Revoke all could not be finished (${error instanceof Error ? error.message : String(error)}): only this PC itself gets in until it is.`;
@@ -1846,8 +1850,20 @@ export class DeviceStore {
     this.save([], gate);
     this.devices = [];
     this.gateClosedAt = gate;
+    // the file goes only once the PC has left its account: a binding that cannot be read keeps it (P12)
+    if (this.pc?.strict != null) throw new Error(this.pc.strict);
     this.clearAccountBinding("revoke_all", "pc");
     rmSync(this.revokeAllPath, { force: true });
+  }
+
+  /** The rows a Revoke all covers: those its pending file names, and every row this store holds now (T20). */
+  private revokeAllRows(): StoredDevice[] {
+    let named: StoredDevice[] = [];
+    try {
+      const doc = JSON.parse(readFileSync(this.revokeAllPath, "utf8")) as { rows?: unknown };
+      if (Array.isArray(doc.rows)) named = doc.rows.filter((row): row is StoredDevice => typeof row === "object" && row !== null && typeof (row as { id?: unknown }).id === "string");
+    } catch { /* no pending file, or one that names no rows: the rows held now */ }
+    return [...named.filter((row) => !this.devices.some((d) => d.id === row.id)), ...this.devices];
   }
 
   private save(devices = this.devices, gateClosedAt = this.gateClosedAt): void {
@@ -1856,7 +1872,11 @@ export class DeviceStore {
     // The write that closes the gate: onGateClosed. Told once the caller has set the store's own fields, which each
     // does right after this returns, and before anything else of this process runs (no frame of a connection is
     // read in between). Each on its own: one that throws ends neither the others nor the pairing that closed the gate.
-    if (closes) queueMicrotask(() => {
+    if (closes) this.tellGateClosed();
+  }
+
+  private tellGateClosed(): void {
+    queueMicrotask(() => {
       for (const listener of [...this.gateListeners]) {
         try { listener(); } catch (error) { console.warn(`[devices] ending what the open LAN let in failed: ${error instanceof Error ? error.message : String(error)}`); }
       }
