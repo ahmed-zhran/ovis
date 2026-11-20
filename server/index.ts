@@ -277,7 +277,7 @@ export function createServer(
   }
   // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
   // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
-  const logMerge = opensAll && options.siblingStateDir ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
+  const logMerge = opensAll && options.siblingStateDir && !untouched ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
   const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge) : null;
   // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
   try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
