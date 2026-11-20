@@ -501,7 +501,7 @@ export class DeviceStore {
     const pending = pendingRead ?? [];
     if (accountBlocked !== null) this.accountProblem = accountBlocked;
     // a pending tombstone file that cannot be read holds Revokes nobody can tell: kept, and the PC refuses (S19)
-    if (pendingRead === null) this.accountProblem = `Cannot read ${this.pendingTombstonePath}: account records are refused until it is restored or fixed.`;
+    if (pendingRead === null && this.evidence !== null) this.accountProblem = `Cannot read ${this.pendingTombstonePath}: account records are refused until it is restored or fixed.`;
     if (tombstones === null) {
       this.accountProblem = `Cannot read ${this.tombstonePath}: account records are refused until it is restored or fixed.`;
       this.tombstones = pending;
@@ -522,6 +522,11 @@ export class DeviceStore {
     }
     // the tombstone files' own repair asks only whether they could be read: a strict safety log is a separate refusal
     // a strict order changes nothing on disk, not even a repair: its damage stays visible (S29)
+    // a damaged pending file beside a readable tombstone file: the Revokes the readable one holds are evidence at once,
+    // and neither file is touched until the damaged one is repaired (T26, S19)
+    if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
+      this.evidence.takeIn([...this.carried, ...tombstones], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
+    }
     if (this.error === null && this.accountProblem === null && this.pc?.strict == null) {
       if (this.evidence !== null) this.takeInEvidence([...tombstones ?? [], ...pending]);
       else {
@@ -1882,8 +1887,9 @@ export class DeviceStore {
     if (this.evidence !== null && this.evidence.strict === null) {
       for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
     }
-    if (this.evidence !== null && this.accountError === null) {
-      this.refreshTombstones();
+    if (this.evidence !== null) {
+      // a tombstone file that cannot be read is left as it is: the evidence holds the Revoke until it is repaired (S19)
+      if (this.accountError === null) this.refreshTombstones();
       this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
       return;
     }
