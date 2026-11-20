@@ -57,7 +57,10 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
     devices.revoke(id);
     const revoked = readFileSync(join(dir, REMOVAL_FILE));
-    const again = devices.pairRelay(devices.startPairing().code, "Again", k)!.device.id;
+    // the Revoke ends only by a confirm on this PC's screen that names it (P13, S2-08)
+    const revokeId = (JSON.parse(revoked.toString("utf8")) as { revokes: { id: string }[] }).revokes[0]!.id;
+    const { codeId } = devices.redeemCode(devices.startPairing().code, "code", k) as { codeId: string };
+    const again = devices.admitConfirmed({ codeId, key: k, label: "Again", source: "screen", unrevokes: [revokeId] })!.id;
     // the unrevoke never reached the disk
     writeFileSync(join(dir, REMOVAL_FILE), revoked, { mode: 0o600 });
     expect(open(dir).has(again)).toBe(true);
