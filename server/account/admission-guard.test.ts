@@ -20,7 +20,7 @@ function pc(): Pc {
   const dir = mkdtempSync(join(tmpdir(), "ovis-admission-guard-"));
   dirs.push(dir);
   const log = SafetyLog.open(dir);
-  const devices = new DeviceStore(dir, null, null, { safety: log, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, log), journal: DeviceJournal.open(dir) });
+  const devices = new DeviceStore(dir, null, null, { safety: log, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, log), journal: DeviceJournal.open(dir, () => log.ensureFile()) });
   return { dir, devices, log };
 }
 
