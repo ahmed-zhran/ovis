@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
+import { relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
@@ -210,5 +211,19 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     const { codeId: third } = devices.redeemCode(revoked.code, "code", await key()) as { codeId: string };
     devices.revokeAll();
     expect(ends).toEqual([codeId, second, third]);
+  });
+
+  test("T71: a relay identity reset ends the open code, and the hook hears it", async () => {
+    const ends: string[] = [];
+    const f = relayFixture(false, { accountOpensAll: true });
+    try {
+      const devices = f.app.context.services.devices;
+      devices.onPairingEnded((codeId) => ends.push(codeId));
+      const k = await key();
+      const { codeId } = devices.redeemCode(devices.startPairing().code, "code", k) as { codeId: string };
+      await f.app.context.services.relay.resetIdentity();
+      expect(ends).toEqual([codeId]);
+      expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
+    } finally { f.close(); }
   });
 });
