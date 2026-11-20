@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceStore, readDeviceRegistry, type StoredDevice } from "../devices.ts";
@@ -142,6 +142,12 @@ describe("one admission order per PC (origin and admit_no)", () => {
     expect(merged.devices.find((d) => d.id === caller)?.origin).toEqual(at(caller).origin);
     expect(merged.devices.find((d) => d.id === newer)?.origin).toEqual(at(newer).origin);
     expect(merged.devices.find((d) => d.id === onlyThere.id)?.origin).toBeUndefined();
+    // a copy linked later in the other folder brings a key this folder never admitted: the row keeps no origin here,
+    // so that key reaches no row admitted in between (P22: an origin describes the key the row holds)
+    const relinked = { ...at(caller), relay_public_key: "moved-key", account: "acct", linked_at: new Date(Date.now() + 1000).toISOString(), link_moved_key: true };
+    const taken = mergeRegistries({ gate_closed_at: null, devices: [at(caller)] }, { gate_closed_at: null, devices: [relinked] }, { own: null, other: null }, undefined, true).devices[0]!;
+    expect(taken.relay_public_key).toBe("moved-key");
+    expect(taken.origin).toBeUndefined();
   });
 
   test("P22: with the release flag off no row gets an origin and no order file is written", async () => {
@@ -203,5 +209,30 @@ describe("one admission order per PC (origin and admit_no)", () => {
     order.settleFresh();
     expect(order.admit("remote", "code", null, Date.now()).admit_no).toBe(1);
   });
-});
 
+  test("P22: a link names no approver: a member's code pending while another device links gives it no `by`", async () => {
+    const dir = stateDir();
+    const memberKey = await key();
+    const member = legacyRow("2026-10-01T00:00:00.000Z", { relay_public_key: memberKey, account: "acct", linked_at: "2026-10-01T00:00:00.000Z" });
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ gate_closed_at: member.created_at, devices: [member] }), { mode: 0o600 });
+    const devices = store(dir);
+    const oldKey = await key();
+    const linking = devices.pairRelay(devices.startPairing().code, "Phone", oldKey)!.device.id;
+    devices.startPairing(Date.now(), { remote: true, startedBy: member.id, memberRequired: true, by: null });
+    devices.linkAccountKey(linking, oldKey, await key(), "acct");
+    expect(row(dir, linking).origin).toMatchObject({ how: "link", by: null });
+    // the member's own code on this PC's screen names the member
+    const cookie = devices.pair(devices.startPairing(Date.now(), { remote: true, startedBy: member.id, memberRequired: true, by: null }).code, "Laptop", "drive")!.device.id;
+    expect(row(dir, cookie).origin).toMatchObject({ how: "member", by: memberKey });
+  });
+
+  test("S19: a legacy pass that cannot be written leaves this PC strict, not a failed start", () => {
+    const dir = stateDir();
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ gate_closed_at: "2026-10-01T00:00:00.000Z", devices: [legacyRow("2026-10-01T00:00:00.000Z")] }), { mode: 0o600 });
+    chmodSync(dir, 0o500);
+    try {
+      const devices = store(dir);
+      expect(devices.failsClosed).toBe(true);
+    } finally { chmodSync(dir, 0o700); }
+  });
+});
