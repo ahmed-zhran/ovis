@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -248,5 +248,36 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "recover", by: "alice" });
     const entries = (JSON.parse(readFileSync(join(at, "device-journal.json"), "utf8")) as { entries: { kind: string; how: string; by: string | null }[] }).entries;
     expect(entries.filter((entry) => entry.kind === "admit")).toEqual([expect.objectContaining({ how: "recover", by: "alice" })]);
+  });
+
+  test("P13, T26: a key confirmed on the screen while the clock ran ahead, then revoked after it stepped back, stays out after a stop", async () => {
+    const at = dir();
+    const k = await key();
+    try {
+      setSystemTime(new Date("2026-10-01T00:00:05.000Z"));
+      const devices = store(at);
+      const { codeId } = devices.redeemCode(devices.startPairing().code, "code", k) as { codeId: string };
+      const id = devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })!.id;
+      const kept = readFileSync(join(at, "devices.json"));
+      setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      devices.revoke(id);
+      writeFileSync(join(at, "devices.json"), kept, { mode: 0o600 });
+      expect(store(at).has(id)).toBe(false);
+    } finally { setSystemTime(); }
+  });
+
+  test("T26: a cookie confirmed at its first use is stamped after every row the store holds, whatever the clock", async () => {
+    const at = dir();
+    try {
+      setSystemTime(new Date("2026-10-01T00:00:05.000Z"));
+      const devices = store(at);
+      const relay = devices.pairRelay(devices.startPairing().code, "Phone", await key())!.device.id;
+      setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+      devices.match(cookie.token);
+      const rows = (JSON.parse(readFileSync(join(at, "devices.json"), "utf8")) as { devices: { id: string; created_at: string }[] }).devices;
+      const created = (id: string) => Date.parse(rows.find((row) => row.id === id)!.created_at);
+      expect(created(cookie.device.id)).toBeGreaterThan(created(relay));
+    } finally { setSystemTime(); }
   });
 });
