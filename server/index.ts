@@ -62,9 +62,8 @@ import { DeviceJournal } from "./account/device-journal.ts";
 import { mergeAccountState } from "./account/account-merge.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
-import { userInfo } from "node:os";
-import { openRecoverySocket, RecoveryReleases } from "./account/recovery.ts";
-import { recoveryActs, type RecoverySeams } from "./account/recovery-acts.ts";
+import { RecoveryReleases } from "./account/recovery.ts";
+import { openPcRecovery } from "./account/recovery-server.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
 import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
@@ -540,31 +539,6 @@ export function createServer(
       }
     },
   }) : undefined;
-  const recoverySocket = recoveryReleases && journal && safetyLog ? (() => {
-    // the acts beyond release and undo, through this PC's own stores (Track A's devices.ts and safety-log.ts)
-    const seams: RecoverySeams = {
-      pendingOf: (id) => pendingRedemptions?.list().find((entry) => entry.id === id) ?? null,
-      pendingList: () => (pendingRedemptions?.list() ?? []).map(({ id, label, fingerprint }) => ({ id, label, fingerprint })),
-      admitPending: (id, fingerprint) => {
-        const waiting = pendingRedemptions?.list().find((entry) => entry.id === id);
-        if (waiting === undefined || keyProofPairings === undefined) return "unknown";
-        if (waiting.fingerprint !== fingerprint) return "mismatch";
-        return keyProofPairings.approve(id, fingerprint, "recover");
-      },
-      removeKey: (input) => devices.removeKey(input),
-      appendLift: (blockId, forget, user) => {
-        const block = safetyLog.state().blocks.find((entry) => entry.record.id === blockId);
-        const binding = block === undefined ? pcAccount?.binding() ?? null : { account: block.record.account };
-        const done = safetyLog.appendLift(blockId, binding, { cause: "recover", forget });
-        if (done.outcome === "applied") journal.append({ kind: "lift", how: "recover", key: null, no: null, row: null, label: blockId, by: user, account: binding?.account ?? null });
-        return done;
-      },
-      revokeAll: (user) => devices.revokeAll(user),
-    };
-    const opened = openRecoverySocket({ stateDir, handle: recoveryActs({ releases: recoveryReleases, logReadable: () => !devices.failsClosed && SafetyLog.open(stateDir).readable, user: userInfo().username, seams }) });
-    if ("refused" in opened) { if (opened.refused !== "windows") console.error(`ovis recover is not available: ${opened.refused}`); return null; }
-    return opened;
-  })() : null;
   // devices that redeemed a code and proved their key, waiting for this PC's screen (server/account/pending.ts)
   const pendingRedemptions = localConfirms ? new PendingRedemptions({
     serverId: () => ovisRelay.currentIdentity()?.server_id ?? null,
@@ -577,6 +551,9 @@ export function createServer(
   // a key confirm needs a screen this PC can prove: Linux in this release; elsewhere pairing is as before
   const keyProofPairings = localConfirms && pendingRedemptions && (options.platform ?? process.platform) === "linux"
     ? new KeyProofPairings({ pending: pendingRedemptions, seams: devices }) : undefined;
+  const recoverySocket = recoveryReleases && journal && safetyLog ? openPcRecovery({
+    stateDir, devices, pcAccount, journal, safetyLog, releases: recoveryReleases, pending: pendingRedemptions, pairings: keyProofPairings,
+  }) : null;
   devices.onKeyRemoved((key, cause) => pendingRedemptions?.dropKey(key, cause));
   const askScreen = localConfirms && keyProofPairings ? (entry: PendingRedemption) => askScreenForKey(localConfirms, keyProofPairings, entry) : undefined;
   const { accountHolds, accountMailbox } = earlyQueues ?? openAccountQueues();
