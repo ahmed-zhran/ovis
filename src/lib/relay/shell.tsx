@@ -495,7 +495,11 @@ export async function mountRelayShell(mount: RelayShellMount): Promise<void> {
       if (linkRefused(opened, attempt, error)) return;
       // the PC's screen decides on this device's new key: the person compares the fingerprint this device computed
       if (error instanceof ReplacementPendingError) {
-        if (app === null && last === attempt && shown?.kind === "ready") show({ ...shown, enrollment: { kind: "replacement", fingerprint: error.fingerprint } });
+        if (transport !== opened || signal?.aborted) return;
+        // A slow first link may have outlasted the connecting screen's fallback timer. Only this still-active
+        // transport returns to its checkpoint; a cancelled or newer pairing never gets the old fingerprint.
+        if (app) { app.unmount(); app = null; }
+        show({ kind: "ready", name: attempt.offer.name ?? null, server_id: attempt.offer.server_id, enrollment: { kind: "replacement", fingerprint: error.fingerprint } });
         return;
       }
       console.warn("Ovis: this PC did not join the account yet", error instanceof Error ? error.name : error);
@@ -529,7 +533,7 @@ export async function mountRelayShell(mount: RelayShellMount): Promise<void> {
           clearTimeout(waited);
           // past this point the steps go on behind the app, as any enrollment does, and a Cancel no longer ends them
           if (frontSteps === steps) frontSteps = null;
-          if (steps.signal.aborted || transport !== opened || last !== attempt || app !== null) return;
+          if (steps.signal.aborted || transport !== opened || last !== attempt || app !== null || shown?.kind !== "connecting") return;
           enterApp(opened, attempt);
         };
         // a marked pairing's row can do nothing but link until its first link passes: its connecting screen and its

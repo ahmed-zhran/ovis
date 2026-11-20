@@ -5,7 +5,7 @@
 import { ACCOUNT_ENROLL_MAX, AccountRecordError, accountDeviceId, isAccountKeyEncoding, newRecordId, readAccountRecord, signAccountRecord } from "../../../shared/account-records.ts";
 import type { AddRecord, LinkRecord, RemoveRecord } from "../../../shared/account-records.ts";
 import { LINK_REPLACEMENT_OPT_IN, parseLinkReplacement } from "../../../shared/account-devices-api.ts";
-import { pairFingerprint } from "../../../shared/pair-fingerprint.ts";
+import { pairFingerprint, signPairProof } from "../../../shared/pair-fingerprint.ts";
 import { isWssOrigin } from "../../../shared/relay-offer.ts";
 import type { RemotePairingRequest } from "../../../shared/protocol.ts";
 import type { RelayDevice, RelayDeviceStore } from "../relay/device.ts";
@@ -114,7 +114,9 @@ export async function linkThisDevice(options: { fetch: PcFetch; device: RelayDev
     // the pairing keeps its key and the pending_key above; the fingerprint shown is this device's own, never the PC's
     const held = parseLinkReplacement(((await answer.json()) as { replacement?: unknown }).replacement);
     if (held === null) throw new AccountPcError(202, "record_invalid");
-    throw new ReplacementPendingError(await pairFingerprint(device.server_id, held.challenge, key.public_spki));
+    const [signature, fingerprint] = await Promise.all([signPairProof(device.server_id, held.challenge, key.public_spki, key.private_key), pairFingerprint(device.server_id, held.challenge, key.public_spki)]);
+    await post(options.fetch, "/api/account/devices/replace", { row: device.device_id, challenge: held.challenge, signature });
+    throw new ReplacementPendingError(fingerprint);
   }
   return options.store.update(device.server_id, (current) => {
     // only the pairing the link was signed for takes the key: one changed meanwhile is left as it is

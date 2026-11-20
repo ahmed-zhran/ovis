@@ -9,7 +9,7 @@ import { indexedAccountStore } from "../account/store.ts";
 import { beginSignIn, redeemSignIn, SignInError, takePendingSignIn } from "../account/signin.ts";
 import type { SignInReturn } from "../account/signin.ts";
 import type { AccountProvider, AccountSession, PendingPairing } from "../account/store.ts";
-import { AccountPcError, enrollOnPc, keepRemovals, PEER_STATUS_MS, linkThisDevice, needsLink, pcAccountStatus, planEnroll, sendQueuedAdds, takeIntroduction } from "../account/join.ts";
+import { AccountPcError, ReplacementPendingError, enrollOnPc, keepRemovals, PEER_STATUS_MS, linkThisDevice, needsLink, pcAccountStatus, planEnroll, sendQueuedAdds, takeIntroduction } from "../account/join.ts";
 import { deleteAccount as deleteAccountOf, holdingSessionStore, installSignInAgain } from "../account/deleteAccount.ts";
 import { leaveAccount } from "../account/leave.ts";
 import { nativeSignIn, nativeSignInAvailable, SignInNotWanted } from "../account/native.ts";
@@ -447,7 +447,7 @@ export function createAccountController(mount: RelayShellMount, view: { readonly
     const done = enrollOwned(opened, serverId, fresh, introducible, { ...options, settled, signal });
     void done.finally(() => { mine.delete(stop); if (mine.size === 0 && stops.get(serverId) === mine) stops.delete(serverId); }).catch(() => {});
     // a link the PC refused leaves the session to whoever says why (shell.tsx), rather than opening the app over it
-    void done.then(settled, (error: unknown) => { if (refusalOf(error) === null) settled(); });
+    void done.then(settled, (error: unknown) => { if (!(error instanceof ReplacementPendingError) && refusalOf(error) === null) settled(); });
     running.set(done, serverId);
     void done.then(() => running.delete(done), () => running.delete(done));
     return done;
@@ -658,7 +658,7 @@ export function createAccountController(mount: RelayShellMount, view: { readonly
     } catch (error) {
       assertPairing(await store.get(serverId));
       if (error instanceof AccountServiceUnreachableError) unanswered = true;
-      await record("failed");
+      await record(error instanceof ReplacementPendingError ? "pending" : "failed");
       throw error;
     } finally {
       own?.close();

@@ -119,7 +119,7 @@ describe("account pairing completion", () => {
   }
 
   it("P22/T72: fresh pairing stops at the replacement card instead of opening or recording failure", async () => {
-    const run = await pairing(undefined, { challenge: pairChallenge() });
+    const run = await pairing(undefined, { code: "123456", challenge: pairChallenge() });
     expect(run.apps()).toBe(0);
     expect((await run.rows())[0]?.enrollment).toBe("pending");
     const props = run.current();
