@@ -198,4 +198,13 @@ describe("remote Revokes reach the caller itself and the rows that joined after 
     expect(await refused.json()).toEqual({ error: { code: "local_required", message: "Resetting the relay identity is done at that PC" } });
     expect(devices.list(null)).toHaveLength(1);
   });
+
+  test("LEDGER S2-38 S11-1 (gate r3 at 6d95e8c8, T36, history): a key held by another member's waiting remove cannot self-Revoke ahead of it", async () => {
+    const { devices } = pc();
+    const leaving = await member(devices);
+    // another member's remove of this key waits here: the key is held by it
+    const gates = { enrolling: () => false, held: (key: string, includeWaiting = true) => includeWaiting && key === leaving.spki, removing: () => false };
+    const record = await signAccountRecord({ v: 1, kind: "remove", account: ACCOUNT, key: leaving.spki, issued_at: new Date().toISOString(), id: newRecordId(), signer: leaving.spki }, leaving.keys.privateKey);
+    expect(await applyAccountRecords(devices, [record], SERVER_ID, Date.now(), gates)).toEqual([{ id: record.id, outcome: "refused", code: "removal_pending" }]);
+  });
 });
