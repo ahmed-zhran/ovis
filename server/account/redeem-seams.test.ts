@@ -40,8 +40,8 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
     // nothing is written by the redemption; another key reserves a use of its own (T71: up to five at once)
     expect(devices.list(null)).toHaveLength(0);
     expect(devices.redeemCode(code, "code", other)).toMatchObject({ ok: true, codeId });
-    // another key, or another code id, admits nobody
-    expect(devices.admitConfirmed({ codeId, key: other, label: "Other", source: "screen" })).toBeNull();
+    // a key never reserved, or another code id, admits nobody
+    expect(devices.admitConfirmed({ codeId, key: await key(), label: "Other", source: "screen" })).toBeNull();
     expect(devices.admitConfirmed({ codeId: "f".repeat(32), key: named, label: "Phone", source: "screen" })).toBeNull();
     // the confirmed key gets the row, with an origin the store sets from where the confirm came from
     const admitted = devices.admitConfirmed({ codeId, key: named, label: "Phone", source: "screen" });
