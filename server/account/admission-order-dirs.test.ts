@@ -81,6 +81,20 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(b)).toEqual({ [aLocal]: undefined, [bLocal]: expect.objectContaining({ from: "remote", admit_no: 1 }) });
   });
 
+  test("P22: a twin keeps its own folder's origin across starts with a sibling: a copy with none erases nothing", async () => {
+    const [a, b] = [dir(), dir()];
+    put(a, [row("aaaaaaaaaaaaaaaa")]);
+    put(b, []);
+    const first = start(a, b, true);
+    const devices = first.app.context.services.devices;
+    const key = exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+    const paired = devices.pairRelay(devices.startPairing().code, "Phone", await key)!.device.id;
+    stop(first, a);
+    for (let restart = 0; restart < 3; restart++) stop(start(a, b, true), a);
+    expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ from: "legacy", admit_no: 0 }), [paired]: expect.objectContaining({ from: "remote", admit_no: 1 }) });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, [paired]: undefined });
+  });
+
   test("P22: with the release flag off a twin keeps this folder's own origin as main does, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
