@@ -284,7 +284,7 @@ export function createServer(
   const carried = opensAll && options.siblingStateDir && !untouched ? [...folderTombstones(stateDir), ...folderTombstones(options.siblingStateDir)] : [];
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {
-    try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
+    try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir, opensAll); }
     catch (error) { accountBlocked = `cannot merge the account tombstones of ${options.siblingStateDir}: ${error instanceof Error ? error.message : String(error)}`; }
     if (accountBlocked !== null) console.error(accountBlocked);
   }

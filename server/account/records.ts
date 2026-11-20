@@ -117,8 +117,9 @@ export async function applyEnrollment(store: DeviceStore, values: readonly unkno
     if (value === undefined || "refused" in value) throw new Error("Only a record that verified is applied");
     return value;
   };
-  const signed = (index: number) => Date.parse(record(index).issued_at);
-  for (const index of removes.sort((a, b) => signed(a) - signed(b))) {
+  const signed = (index: number) => record(index).issued_at;
+  // issued_at met ISO_MS at parse: a four-digit year, so string order is time order
+  for (const index of removes.sort((a, b) => signed(a) < signed(b) ? -1 : signed(a) > signed(b) ? 1 : 0)) {
     outcomes[index] = waited(apply(store, record(index), serverId, now, gates), record(index), values[index], options.wait, undecided);
   }
   for (let progress = true; progress && adds.length;) {

@@ -361,7 +361,9 @@ function readTombstones(path: string): AccountTombstone[] | null {
  * a key removed in either stays removed in both. Per key the later removal is kept. A file that will
  * not parse is left as it is, and the store then refuses account records there.
  */
-export function mergeAccountTombstones(active: string, sibling: string): string | null {
+export function mergeAccountTombstones(active: string, sibling: string, opensAll = false): string | null {
+  // with the flag on every local time met isIsoTime; with it off, main's own string order
+  const after = (a: string, b: string) => opensAll ? Date.parse(a) > Date.parse(b) : a > b;
   const paths = [join(active, "account-tombstones.json"), join(sibling, "account-tombstones.json")];
   const read = paths.map(readTombstones);
   // the active dir's own unreadable file stops its store anyway; a sibling's must too, or its removals are lost
@@ -374,8 +376,8 @@ export function mergeAccountTombstones(active: string, sibling: string): string 
     if (!kept) { merged.set(tombstone.key, tombstone); continue; }
     // the account's removal outranks a revoke on the PC (only it keeps a relay code out), with the later of the two times
     const local = (t: AccountTombstone) => t.record_id === "local";
-    const winner = local(kept) && !local(tombstone) ? tombstone : !local(kept) && local(tombstone) ? kept : Date.parse(tombstone.removed_at) > Date.parse(kept.removed_at) ? tombstone : kept;
-    const removedAt = Date.parse(tombstone.removed_at) > Date.parse(kept.removed_at) ? tombstone.removed_at : kept.removed_at;
+    const winner = local(kept) && !local(tombstone) ? tombstone : !local(kept) && local(tombstone) ? kept : after(tombstone.removed_at, kept.removed_at) ? tombstone : kept;
+    const removedAt = after(tombstone.removed_at, kept.removed_at) ? tombstone.removed_at : kept.removed_at;
     const records = local(winner) ? undefined : withRecords(winner.records, [...kept.records ?? [], ...tombstone.records ?? []]);
     const { records: _records, ...rest } = winner;
     merged.set(tombstone.key, { ...rest, removed_at: removedAt, ...(records ? { records } : {}) });
@@ -574,6 +576,15 @@ export class DeviceStore {
    * The store's one sequence of times (T26, P13): never before `now`, and always after every time this store has
    * ordered (a row's making, a Revoke, an unrevoke, a tombstone), so what is made after something is always later.
    */
+  /**
+   * Whether time `a` is after (or with `orSame`, not before) time `b`. With the flag on both are parsed, as every time
+   * met isIsoTime at open; with it off, main's own string order, whatever the files hold.
+   */
+  private later(a: string, b: string, orSame = false): boolean {
+    if (this.evidence === null) return orSame ? a >= b : a > b;
+    return orSame ? Date.parse(a) >= Date.parse(b) : Date.parse(a) > Date.parse(b);
+  }
+
   /** The times this PC wrote itself: rows' making, its own tombstones and Revokes; never a time a record carries (P13). */
   private ownTimes(): string[] {
     return [...this.devices.map((d) => d.created_at), ...this.tombstones.filter((t) => t.record_id === "local").map((t) => t.removed_at), ...this.evidence?.times() ?? []];
@@ -633,7 +644,7 @@ export class DeviceStore {
     // main's own rule stays the floor under the evidence: a tombstone of this PC keeps its key out, whatever path took
     // the evidence in or skipped it (P13, rule 1)
     const tombstoned = device.relay_public_key !== undefined
-      && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || Date.parse(t.removed_at) >= Date.parse(device.created_at)));
+      && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || this.later(t.removed_at, device.created_at, true)));
     return tombstoned || (this.evidence !== null && this.coveredByEvidence(device));
   }
 
@@ -1830,7 +1841,7 @@ export class DeviceStore {
     // a pairing of this key made on this PC after the removal was signed wins: a replayed or late remove
     // leaves it and its key be, and takes only the key's other rows. Any other row goes, however late the remove
     // arrives (pairedHere).
-    const newer = (d: StoredDevice) => d.relay_public_key === key && pairedHere(d) && Date.parse(d.created_at) > Date.parse(record.issuedAt);
+    const newer = (d: StoredDevice) => d.relay_public_key === key && pairedHere(d) && this.later(d.created_at, record.issuedAt);
     if (this.devices.some(newer)) {
       const gone = this.devices.filter((d) => d.relay_public_key === key && !newer(d));
       if (gone.length) this.drop(gone, record.by);
