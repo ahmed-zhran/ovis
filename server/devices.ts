@@ -411,6 +411,8 @@ export function mergeAccountTombstones(active: string, sibling: string, opensAll
  * devices.json, and shown to its own relay session alone (DeviceStore.sessionRow).
  */
 interface ProvisionalRow {
+  /** a screen or recover confirm of its key (T72): its link admits it with that origin */
+  readonly confirmed?: { readonly proof: ConfirmProof; readonly how: "code" | "qr" };
   readonly id: string;
   readonly label: string;
   /** the key its PAIR named; only an AUTH proves it */
@@ -445,6 +447,9 @@ function pairedHere(device: StoredDevice): boolean {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** How many keys may hold a reservation of one code at once (T71). */
+export const PENDING_PER_CODE = 5;
+
 export class DeviceStore {
   private devices: StoredDevice[] = [];
   /** when the first device was paired: from then on, only this PC, the owner's login, a device or the token get in */
@@ -463,7 +468,8 @@ export class DeviceStore {
    * `expires`: the wall-clock end of its ten minutes, which its `expires_at` shows; `deadline`: the same end on the
    * store's clock, which only moves forward; `over`: set the first time either says its ten minutes are over (codeOver)
    */
-  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string; reserved?: { readonly key: string; readonly how: "code" | "qr" } } | null = null;
+  private pending: { code: string; id: string; expires: number; deadline: number; over?: true; attempts: number; lanAttempts?: number; remote: boolean; startedBy: string | null; approvedIn?: string; memberRequired: boolean; open?: boolean; noAccountOnly?: boolean; holders: Set<string>; waiting?: WaitingRows; named?: { readonly account: string }; issuedUnder?: string; reserved?: Map<string, { readonly key: string; readonly how: "code" | "qr" }> } | null = null;
+  private readonly pairingEndedListeners = new Set<(codeId: string) => void>();
   /** How the latest codes made for an account ended, newest last: ENDED_ACCOUNT_CODES at most, in memory only. */
   private endedAccountCodes: Extract<AccountPairingState, { state: "ended" }>[] = [];
   /** What a row that waits to link, and the redemption of a code, is bounded on (useClock). */
@@ -762,6 +768,12 @@ export class DeviceStore {
     return state.freezes.every((freeze) => freeze.asof?.joined != null && admitNo < freeze.asof.joined);
   }
 
+  /** Hears every end of a code (cancel, expiry, an admission, Revoke all, a relay identity reset), by its id (T71). */
+  onPairingEnded(listener: (codeId: string) => void): () => void {
+    this.pairingEndedListeners.add(listener);
+    return () => { this.pairingEndedListeners.delete(listener); };
+  }
+
   /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
   onKeyRemoved(listener: (key: string, cause: KeyRemovedCause) => void): () => void {
     this.keyRemovedListeners.add(listener);
@@ -778,14 +790,15 @@ export class DeviceStore {
     if (!isRelayPublicKey(key)) return { ok: false, reason: "invalid_key" };
     if (!this.checkPairingCode(code, now)) { this.noteRelayFailure("code", now); return { ok: false, reason: "invalid_code" }; }
     const pending = this.pending!;
-    if (pending.reserved !== undefined || pending.waiting !== undefined) return { ok: false, reason: "in_use" };
-    pending.reserved = { key, how };
+    pending.reserved ??= new Map();
+    if (!pending.reserved.has(key) && pending.reserved.size >= PENDING_PER_CODE) return { ok: false, reason: "in_use" };
+    pending.reserved.set(key, { key, how });
     return { ok: true, codeId: pending.id, closesAt: new Date(pending.expires).toISOString(), origin: pending.remote ? "relay" : "pc", accountScope: this.account() };
   }
 
   /** The pending redemption of `key` under `codeId` ended (declined, expired, dropped): its use is free again. */
   releaseRedemption(codeId: string, key: string): void {
-    if (this.pending?.id === codeId && this.pending.reserved?.key === key) delete this.pending.reserved;
+    if (this.pending?.id === codeId) this.pending.reserved?.delete(key);
   }
 
   /**
@@ -795,14 +808,21 @@ export class DeviceStore {
    */
   admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover"; unrevokes?: readonly string[] }, now = Date.now()): DeviceMatch | null {
     const pending = this.pending;
-    if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || pending.reserved?.key !== confirm.key || this.codeOver(pending, now)) return null;
+    const reserved = pending?.reserved?.get(confirm.key);
+    if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || reserved === undefined || this.codeOver(pending, now)) return null;
     const proof: ConfirmProof = { codeId: confirm.codeId, key: confirm.key, source: confirm.source };
     MINTED_PROOFS.add(Object.freeze(proof));
     if (!this.admits(confirm.key, proof)) return null;
     // a Revoke that stands keeps the key out unless this confirm names it (P13)
     const revokes = this.evidence?.standingRevokes(confirm.key) ?? [];
     if (revokes.some((revoke) => !(confirm.unrevokes ?? []).includes(revoke.id))) return null;
-    const origin = this.pc.admit(confirm.source === "screen" ? "pc" : "recover", pending.reserved.how, null, now);
+    // a first-link code: the confirmed key waits to link, as a plain pairing of it would, and only its link admits it;
+    // the code's other reservations end here, so it admits one key (T72, T7 in 2d)
+    if (pending.waiting !== undefined) {
+      delete pending.reserved;
+      return this.waitToLink(pending.waiting, confirm.label, confirm.key, now, { proof, how: reserved.how });
+    }
+    const origin = this.pc.admit(confirm.source === "screen" ? "pc" : "recover", reserved.how, null, now);
     const existing = this.devices.find((d) => d.relay_public_key === confirm.key);
     if (existing !== undefined) {
       const next = this.devices.map((d) => d === existing ? { ...d, origin } : d);
@@ -1262,6 +1282,10 @@ export class DeviceStore {
     const id = this.pending?.id;
     const named = this.pending?.named;
     this.pending = null;
+    // every end of a code is heard: its reservations go with it (T71, S2-13 PendingRedemptions.dropCode)
+    if (id !== undefined) for (const listener of [...this.pairingEndedListeners]) {
+      try { listener(id); } catch (error) { console.warn(`[devices] a pairing-end listener failed: ${error instanceof Error ? error.message : String(error)}`); }
+    }
     if (waiting) for (const row of [...waiting.rows.values()]) this.dropProvisional(waiting, row, "code_ended");
     if (named && id !== undefined) {
       const joined = why === "joined" ? waiting?.joined : undefined;
@@ -1309,7 +1333,7 @@ export class DeviceStore {
   private dropWaiting(keys: readonly string[], cause: KeyRemovedCause = "remove"): void {
     // every key a deny takes ends its reservation and is told, each listener on its own (S2-13)
     for (const key of keys) {
-      if (this.pending?.reserved?.key === key) delete this.pending.reserved;
+      this.pending?.reserved?.delete(key);
       for (const listener of [...this.keyRemovedListeners]) {
         try { listener(key, cause); } catch (error) { console.warn(`[devices] a key removal listener failed: ${error instanceof Error ? error.message : String(error)}`); }
       }
@@ -1410,7 +1434,10 @@ export class DeviceStore {
     waiting.rows.delete(row.id);
     // the end of its code, which this write brings, names the device it brought in
     waiting.joined = { device_id: row.id, label: row.label };
-    try { this.bindingWith(link.account, link.key, () => this.enroll(device, now, [], false)); }
+    // a key confirmed on this PC's screen before its link keeps that origin, and only for the very key confirmed (T72)
+    const confirm = row.confirmed !== undefined && link.key === row.key ? row.confirmed : undefined;
+    if (confirm !== undefined && this.pc !== null) device.origin = this.pc.admit(confirm.proof.source === "screen" ? "pc" : "recover", confirm.how, null, now);
+    try { this.bindingWith(link.account, link.key, () => this.enroll(device, now, [], false, confirm ? { confirm: confirm.proof } : {})); }
     catch (error) {
       waiting.rows.set(row.id, row);
       delete waiting.joined;
@@ -1554,15 +1581,21 @@ export class DeviceStore {
     if (waiting.usesLeft === 0) return null;
     // asked last, as for any pairing: a relay pass that takes no new device makes no row and spends no use
     if (admit && this.isNewKey(publicKey) && !admit()) return null;
+    return { device: this.waitToLink(waiting, label, publicKey, now) };
+  }
+
+  /** A row in memory that has PAIRING_LINK_MS to link itself into an account; a screen confirm rides along to its link. */
+  private waitToLink(waiting: WaitingRows, label: string, publicKey: string, _now: number, confirmed?: { proof: ConfirmProof; how: "code" | "qr" }): DeviceMatch {
     let id = randomBytes(8).toString("hex");
     while (this.has(id) || waiting.rows.has(id)) id = randomBytes(8).toString("hex");
     const row: ProvisionalRow = {
       id, label: normalizeLabel(label, "Device"), key: publicKey, pairedAt: this.clock.now(), links: 0,
       cancel: this.clock.setTimeout(() => this.dropProvisional(waiting, row, "link_timeout"), PAIRING_LINK_MS),
+      ...(confirmed ? { confirmed } : {}),
     };
     waiting.usesLeft -= 1;
     waiting.rows.set(id, row);
-    return { device: { id, label: row.label, role: "watch" } };
+    return { id, label: row.label, role: "watch" };
   }
 
   assertRelayPairing(path: PairingFailurePath = "code", now = Date.now()): void {
