@@ -256,14 +256,17 @@ export function createServer(
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
   const opensAll = provided.accountOpensAll ?? accountOpensAll();
-  const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
   // the order is checked against this folder's own rows before the sibling merge, which may remove some (P21, S29)
-  if (admissions !== null) {
-    const own = readDeviceRegistry(join(stateDir, "devices.json"));
-    if (own.kind === "ok") admissions.checkRows(own.devices);
-  }
-  // a strict start changes nothing on disk: the damage stays for every later start to see until it is repaired (S29)
-  const untouched = admissions?.strict != null;
+  const checkedOrder = (dir: string) => {
+    const order = AdmissionOrder.open(dir);
+    const own = readDeviceRegistry(join(dir, "devices.json"));
+    if (own.kind === "ok") order.checkRows(own.devices);
+    return order;
+  };
+  const admissions = opensAll ? checkedOrder(stateDir) : null;
+  // a strict start changes nothing on disk, and nothing is merged with a damaged sibling either: the damage stays for
+  // every later start of either folder to see until it is repaired (S29)
+  const untouched = admissions?.strict != null || (opensAll && !!options.siblingStateDir && checkedOrder(options.siblingStateDir).strict !== null);
   const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {
