@@ -232,7 +232,7 @@ describe("the account's plan", () => {
 
   it("reads free as Free and any other plan as Pro", () => {
     expect(parseAccountPlan({ ...limits, plan: "free", source: null, ends_at: null })).toEqual({ plan: "free" });
-    expect(parseAccountPlan({ ...limits, plan: "plan-x", source: "grant", ends_at: null })).toEqual({ plan: "pro", source: "grant", ends_at: null });
+    expect(parseAccountPlan({ ...limits, plan: crypto.randomUUID(), source: "grant", ends_at: null })).toEqual({ plan: "pro", source: "grant", ends_at: null });
     expect(parseAccountPlan({ ...limits, source: "paid", ends_at: null })).toEqual({ plan: "pro", source: "paid", ends_at: null });
   });
 
