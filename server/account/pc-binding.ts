@@ -48,7 +48,7 @@ function parseDoc(value: unknown): (PcDoc & { counterOnly?: true }) | string {
   if (!Number.isSafeInteger(doc.next_admit) || doc.next_admit! < 1) return "invalid next_admit";
   // S2-03 wrote the counter alone: the binding is not migrated yet, and the upgrade takes it from the rows (T50)
   if (doc.binding === undefined && doc.clears === undefined && doc.first === undefined && doc.others_ever === undefined) {
-    return { v: 1, next_admit: doc.next_admit!, binding: null, clears: [], first: null, others_ever: false, counterOnly: true };
+    return { v: 1, next_admit: doc.next_admit!, binding: null, clears: [], first: null, others_ever: false, gen: 0, counterOnly: true };
   }
   const binding = doc.binding;
   if (binding !== null && !(typeof binding === "object" && binding !== undefined && typeof binding.account === "string" && ACCOUNT.test(binding.account) && typeof binding.bind_id === "string" && ID.test(binding.bind_id) && (binding.pending === undefined || binding.pending === true))) return "invalid binding";
