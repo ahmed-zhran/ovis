@@ -20,6 +20,7 @@ function machine() {
     closeSessions: (rowId, reason) => { events.push(`close ${rowId} ${reason}`); },
     heldByDevicesJson: () => false,
     admits: (key) => !frozen.has(nameOf(key)),
+    hasNoticeSlot: () => true,
     publish: () => {},
     now: () => clock.now,
     admitOrigin: listOrigins(),
