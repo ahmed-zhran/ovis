@@ -313,4 +313,26 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
       expect(open(dir).has(id)).toBe(false);
     } finally { setSystemTime(); }
   });
+
+  test("S19, P13: a time past year 9999 in a sibling's tombstone fails the PC closed; the revoked row stays out and the re-paired row is kept", async () => {
+    const dir = stateDir();
+    const first = startAt(dir, true);
+    const device = await relayDevice(first);
+    const store = first.app.context.services.devices;
+    store.revoke(device.id);
+    const revoked = readFileSync(join(dir, REMOVAL_FILE));
+    const again = store.pairRelay(store.startPairing().code, "Again", device.publicKey)!.device.id;
+    stopAt(first);
+    // the stop came before the re-pair's unrevoke
+    writeFileSync(join(dir, REMOVAL_FILE), revoked, { mode: 0o600 });
+    const sibling = stateDir();
+    put(sibling, "account-tombstones.json", tombstones([{ key: await key(), account: "", record_id: "local", removed_at: "+010000-01-01T00:00:00.000Z" }]));
+    const fixture = relayFixture(false, { stateDir: dir, siblingStateDir: sibling, accountOpensAll: true });
+    fixtures.push(fixture);
+    dirs.splice(dirs.indexOf(dir), 1);
+    const devices = fixture.app.context.services.devices;
+    expect(devices.failsClosed).toBe(true);
+    expect(devices.has(again)).toBe(true);
+    expect(await signsIn(fixture, device)).toBe(false);
+  });
 });
