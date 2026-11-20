@@ -245,4 +245,21 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     rmSync(join(dir, "account-tombstones.json"), { recursive: true, force: true });
     expect(await signsIn(startAt(dir, true), { ...one, id: second })).toBe(false);
   });
+
+  test("P13: with the registry blocked, a row a local tombstone newer than it covers is refused at relay sign-in", async () => {
+    const dir = stateDir();
+    const first = startAt(dir, true);
+    const device = await relayDevice(first);
+    stopAt(first);
+    put(dir, "account-tombstones.json", tombstones([{ key: device.publicKey, account: "", record_id: "local", removed_at: new Date(Date.now() + 60_000).toISOString() }]));
+    // a sibling folder whose registry will not parse: the merge fails, and the registry is blocked
+    const sibling = stateDir();
+    writeFileSync(join(sibling, "devices.json"), "not json", { mode: 0o600 });
+    const fixture = relayFixture(false, { stateDir: dir, siblingStateDir: sibling, accountOpensAll: true });
+    fixtures.push(fixture);
+    dirs.splice(dirs.indexOf(dir), 1);
+    expect(fixture.app.context.services.devices.hasKey(device.publicKey)).toBe(false);
+    expect(await signsIn(fixture, device)).toBe(false);
+  });
+
 });
