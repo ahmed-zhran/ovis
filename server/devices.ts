@@ -1536,7 +1536,7 @@ export class DeviceStore {
     const row = this.joinedRows.row(deviceId);
     if (member ? !member.held || this.stale(member) : !row || this.accountRowStale(row)) return null;
     const key = member?.relay_public_key ?? row?.key;
-    if (!key || !await verifyRelayProof(key, { nonce, signature, serverId }) || this.failsClosed()) return null;
+    if (!key || !await verifyRelayProof(key, { nonce, signature, serverId }) || this.failsClosed) return null;
     const currentMember = this.devices.find((d) => d.id === deviceId);
     if (member) {
       if (!currentMember || currentMember.relay_public_key !== key || this.stale(currentMember)) return null;
@@ -1574,7 +1574,7 @@ export class DeviceStore {
 
   private provedSayer(id: string, key: string): Sayer | null {
     const row = this.anyRow(id);
-    if (!key || row?.relay_public_key !== key || !row.origin || this.failsClosed()) return null;
+    if (!key || row?.relay_public_key !== key || !row.origin || this.failsClosed) return null;
     const joined = this.joinedRows?.row(id);
     const live = joined ? joined.state === "live" && !this.accountRowStale(joined) : !this.stale(row) && !this.promotedHolds.refusal(row, Date.now());
     return { key, drives: row.role === "drive", state: live ? "live" : "waiting", no: this.accountOrder?.no(key) ?? null,
