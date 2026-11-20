@@ -503,7 +503,8 @@ export class DeviceStore {
       console.error(this.error);
     }
     // the tombstone files' own repair asks only whether they could be read: a strict safety log is a separate refusal
-    if (this.error === null && this.accountProblem === null) {
+    // a strict order changes nothing on disk, not even a repair: its damage stays visible (S29)
+    if (this.error === null && this.accountProblem === null && this.admissions?.strict == null) {
       if (pending.length) {
         this.writeTombstones(this.tombstones);
         rmSync(this.pendingTombstonePath, { force: true });
@@ -579,7 +580,9 @@ export class DeviceStore {
     const approver = approverId !== undefined && this.isAccountApprover(approverId) ? this.devices.find((d) => d.id === approverId) : undefined;
     const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : approver !== undefined ? "member" : path.digits === true ? "digits" : "code";
     const by = approver?.relay_public_key ?? null;
-    return { ...device, origin: this.admissions.admit("remote", how, by, now) };
+    // a key this folder numbers is its own here, whatever copy the row came in as (P21)
+    const { imported: _copied, ...own } = device;
+    return { ...own, origin: this.admissions.admit("remote", how, by, now) };
   }
 
   /**
@@ -1688,7 +1691,9 @@ export class DeviceStore {
     const ownWord = device.account === undefined && device.member_approved_in !== account;
     const linked: StoredDevice = { ...device, relay_public_key: key, account, linked_at: new Date().toISOString(), link_moved_key: moved, ...(ownWord ? { joined_by: vouched ? "service" as const : "word" as const } : {}) };
     // a link that moves the key admits a key: a new place in this PC's order, never the old row's (P22, T11 in 2d)
-    const updated = key !== oldKey ? this.admitted(linked, Date.now()) : linked;
+    // the new key has no age of the key before it, flag on or off, until this PC numbers it (P22)
+    const { origin: _oldKeys, ...movedKey } = linked;
+    const updated = key !== oldKey ? this.admitted(movedKey, Date.now()) : linked;
     const next = this.devices.map((d) => d === device ? updated : d);
     this.save(next);
     this.devices = next;

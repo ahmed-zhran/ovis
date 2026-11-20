@@ -97,8 +97,8 @@ export class AdmissionOrder {
    * This folder's own rows as they are on disk before a sibling merge can remove any (P21, S29): a missing order file
    * beside a row it numbered, or one at or behind such a number, is damage. Run before the merge.
    */
-  checkRows(rows: readonly { readonly origin?: RowOrigin | undefined; readonly imported?: true | undefined }[]): void {
-    const numbers = rows.flatMap((row) => row.origin === undefined || row.origin.from === "legacy" || row.imported === true ? [] : [row.origin.admit_no]);
+  checkRows(rows: readonly { readonly origin?: RowOrigin | undefined }[]): void {
+    const numbers = rows.flatMap((row) => row.origin === undefined || row.origin.from === "legacy" ? [] : [row.origin.admit_no]);
     if (numbers.length === 0) return;
     if (this.fresh) this.missingBeside();
     else this.checkAbove(numbers);

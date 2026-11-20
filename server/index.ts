@@ -262,9 +262,11 @@ export function createServer(
     const own = readDeviceRegistry(join(stateDir, "devices.json"));
     if (own.kind === "ok") admissions.checkRows(own.devices);
   }
-  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
+  // a strict start changes nothing on disk: the damage stays for every later start to see until it is repaired (S29)
+  const untouched = admissions?.strict != null;
+  const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
-  if (options.siblingStateDir) {
+  if (options.siblingStateDir && !untouched) {
     try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
     catch (error) { accountBlocked = `cannot merge the account tombstones of ${options.siblingStateDir}: ${error instanceof Error ? error.message : String(error)}`; }
     if (accountBlocked !== null) console.error(accountBlocked);
