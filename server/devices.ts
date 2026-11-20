@@ -19,6 +19,7 @@ import type { SafetyGot, SafetyLog } from "./account/safety-log.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import type { DeviceJournal, JournalEntry, JournalInput } from "./account/device-journal.ts";
 import type { AccountOrder } from "./account/account-order.ts";
+import { HandedLifts } from "./account/handed-lift.ts";
 import type { DeviceNotice, NoticeReplay } from "../shared/account-devices-api.ts";
 import { AccountRecordError, parseAccountRecord, parseSafetyRecord, verifySafetyRecord, type AddRecord, type BlockRecord, type DeviceSafetyRecord, type RemoveRecord, type SafetyRecord } from "../shared/account-records.ts";
 import type { BlockReceipt } from "../shared/account-devices-api.ts";
@@ -507,6 +508,7 @@ export class DeviceStore {
    */
   private readonly safety: SafetyLog | null;
   private accountOrder: AccountOrder | null = null;
+  readonly handedLifts: HandedLifts;
   private readonly pc: PcAccountState | null;
   private readonly evidence: RemovalEvidence | null;
   private readonly journal: DeviceJournal | null;
@@ -517,6 +519,7 @@ export class DeviceStore {
   private readonly revokeAllPath: string;
   constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null } = {}) {
     this.safety = account.safety ?? null;
+    this.handedLifts = new HandedLifts(stateDir);
     this.pc = account.pc ?? null;
     this.evidence = account.removals ?? null;
     this.journal = account.journal ?? null;
@@ -1781,7 +1784,8 @@ export class DeviceStore {
     const key = this.relayKeyOf(deviceId) ?? order.relayKey(proof.serverId, deviceId);
     if (!key || order.no(key) === null || !await verifyRelayProof(key, proof)) return [];
     if (this.pc?.binding()?.bind_id !== binding.bind_id || order.lastVersion(binding.bind_id, proof.serverId) === null || this.failsClosed) return [];
-    return this.safety.receiptsBySigner(key, binding.account);
+    return this.safety.entries().filter(({ record }) => record.kind === "block" && record.signer === key && record.account === binding.account)
+      .map(({ n, record }) => ({ outcome: "applied", id: record.id, n }));
   }
 
   /** The transport owns a fresh 32-byte nonce per session and consumes AUTH only once. */
