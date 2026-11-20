@@ -166,7 +166,6 @@ export class AccountDeviceStore implements AccountRowSource {
     const entry = list.devices.find((candidate) => candidate.key === key && candidate.eligible);
     if (!expired || !entry || list.removed.some((gone) => gone.key === key) || list.account !== this.file.account) return false;
     if (!this.ports.hasNoticeSlot() || this.ports.heldByDevicesJson(key) || !this.ports.admits(key, list.account)) return false;
-    this.file = { ...this.file, devices: this.file.devices.filter((row) => row !== expired) };
     this.admit(entry, false);
     return true;
   }
@@ -236,7 +235,8 @@ export class AccountDeviceStore implements AccountRowSource {
       confirmed_at: iso(now), last_signin_day: null, state: bypass ? "live" : "hold", hold_until: null,
     };
     this.ports.journal({ kind: "admit", key: row.key, row: row.id, account: this.file.account, no: row.origin.admit_no, label: row.label });
-    this.write({ ...this.file, devices: [...this.file.devices, row] });
+    // Replacing an expired admission is atomic with this write; a failed journal must leave it expired in memory.
+    this.write({ ...this.file, devices: [...this.file.devices.filter((candidate) => candidate.key !== entry.key), row] });
     this.publish(row);
   }
 
