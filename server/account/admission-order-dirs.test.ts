@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -207,6 +207,18 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(false);
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ admit_no: 1 }), bbbbbbbbbbbbbbbb: undefined });
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, bbbbbbbbbbbbbbbb: expect.objectContaining({ admit_no: 1 }) });
+  });
+
+  test("S19: a folder whose sibling's order is damaged is not merged with it and fails closed, flag on or off, writing nothing", () => {
+    for (const flag of [true, false]) {
+      const [a, b] = [dir(), dir()];
+      put(b, [row("bbbbbbbbbbbbbbbb", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
+      const devices = start(a, b, flag).app.context.services.devices;
+      expect(devices.gated).toBe(true);
+      expect(devices.failsClosed).toBe(true);
+      expect(existsSync(join(a, "devices.json"))).toBe(false);
+      expect(persisted(b)).toEqual({ bbbbbbbbbbbbbbbb: expect.objectContaining({ admit_no: 1 }) });
+    }
   });
 
   test("P22: with the release flag off a twin keeps this folder's own origin, never the sibling's", () => {
