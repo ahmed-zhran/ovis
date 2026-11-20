@@ -61,7 +61,7 @@ describe("finishing a removal before reporting it (P8)", () => {
     const devices = store(dir);
     const [a, b, c] = [await key(), await key(), await key()];
     const idA = pairHere(devices, a);
-    const before = devices.gen();
+    const before = PcAccountState.open(dir).gen();
 
     // the registry write fails after the deny reached the disk: the session closes, the row is out, and it is reported
     const sessionA = closes(devices, idA);
@@ -69,7 +69,7 @@ describe("finishing a removal before reporting it (P8)", () => {
     expect(() => devices.revoke(idA)).toThrow();
     expect(sessionA.closed).toBe(true);
     expect(devices.sessionRow(idA)).toBeNull();
-    expect(devices.gen()).toBeGreaterThan(before);
+    expect(PcAccountState.open(dir).gen()).toBeGreaterThan(before);
 
     // the deny itself cannot be written: the session still closes, the call fails, and the PC fails closed
     const fresh = stateDir();

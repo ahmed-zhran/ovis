@@ -532,7 +532,8 @@ export class DeviceStore {
     // a Revoke all that stopped half way is finished before anything is served, whatever else could not be read (P8, T41)
     if (this.error === null && this.evidence !== null && existsSync(this.revokeAllPath)) {
       const gate = this.gateClosedAt ?? new Date().toISOString();
-      try { this.finishRevokeAll(this.devices, gate); } catch (error) {
+      // a deny recovered at start raises the generation, as the live path does (P8, T41)
+      try { this.pc?.raiseGen(); this.finishRevokeAll(this.devices, gate); } catch (error) {
         // what could not be finished on disk is finished in memory, and the PC fails closed until a start finishes it
         this.devices = [];
         this.gateClosedAt = gate;
@@ -657,7 +658,7 @@ export class DeviceStore {
 
   /** A row whose key was removed at or after the row was made: revoked, whether or not its own write happened yet. */
   private stale(device: StoredDevice): boolean {
-    if (device.relay_public_key !== undefined && this.failedDenies.has(device.relay_public_key)) return true;
+    if (this.unsavedRows.has(device.id) || (device.relay_public_key !== undefined && this.failedDenies.has(device.relay_public_key))) return true;
     // main's own rule stays the floor under the evidence: a tombstone of this PC keeps its key out, whatever path took
     // the evidence in or skipped it (P13, rule 1)
     const tombstoned = device.relay_public_key !== undefined
@@ -711,9 +712,6 @@ export class DeviceStore {
     }
     try { this.pc.migrate(account, hadDevices); } catch (error) { this.pc.unwritten(error); }
   }
-
-  /** P14: this PC's denial counter, 0 while the release flag is off. */
-  gen(): number { return this.pc?.gen() ?? 0; }
 
   /** The PC leaves its account, for one of the three named reasons (P12); nothing else clears the binding. */
   clearAccountBinding(reason: ClearReason, by: string): boolean {
@@ -1786,9 +1784,23 @@ export class DeviceStore {
       this.revocations.delete(device.id);
       for (const close of listeners ?? []) close();
     }
-    for (const device of gone) this.announceRemoval(device, by);
-    this.save(next, gate);
+    // the registry write is these rows' own deny when they hold no key (cookie rows): one that fails keeps them out for
+    // this run and the PC closed until a write lands (P8, S19); a removal is told once the write is tried (P8 step 5)
+    try {
+      this.save(next, gate);
+      this.unsavedRows.clear();
+      if (this.failedDenies.size === 0 && !existsSync(this.revokeAllPath)) this.denyProblem = null;
+    } catch (error) {
+      for (const device of gone) this.unsavedRows.add(device.id);
+      this.denyProblem = `A removal could not be written (${error instanceof Error ? error.message : String(error)}): only this PC itself gets in until one is.`;
+      throw error;
+    } finally {
+      for (const device of gone) this.announceRemoval(device, by);
+    }
   }
+
+  /** Rows a removal took out of memory whose registry write failed this run: still out until one lands (P8). */
+  private readonly unsavedRows = new Set<string>();
 
   /**
    * Revoke all in P8's order: `revoke-all.json` first, then the gate, the codes, the candidates and every row out of
@@ -1953,7 +1965,12 @@ export class DeviceStore {
    * row holding the key is revoked, closing its sessions.
    */
   removeAccountKey(key: string, account: string, record: { id: string; issuedAt: string; by?: { device_id: string; label: string }; signed?: RemoveRecord }, now = Date.now()): boolean {
-    this.assertAccountWritable();
+    // a deny that failed earlier does not keep a removal from trying again: its landing is what ends the closing (P8)
+    if (this.evidence !== null) {
+      this.assertWritable();
+      const refused = this.safety?.strict ?? this.pc?.strict ?? this.evidence.strict ?? this.accountProblem;
+      if (refused !== null) throw new Error(refused);
+    } else this.assertAccountWritable();
     if (this.evidence !== null) {
       // account-scoped evidence first, whatever rows this PC holds and with no time compared (T16 in 2d); every row
       // it covers goes, row by row, and a Revoke this PC made is never coalesced into it (T22)
