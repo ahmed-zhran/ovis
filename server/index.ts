@@ -574,6 +574,7 @@ export function createServer(
       const lock = safetyLog.state().locks.find((entry) => entry.record.id === lockId);
       safetyLog.appendUnlock(lockId, lock === undefined ? null : { account: lock.record.account });
     },
+    removalsPending: () => devices.pendingLockRemovals().length > 0,
   } }) : undefined;
   const { accountHolds, accountMailbox } = earlyQueues ?? openAccountQueues();
   const services: RequestServices = {
