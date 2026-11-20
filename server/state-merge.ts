@@ -115,9 +115,10 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // link undoes it. Otherwise the kept copy's mark, or, where both copies are in that account, the other's when the
     // kept one has none: a vouched mark goes with its own account only. Only a missing mark is none
     const { joined_by: own, origin: ownOrigin, ...rest } = device;
-    // with the release flag on an origin is kept only when both copies hold the same one for the same key: a row's age
-    // is never another dir's word (P22, T27 in 2d). With it off this dir's own copy is kept, as main does
-    const origin = !perDirOrigins ? ownOrigin : ownOrigin !== undefined && twin.relay_public_key === device.relay_public_key && sameOrigin(ownOrigin, twin.origin) ? ownOrigin : undefined;
+    // with the release flag on this dir keeps its own origin for the key it admitted; only a copy that carries another
+    // origin, or another key, takes it away: a copy with none erases nothing (P22, T27 in 2d). With it off this dir's
+    // own copy is kept, as main does
+    const origin = !perDirOrigins ? ownOrigin : keptOrigin(device, twin, takes ? twin.relay_public_key : device.relay_public_key);
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -234,9 +235,15 @@ type Intent = (ids: string[], sides: NonNullable<MergeRecord["pending"]>["sides"
 const closedFor = (read: ReturnType<typeof readDeviceRegistry>): boolean =>
   read.kind === "bad" || read.kind === "ok" && (read.gateClosedAt !== null || read.devices.length > 0);
 
-/** Two copies hold one origin: the same admission, field by field. */
-function sameOrigin(a: RowOrigin, b: RowOrigin | undefined): boolean {
-  return b !== undefined && a.from === b.from && a.how === b.how && a.by === b.by && a.admit_no === b.admit_no && a.at === b.at;
+/**
+ * The origin a folder's copy keeps after a merge whose row holds `key` (P22, T27 in 2d): its own, for the key it
+ * admitted, unless the other copy holds another origin or another key.
+ */
+function keptOrigin(copy: StoredDevice, other: StoredDevice, key: string | undefined): RowOrigin | undefined {
+  const own = copy.origin;
+  if (own === undefined || copy.relay_public_key !== key || other.relay_public_key !== key) return undefined;
+  const theirs = other.origin;
+  return theirs === undefined || own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
 }
 
 function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date, perDirOrigins: boolean): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
@@ -274,10 +281,11 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
   // and mark there, a twin the origin both copies agree on, and a row only this dir held is a copy there (P22, T50)
   const myCopy = new Map((mine?.devices ?? []).map((device) => [device.id, device]));
   const theirCopy = new Map((theirs?.devices ?? []).map((device) => [device.id, device]));
-  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin, imported: _here, ...device }) => {
+  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin: _here, imported: _marked, ...device }) => {
     const copy = theirCopy.get(device.id);
     if (copy === undefined) return { ...device, imported: true as const };
-    const kept = myCopy.has(device.id) ? origin : copy.origin;
+    const mineToo = myCopy.get(device.id);
+    const kept = mineToo === undefined ? copy.origin : keptOrigin(copy, mineToo, device.relay_public_key);
     return { ...device, ...(kept === undefined ? {} : { origin: kept }), ...(copy.imported ? { imported: true as const } : {}) };
   }) };
   // with a complete registry in it, the result holds every device not revoked since the last merge
