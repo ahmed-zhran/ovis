@@ -3,11 +3,12 @@
  * T72; the hub's and security-triage's S2-14 conditions), end to end through relay sessions: only an app that opts in
  * gets the replacement held for the screen, with a challenge the PC made; an old app is refused and keeps its key.
  */
-import { afterEach, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { cpSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { LINK_REPLACEMENT_OPT_IN, REPLACEMENT_NEEDS_APP } from "../../shared/account-devices-api.ts";
-import { pairFingerprint } from "../../shared/pair-fingerprint.ts";
+import { pairFingerprint, signPairProof } from "../../shared/pair-fingerprint.ts";
+import { DeviceJournal } from "./device-journal.ts";
 import { FrameType } from "../../shared/relay-mux.ts";
 import { bounded, deferred } from "../relay/test-helpers.ts";
 import { ask, linkRecord, pair, pairingPc, phone, provingDevice, screenPc, SERVER_ID, signIn, type Pc } from "./pairing.test-helpers.ts";
@@ -38,6 +39,25 @@ const link = async (session: { link: Parameters<typeof ask>[0] }, record: unknow
   ask(session.link, "/api/account/link", { method: "POST", body: optIn ? { record, replacement: LINK_REPLACEMENT_OPT_IN } : { record } });
 const rowOf = (made: Pc, id: string) => made.stored().find((row) => row.id === id) as { relay_public_key: string; origin?: { from: string; how: string; admit_no: number } } | undefined;
 const listKey = (made: Pc) => (JSON.parse(readFileSync(join(made.stateDir, "account-pc.json"), "utf8")) as { first: { list_key: string | null } | null }).first?.list_key ?? null;
+const replace = (session: Parameters<typeof link>[0], body: unknown) =>
+  ask(session.link, "/api/account/devices/replace", { method: "POST", body });
+
+async function replacement(made: Awaited<ReturnType<typeof pc>>) {
+  const device = await approved(made), next = await phone();
+  const record = await linkRecord(device.id, ACCOUNT, device.key, next);
+  const answer = await link(device, record, true);
+  expect(answer.status).toBe(202);
+  const held = answer.body.replacement;
+  if (!held || typeof held !== "object" || !("challenge" in held) || typeof held.challenge !== "string") throw new TypeError("Missing challenge");
+  const signature = await signPairProof(SERVER_ID, held.challenge, next.spki, next.keys.privateKey);
+  return { device, next, record, proof: { row: device.id, challenge: held.challenge, signature } };
+}
+
+function expectDrop(made: Pc, row: string, key: string, how: string) {
+  expect(DeviceJournal.open(made.stateDir).entries().filter((entry) => entry.kind === "drop" && entry.row === row)).toEqual([
+    expect.objectContaining({ key, how, no: null, by: "pc", account: null, label: "New phone" }),
+  ]);
+}
 
 test("P22/T7: an app that does not opt in is refused replacement_needs_app, nothing changes, and its key still signs in", async () => {
   const made = await pc();
@@ -46,24 +66,27 @@ test("P22/T7: an app that does not opt in is refused replacement_needs_app, noth
   const answer = await link(device, await linkRecord(device.id, ACCOUNT, device.key, await phone()), false);
   expect([answer.status, (answer.body as { error?: { code?: string } }).error?.code]).toEqual([409, REPLACEMENT_NEEDS_APP]);
   expect(rowOf(made, device.id)).toEqual(before);
+  expect((await made.status()).enrolling).toBe(false);
+  expect(existsSync(join(made.stateDir, "account-enrolling.json"))).toBe(false);
   expect(made.screen.open("approve_replacement")).toBeUndefined();
   expect("link" in await signIn(made, device.id, device.key)).toBe(true);
 });
 
 test("P22/T72: an app that opts in gets 202 with the PC's challenge; the key moves only on the screen's approval of that fingerprint", async () => {
   const made = await pc();
-  const device = await approved(made);
+  const { device, next, proof } = await replacement(made);
   const before = rowOf(made, device.id)!;
-  const next = await phone();
-  const answer = await link(device, await linkRecord(device.id, ACCOUNT, device.key, next), true);
-  expect(answer.status).toBe(202);
-  const held = (answer.body as { replacement: { challenge: string; fingerprint: string } }).replacement;
-  expect(held.fingerprint).toBe(await pairFingerprint(SERVER_ID, held.challenge, next.spki));
+  expect(before.relay_public_key).toBe(device.key.spki);
+  expect(made.screen.open("approve_replacement")).toBeUndefined();
+  expect((await replace(device, proof)).status).toBe(204);
+  expect((await replace(device, proof)).status).toBe(410);
+  const fingerprint = await pairFingerprint(SERVER_ID, proof.challenge, next.spki);
   expect(rowOf(made, device.id)).toEqual(before);
   const asked = made.screen.open("approve_replacement");
-  expect(asked?.action).toEqual({ kind: "approve_replacement", row: device.id, fingerprint: held.fingerprint });
+  expect(asked?.action).toEqual({ kind: "approve_replacement", row: device.id, fingerprint });
+  const moved = new Promise<void>((resolve) => made.devices.onLinked(device.id, () => resolve()));
   made.screen.approve(asked!.id);
-  await bounded((async () => { while (rowOf(made, device.id)?.relay_public_key !== next.spki) await new Promise((resolve) => setImmediate(resolve)); })());
+  await bounded(moved);
   expect(rowOf(made, device.id)?.origin).toMatchObject({ from: "pc", how: "link" });
   expect(rowOf(made, device.id)!.origin!.admit_no).toBeGreaterThan(before.origin!.admit_no);
   expect("error" in await signIn(made, device.id, device.key)).toBe(true);
@@ -73,13 +96,71 @@ test("P22/T72: an app that opts in gets 202 with the PC's challenge; the key mov
 
 test("P22: a decline on the screen drops the replacement; the approved key stays and signs in", async () => {
   const made = await pc();
-  const device = await approved(made);
+  const { device, next, proof } = await replacement(made);
   const before = rowOf(made, device.id);
-  expect((await link(device, await linkRecord(device.id, ACCOUNT, device.key, await phone()), true)).status).toBe(202);
-  made.screen.decline(made.screen.open("approve_replacement")!.id);
-  await bounded((async () => { while (made.app.context.services.devices.pendingReplacement(device.id) !== null) await new Promise((resolve) => setImmediate(resolve)); })());
+  expect((await replace(device, proof)).status).toBe(204);
+  const id = made.screen.open("approve_replacement")!.id;
+  const answered = made.app.context.services.localConfirms!.answer(id);
+  made.screen.decline(id);
+  expect(await bounded(answered)).toBe("declined");
+  expect((await replace(device, proof)).status).toBe(410);
+  expectDrop(made, device.id, next.spki, "declined");
   expect(rowOf(made, device.id)).toEqual(before);
   expect("link" in await signIn(made, device.id, device.key)).toBe(true);
+});
+
+test("P22/T72: proof is accepted only from the linking session, for its row, with no body key", async () => {
+  const made = await pc();
+  const { device, next, proof } = await replacement(made);
+  const other = await signIn(made, device.id, device.key);
+  if ("error" in other) throw new Error(other.error);
+  expect((await replace(other, proof)).status).toBe(403);
+  expect((await replace(device, { ...proof, row: "ab".repeat(8) })).status).toBe(403);
+  expect((await replace(device, { ...proof, key: next.spki })).status).toBe(400);
+  expect(made.screen.open("approve_replacement")).toBeUndefined();
+  expect((await replace(device, proof)).status).toBe(204);
+});
+
+test("T7/T72: the link signature alone cannot authorize a stored row's replacement", async () => {
+  const made = await pc();
+  const { device, record, proof } = await replacement(made);
+  expect((await replace(device, { ...proof, signature: record.signature })).status).toBe(403);
+  expect(made.screen.open("approve_replacement")).toBeUndefined();
+  expect(rowOf(made, device.id)?.relay_public_key).toBe(device.key.spki);
+});
+
+test("P22/T72: a successful same-key link supersedes even a proven replacement", async () => {
+  const made = await pc();
+  const { device, next, proof } = await replacement(made);
+  expect((await replace(device, proof)).status).toBe(204);
+  expect((await link(device, await linkRecord(device.id, ACCOUNT, device.key), true)).status).toBe(200);
+  expect(made.screen.open("approve_replacement")).toBeUndefined();
+  expectDrop(made, device.id, next.spki, "superseded");
+  expect((await replace(device, proof)).status).toBe(410);
+});
+
+test("P22/T72: the prompt survives two minutes but expires with the five-minute hold", async () => {
+  const made = await pc();
+  const { device, next, proof } = await replacement(made);
+  expect((await replace(device, proof)).status).toBe(204);
+  const id = made.screen.open("approve_replacement")!.id;
+  const confirms = made.app.context.services.localConfirms!;
+  const start = made.devices.pendingReplacement(device.id)!.at;
+  expect(confirms.pending().find((entry) => entry.id === id)?.expiresAt).toBeCloseTo(start + 300_000, -2);
+  using clock = spyOn(Date, "now").mockReturnValue(start + 300_001);
+  expect((await replace(device, proof)).status).toBe(410);
+  expectDrop(made, device.id, next.spki, "expired");
+});
+
+test("P22/T72: restarting from the held state journals the loss without restoring authority", async () => {
+  const made = await pc();
+  const { device, next, proof } = await replacement(made);
+  const restarted = await pairingPc({ prepare: (dir) => cpSync(made.stateDir, dir, { recursive: true, filter: (path) => !lstatSync(path).isSocket() }), server: { accountOpensAll: true } });
+  pcs.push(restarted);
+  const session = await signIn(restarted, device.id, device.key);
+  if ("error" in session) throw new Error(session.error);
+  expect((await replace(session, proof)).status).toBe(410);
+  expectDrop(restarted, device.id, next.spki, "restart");
 });
 
 test("T7/T11: a row the screen did not approve links as today, opt-in or not: the key moves at once, with no screen ask", async () => {
