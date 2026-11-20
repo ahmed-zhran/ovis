@@ -148,8 +148,9 @@ export class PendingRedemptions {
     this.#forgetNamed(challenge);
   }
 
-  /** A removal, block or Revoke of `key` drops what waits for it. */
+  /** A removal, block or Revoke of `key` drops its unanswered challenges and waiting entries. */
   dropKey(key: string, reason: string): void {
+    for (const [challenge, named] of this.#named) if (named.key === key) this.#forgetNamed(challenge);
     this.#drop((entry) => entry.key === key, reason);
   }
 
