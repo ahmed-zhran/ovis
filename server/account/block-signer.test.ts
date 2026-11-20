@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
@@ -103,6 +103,21 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     const row = fresh.devices.pairRelayApproved("Other", other.spki, { path: "account", addedBy: keeper.id })!;
     expect((await fresh.devices.applyWaitingBlocks()).map((receipt) => receipt.outcome)).toEqual(["applied"]);
     expect(fresh.devices.has(row.device.id)).toBe(false);
+  });
+
+  test("T73, S29: a blocked start lifts nothing at load, though a block's signer is no member here", async () => {
+    const { dir, devices, log } = pc();
+    const [signer, target] = [await member(devices), await member(devices)];
+    const record = await block(target.spki, signer);
+    await devices.applyBlock(record, "handed");
+    // the signer's row goes without the store, as a merge from another folder would take it
+    const registry = JSON.parse(readFileSync(join(dir, "devices.json"), "utf8")) as { devices: { id: string }[] };
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ ...registry, devices: registry.devices.filter((d) => d.id !== signer.id) }), { mode: 0o600 });
+    const before = readFileSync(join(dir, "account-log.json"), "utf8");
+    const reopened = SafetyLog.open(dir);
+    new DeviceStore(dir, "the order is damaged", null, { safety: reopened, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, reopened), journal: DeviceJournal.open(dir, () => reopened.ensureFile()) });
+    expect(readFileSync(join(dir, "account-log.json"), "utf8")).toBe(before);
+    expect(blocksInForce(log)).toEqual([record.id]);
   });
 
   test("T73: local signer removal appends durable lifts while markers, local Revokes and locks survive", async () => {
