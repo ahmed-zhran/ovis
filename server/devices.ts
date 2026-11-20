@@ -2406,7 +2406,7 @@ export class DeviceStore {
   relayKeyOf(id: string): string | undefined { return this.devices.find((d) => d.id === id)?.relay_public_key; }
 
   /** An `add` that verified: a new member row, announced like any other enrollment. Never for a tombstoned key. */
-  addAccountDevice(entry: { id: string; key: string; label: string; role: DeviceRole; account: string; addedBy: string; record?: AddRecord }, now = Date.now()): DeviceMatch | null {
+  addAccountDevice(entry: { id: string; key: string; label: string; role: DeviceRole; account: string; addedBy: string; record?: AddRecord }, now = Date.now()): DeviceMatch {
     this.assertAccountWritable();
     if (this.isTombstoned(entry.key)) throw new Error("tombstoned key");
     // an id another row holds would merge two devices' authority; a derived id collides only for the same key
@@ -2417,7 +2417,7 @@ export class DeviceStore {
       created_at: new Date(now).toISOString(), last_seen_at: null, account: entry.account, added_by: entry.addedBy,
       ...(entry.record === undefined ? {} : { account_add: entry.record }),
     };
-    if (!this.enroll(device, now, [], false)) return null;
+    if (!this.enroll(device, now, [], false)) throw new AdmissionRefusedError();
     // another key joined the account: the PC has had other devices, for good (T67, H2)
     if (this.pc !== null && this.pc.first()?.key !== entry.key) this.pc.setOthersEver();
     return { id: device.id, label: device.label, role: device.role };
