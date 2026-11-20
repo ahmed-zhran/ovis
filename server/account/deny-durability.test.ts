@@ -115,6 +115,7 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     const at = dir();
     const devices = store(at);
     const cookie = devices.pair(devices.startPairing().code, "Laptop", "drive")!;
+    devices.match(cookie.token);
     const rename = privateStateFs.renameSync;
     privateStateFs.renameSync = (from, to) => {
       if (to === join(at, "devices.json")) throw new Error("simulated EIO");
@@ -156,7 +157,7 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     const at = dir();
     const devices = store(at);
     const id = devices.pairRelay(devices.startPairing().code, "A", await key())!.device.id;
-    let onDisk: boolean | null = null;
+    let onDisk = null as boolean | null;
     devices.onRemoved(() => {
       const registry = readDeviceRegistry(join(at, "devices.json"));
       onDisk = registry.kind === "ok" && registry.devices.some((d) => d.id === id);
