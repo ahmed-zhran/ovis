@@ -23,7 +23,7 @@ async function key(): Promise<Key> {
 
 function open(dir: string) {
   const log = SafetyLog.open(dir);
-  return { log, devices: new DeviceStore(dir, null, null, { safety: log, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, log), journal: DeviceJournal.open(dir) }) };
+  return { log, devices: new DeviceStore(dir, null, null, { safety: log, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, log), journal: DeviceJournal.open(dir, () => log.ensureFile()) }) };
 }
 function pc() {
   const dir = mkdtempSync(join(tmpdir(), "ovis-block-signer-"));
