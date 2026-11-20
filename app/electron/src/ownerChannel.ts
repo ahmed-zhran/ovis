@@ -30,12 +30,28 @@ function pendingOf(line: string): OwnerPending[] | null {
   return pending;
 }
 
+/** The longest owner-channel line kept; a longer one is dropped whole up to its newline (R8). */
+export const OWNER_LINE_MAX = 1 << 20;
+
 export function ownerChannel(input: Readable, output: { write(line: string): boolean }, onPending: (pending: readonly OwnerPending[]) => void) {
   let listed = new Set<string>();
   let buffered = "";
+  let skipping = false;
   input.setEncoding("utf8");
   input.on("data", (chunk: string) => {
     buffered += chunk;
+    if (skipping) {
+      const end = buffered.indexOf("\n");
+      if (end < 0) { buffered = ""; return; }
+      buffered = buffered.slice(end + 1);
+      skipping = false;
+    }
+    if (buffered.length > OWNER_LINE_MAX && !buffered.slice(0, OWNER_LINE_MAX + 1).includes("\n")) {
+      console.error("Ovis: the server sent a desktop-owner line past the size cap");
+      const end = buffered.indexOf("\n");
+      if (end < 0) { buffered = ""; skipping = true; return; }
+      buffered = buffered.slice(end + 1);
+    }
     for (let end = buffered.indexOf("\n"); end >= 0; end = buffered.indexOf("\n")) {
       const line = buffered.slice(0, end);
       buffered = buffered.slice(end + 1);
