@@ -226,6 +226,28 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     }
   });
 
+  test("S29: a folder whose order is damaged is blocked at every start, flag on or off, sibling or not, and writes nothing", async () => {
+    for (const damage of ["missing", "behind"] as const) {
+      const at = dir();
+      const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
+      const keys = [await newKey(), await newKey()];
+      put(at, keys.map((key, n) => row(`${"a".repeat(15)}${n}`, { relay_public_key: key, origin: { from: "remote", how: "code", by: null, admit_no: n + 1, at: AT } })));
+      if (damage === "behind") writeFileSync(join(at, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+      // a removal of the first row that a stop left pending: processing it would erase a numbered row
+      writeFileSync(join(at, "account-tombstones.pending.json"), JSON.stringify({ v: 1, tombstones: [{ key: keys[0], account: "", record_id: "local", removed_at: "2026-10-02T00:00:00.000Z" }] }), { mode: 0o600 });
+      SafetyLog.open(at).append({ record: { v: 1, id: pcRecordId(), kind: "lock", account: "acct", target: null, signer: "pc", signed_at: AT, signature: "" } as SafetyRecord, got: "pc" });
+      const files = () => ["devices.json", "account-log.json", ADMISSION_FILE, "account-tombstones.json", "account-tombstones.pending.json"].map((name) => { try { return readFileSync(join(at, name), "utf8"); } catch { return null; } });
+      const before = files();
+      for (const flag of [false, true]) {
+        const devices = start(at, undefined, flag).app.context.services.devices;
+        expect(devices.gated).toBe(true);
+        expect(() => devices.startPairing()).toThrow();
+        stop(fixtures.at(-1)!, at);
+        expect(files()).toEqual(before);
+      }
+    }
+  });
+
   test("P22: with the release flag off a twin keeps this folder's own origin, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
