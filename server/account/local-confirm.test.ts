@@ -399,3 +399,13 @@ test("Q20: only an established connection names the peer, and two exact rows nam
   expect(peerUidInTable([TCP_HEADER, tcpRow(local, remote, 1000, "06")].join("\n"), 0x9c40, 0xa000)).toBeNull();
   expect(peerUidInTable([TCP_HEADER, tcpRow(local, remote, 1000), tcpRow(local, remote, 2000)].join("\n"), 0x9c40, 0xa000)).toBeNull();
 });
+
+test.if(linux)("P22/T72: the confirm page offers a Dismiss that only goes back to the list: the act stays open, unanswered", async () => {
+  const confirms = new LocalConfirms();
+  const { origin } = listener(confirms);
+  const { id } = confirms.request({ kind: "approve_replacement", row: "0123456789abcdef", fingerprint: "AB12-CD34" }, { title: "Approve this device's new key", lines: [] });
+  const { html } = await page(origin, id);
+  expect(html).toMatch(/<a href="\/" aria-label="Dismiss" title="Dismiss">/);
+  await fetch(`${origin}/`);
+  expect(confirms.isOpen(id)).toBe(true);
+});
