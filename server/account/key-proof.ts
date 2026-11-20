@@ -16,7 +16,7 @@ export interface RedeemSeams {
   admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover" }): DeviceMatch | null;
 }
 
-export type PairStart = { session: string; challenge: string } | { refuse: "key_proof_required" | "auth_failed" };
+export type PairStart = { session: string; challenge: string } | { refuse: "unsupported_version" | "auth_failed" };
 export type ProveResult = { pending: PendingRedemption } | { refuse: "auth_failed" };
 export interface Decision { admitted: DeviceMatch | null }
 
@@ -36,7 +36,8 @@ export class KeyProofPairings {
 
   /** A PAIR on a PC that needs the proof. A device that did not offer key-proof-1 is refused, never left waiting. */
   pair(request: { code: string; label: string; publicKey: string; how: "code" | "qr"; via: PendingVia; keyProof: boolean; serverId?: string }): PairStart {
-    if (!request.keyProof) return { refuse: "key_proof_required" };
+    // an app without the proof is told to update, in a code every released decoder knows
+    if (!request.keyProof) return { refuse: "unsupported_version" };
     const redeemed = this.#seams.redeemCode(request.code, request.how, request.publicKey);
     if (!redeemed.ok) return { refuse: "auth_failed" };
     let named: { challenge: string };

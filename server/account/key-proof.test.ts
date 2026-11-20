@@ -29,10 +29,10 @@ function setup(options: { codeOk?: boolean; admitted?: boolean } = {}) {
   return { pairings, pending, calls };
 }
 
-test("T71: a device that does not offer key-proof-1 is refused key_proof_required, never left waiting", async () => {
+test("T71: a device that does not offer key-proof-1 is refused unsupported_version, never left waiting", async () => {
   const { pairings, calls } = setup();
   const phone = await device();
-  expect(pairings.pair({ code: "123456", label: "Phone", publicKey: phone.spki, how: "code", via: "relay", keyProof: false })).toEqual({ refuse: "key_proof_required" });
+  expect(pairings.pair({ code: "123456", label: "Phone", publicKey: phone.spki, how: "code", via: "relay", keyProof: false })).toEqual({ refuse: "unsupported_version" });
   expect(calls).toEqual([]);
 });
 

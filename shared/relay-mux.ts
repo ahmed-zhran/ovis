@@ -64,7 +64,7 @@ export const WS_DATA_FLAGS = { START: 0x0001, END: 0x0002, TEXT: 0x0004 } as con
 export const SESSION_ERRORS = [
   "unsupported_version", "unsupported_extension", "unsupported_transport",
   "protocol_error", "auth_failed", "auth_revoked", "auth_changed",
-  "flow_control_error", "resource_exhausted", "timeout", "internal_error", "key_proof_required",
+  "flow_control_error", "resource_exhausted", "timeout", "internal_error",
 ] as const;
 export type SessionError = typeof SESSION_ERRORS[number];
 export const STREAM_ERRORS = [
