@@ -961,6 +961,18 @@ export class DeviceStore {
    * The waiting blocks judged again (P19, T51): one whose signer is no member here any more is dropped and writes
    * nothing; one whose target is here now applies, or is refused for good; the rest wait.
    */
+  /**
+   * Seam for D's S2-25: an account-list commit writes its rows through `write` (which returns their ids); the waiting
+   * blocks are then judged as an enrollment judges them, in the same turn, and the ids of the rows that still stand
+   * come back. A write that throws, or a PC that fails closed after it, lets no row stand (T51, P19).
+   */
+  admitListedRows(write: () => readonly string[]): string[] {
+    const ids = write();
+    this.applyWaitingBlocks();
+    if (this.failsClosed) return [];
+    return ids.filter((id) => this.has(id));
+  }
+
   private applyWaitingBlocks(): void {
     if (this.safety === null) return;
     for (const { record, got, signer_removed: signerRemoved } of [...this.safety.waitingBlocks()]) {
