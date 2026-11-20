@@ -774,6 +774,9 @@ export class DeviceStore {
     return () => { this.pairingEndedListeners.delete(listener); };
   }
 
+  /** P14: this PC's denial counter, 0 while the release flag is off; the admission guard compares it (records.ts). */
+  gen(): number { return this.pc?.gen() ?? 0; }
+
   /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
   onKeyRemoved(listener: (key: string, cause: KeyRemovedCause) => void): () => void {
     this.keyRemovedListeners.add(listener);
@@ -1519,7 +1522,7 @@ export class DeviceStore {
     const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
     // with the flag on a row is stamped after everything this store ordered before it (T26, P13)
     const device = this.evidence === null ? admitted : { ...admitted, created_at: this.nextStamp(Date.parse(admitted.created_at)) };
-    this.journalAdmission(device);
+    this.journalAdmission(device, path.by);
     const next = [...this.devices, device];
     const gate = this.gateClosedAt ?? device.created_at;
     this.save(next, gate);
