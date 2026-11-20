@@ -310,6 +310,7 @@ export function createServer(
     ...listNotices(journal, removals, (entry) => devices.publish(entry)),
     closeSessions: (id) => { devices.closeAccountSessions(id); },
     heldByDevicesJson: (key) => devices.hasKey(key),
+    checkFreshness: () => accountCatchUp.checkFreshness(),
     admits: (key, account) => devices.admitsFromList(key, account) && !accountMailbox.listHeld(key),
     now: () => Date.now(),
     setTimeout: (run, ms) => devices.waitClock().setTimeout(run, ms),
@@ -550,6 +551,7 @@ export function createServer(
     service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
   });
   const services: RequestServices = {
+    checkAccountFreshness: () => accountCatchUp.checkFreshness(),
     runtimeMove: options.runtimeService ? moveService({
       stateDir, port: server.port ?? DEFAULT_PORT, serving: runtime, facts: () => options.runtimeService?.facts(),
       lock: { path: moveLockPath(herdrSocketPath()) },

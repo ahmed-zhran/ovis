@@ -52,6 +52,7 @@ export interface JournalEntry {
 export type AccessAnswer = { readonly ok: true } | { readonly refused: "join_hold"; readonly seconds: number | null } | { readonly refused: "admission" | "not_listed" | "expired" | "catching_up" };
 
 export interface AccountRowPorts {
+  checkFreshness?(): void;
   readonly evidence?: RemovalEvidence;
   /** On disk when it returns; a drop already recorded for this admission is not repeated. */
   journal(entry: JournalEntry): void;
