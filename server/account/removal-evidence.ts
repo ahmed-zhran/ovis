@@ -126,9 +126,9 @@ export class RemovalEvidence {
   }
 
   /** A Revoke on this PC of a row holding `key`: its own entry, the deny that goes to disk before anything else. */
-  /** Every time this evidence holds, for the store's one sequence of times (DeviceStore.nextStamp). */
+  /** The times this PC wrote here, its Revokes and unrevokes, for the store's one sequence (DeviceStore.nextStamp); a removal's time is the record's. */
   times(): string[] {
-    return [...this.doc.revokes.map((r) => r.at), ...this.doc.unrevokes.map((u) => u.at), ...this.doc.markers.flatMap((m) => m.removals.map((r) => r.at))];
+    return [...this.doc.revokes.map((r) => r.at), ...this.doc.unrevokes.map((u) => u.at)];
   }
 
   addRevoke(key: string, account: string | null, now: number): void {
@@ -159,7 +159,7 @@ export class RemovalEvidence {
       if (tombstone.record_id === "local") {
         const id = localRevokeId(tombstone.key, tombstone.account, tombstone.removed_at);
         if (doc.revokes.some((r) => r.id === id)) continue;
-        const ended = rows.some((row) => row.relay_public_key === tombstone.key && row.pairedHere && row.created_at > tombstone.removed_at);
+        const ended = rows.some((row) => row.relay_public_key === tombstone.key && row.pairedHere && Date.parse(row.created_at) > Date.parse(tombstone.removed_at));
         doc = { ...doc, revokes: [...doc.revokes, { id, key: tombstone.key, account: tombstone.account === "" ? null : tombstone.account, at: tombstone.removed_at }],
           unrevokes: ended ? [...doc.unrevokes, { id: randomBytes(16).toString("hex"), revoke: id, at, by: "pc" }] : doc.unrevokes };
         continue;
@@ -172,7 +172,7 @@ export class RemovalEvidence {
     // a re-pair whose row reached the disk before its unrevoke did ends the Revoke it outlived (T26)
     for (const revoke of doc.revokes) {
       if (doc.unrevokes.some((u) => u.revoke === revoke.id)) continue;
-      if (rows.some((row) => row.relay_public_key === revoke.key && row.pairedHere && row.created_at > revoke.at)) doc = { ...doc, unrevokes: [...doc.unrevokes, { id: randomBytes(16).toString("hex"), revoke: revoke.id, at, by: "pc" }] };
+      if (rows.some((row) => row.relay_public_key === revoke.key && row.pairedHere && Date.parse(row.created_at) > Date.parse(revoke.at))) doc = { ...doc, unrevokes: [...doc.unrevokes, { id: randomBytes(16).toString("hex"), revoke: revoke.id, at, by: "pc" }] };
     }
     if (doc !== this.doc || !this.written) this.write(doc);
   }

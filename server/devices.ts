@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { isRowOrigin, legacyOrigin, type RowOrigin } from "./account/admission-order.ts";
 import type { ClearReason, PcAccountState } from "./account/pc-binding.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
-import { AccountRecordError, parseAccountRecord, type AddRecord, type RemoveRecord } from "../shared/account-records.ts";
+import { AccountRecordError, isIsoTime, parseAccountRecord, type AddRecord, type RemoveRecord } from "../shared/account-records.ts";
 import { type AccountPairing, type AccountPairingEnd, type AccountPairingState, type AccountPairingTurnedAway, type DevicePairedEvent, type DeviceRemovedEvent, type DevicePairToken, type DeviceRole, type DevicesRevokedAll, type PairedDevice, type DeviceConnection, STREAM_COOKIE_PREFIX } from "../shared/protocol.ts";
 import type { MuxClock } from "../shared/relay-mux-engine.ts";
 import type { Access } from "./access.ts";
@@ -374,8 +374,8 @@ export function mergeAccountTombstones(active: string, sibling: string): string 
     if (!kept) { merged.set(tombstone.key, tombstone); continue; }
     // the account's removal outranks a revoke on the PC (only it keeps a relay code out), with the later of the two times
     const local = (t: AccountTombstone) => t.record_id === "local";
-    const winner = local(kept) && !local(tombstone) ? tombstone : !local(kept) && local(tombstone) ? kept : tombstone.removed_at > kept.removed_at ? tombstone : kept;
-    const removedAt = tombstone.removed_at > kept.removed_at ? tombstone.removed_at : kept.removed_at;
+    const winner = local(kept) && !local(tombstone) ? tombstone : !local(kept) && local(tombstone) ? kept : Date.parse(tombstone.removed_at) > Date.parse(kept.removed_at) ? tombstone : kept;
+    const removedAt = Date.parse(tombstone.removed_at) > Date.parse(kept.removed_at) ? tombstone.removed_at : kept.removed_at;
     const records = local(winner) ? undefined : withRecords(winner.records, [...kept.records ?? [], ...tombstone.records ?? []]);
     const { records: _records, ...rest } = winner;
     merged.set(tombstone.key, { ...rest, removed_at: removedAt, ...(records ? { records } : {}) });
@@ -425,6 +425,8 @@ interface WaitingRows {
 function pairedHere(device: StoredDevice): boolean {
   return device.added_by === undefined && device.link_moved_key !== true;
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export class DeviceStore {
   private devices: StoredDevice[] = [];
@@ -527,6 +529,12 @@ export class DeviceStore {
     if (this.error === null && this.evidence !== null && this.evidence.strict === null && this.pc?.strict == null && pendingRead === null && tombstones !== null) {
       this.evidence.takeIn([...this.carried, ...tombstones], this.devices.map((d) => ({ relay_public_key: d.relay_public_key, created_at: d.created_at, pairedHere: pairedHere(d) })), Date.now());
     }
+    // a time this PC wrote that lies more than a day ahead is no time it wrote: it would push every later stamp past it,
+    // so the PC fails closed until it is repaired (S19, P13)
+    if (this.evidence !== null) {
+      const ahead = [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t) || Date.parse(t) > Date.now() + DAY_MS);
+      if (ahead !== undefined) this.accountProblem = `A time this PC wrote lies in the future (${ahead}): account records are refused until it is repaired.`;
+    }
     if (this.error === null && this.accountProblem === null && this.pc?.strict == null) {
       if (this.evidence !== null) this.takeInEvidence([...tombstones ?? [], ...pending]);
       else {
@@ -566,8 +574,13 @@ export class DeviceStore {
    * The store's one sequence of times (T26, P13): never before `now`, and always after every time this store has
    * ordered (a row's making, a Revoke, an unrevoke, a tombstone), so what is made after something is always later.
    */
+  /** The times this PC wrote itself: rows' making, its own tombstones and Revokes; never a time a record carries (P13). */
+  private ownTimes(): string[] {
+    return [...this.devices.map((d) => d.created_at), ...this.tombstones.filter((t) => t.record_id === "local").map((t) => t.removed_at), ...this.evidence?.times() ?? []];
+  }
+
   private nextStamp(now: number): string {
-    const times = [...this.devices.map((d) => d.created_at), ...this.tombstones.map((t) => t.removed_at), ...this.evidence?.times() ?? []];
+    const times = this.ownTimes();
     const last = Math.max(Number.NEGATIVE_INFINITY, ...times.map((t) => Date.parse(t)).filter((t) => Number.isFinite(t)));
     return new Date(Math.max(now, last + 1)).toISOString();
   }
@@ -620,7 +633,7 @@ export class DeviceStore {
     // main's own rule stays the floor under the evidence: a tombstone of this PC keeps its key out, whatever path took
     // the evidence in or skipped it (P13, rule 1)
     const tombstoned = device.relay_public_key !== undefined
-      && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || t.removed_at >= device.created_at));
+      && this.tombstones.some((t) => t.key === device.relay_public_key && (!pairedHere(device) || Date.parse(t.removed_at) >= Date.parse(device.created_at)));
     return tombstoned || (this.evidence !== null && this.coveredByEvidence(device));
   }
 
@@ -1817,7 +1830,7 @@ export class DeviceStore {
     // a pairing of this key made on this PC after the removal was signed wins: a replayed or late remove
     // leaves it and its key be, and takes only the key's other rows. Any other row goes, however late the remove
     // arrives (pairedHere).
-    const newer = (d: StoredDevice) => d.relay_public_key === key && pairedHere(d) && d.created_at > record.issuedAt;
+    const newer = (d: StoredDevice) => d.relay_public_key === key && pairedHere(d) && Date.parse(d.created_at) > Date.parse(record.issuedAt);
     if (this.devices.some(newer)) {
       const gone = this.devices.filter((d) => d.relay_public_key === key && !newer(d));
       if (gone.length) this.drop(gone, record.by);
