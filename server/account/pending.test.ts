@@ -98,6 +98,20 @@ test("T71: removing or blocking a key, or ending its code, drops its pending red
   expect(pending.list().map((open) => open.id)).toEqual([kept.entry.id]);
 });
 
+test("T71/S31: dropping a named key releases its code use and its challenge cannot enter the waiting list", async () => {
+  const released: { codeId: string; key: string }[] = [];
+  const pending = new PendingRedemptions({ serverId: SERVER, journalDrop: () => {}, release: (codeId, key) => { released.push({ codeId, key }); } });
+  const phone = await device();
+  const { challenge } = pending.name("code1", "Phone", phone.spki, "relay", undefined, { codeId: "use-1" });
+  const proof = await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey);
+
+  pending.dropKey(phone.spki, "removed");
+
+  expect(await pending.prove(challenge, proof)).toBeNull();
+  expect(pending.list()).toEqual([]);
+  expect(released).toEqual([{ codeId: "use-1", key: phone.spki }]);
+});
+
 test("T71: the PC's screen sees every redemption of a code side by side, with how each came", async () => {
   const { pending } = store();
   await proved(pending, "code1", "Phone");
