@@ -105,12 +105,14 @@ describe("recovery actions (device table R11)", () => {
 
 describe("a link the PC holds for its screen (P22, T7, T72)", () => {
   const challenge = "A".repeat(43);
-  test("the opt-in, the code an app without it gets, and the 202 body the app reads", () => {
+  test("P22/T72: the 202 carries a challenge; a legacy displayed fingerprint grants nothing", () => {
     expect(LINK_REPLACEMENT_OPT_IN).toBe(1);
     expect(REPLACEMENT_NEEDS_APP).toBe("replacement_needs_app");
-    expect(parseLinkReplacement({ challenge, fingerprint: "AB12-CD34" })).toEqual({ challenge, fingerprint: "AB12-CD34" });
+    expect(parseLinkReplacement({ challenge })).toEqual({ challenge });
+    expect(parseLinkReplacement({ challenge, fingerprint: "AB12-CD34" })).toEqual({ challenge });
   });
-  test("a challenge that is not 32 base64url bytes, or a fingerprint of another shape, is no replacement", () => {
+  test("P22/T72: only canonical 32-byte challenges and known fields parse", () => {
+    expect(parseLinkReplacement({ challenge: `${"A".repeat(42)}B`, fingerprint: "AB12-CD34" })).toBeNull();
     for (const value of [null, {}, { challenge: "short", fingerprint: "AB12-CD34" }, { challenge: `${"A".repeat(42)}=`, fingerprint: "AB12-CD34" }, { challenge, fingerprint: "ab12-cd34" }, { challenge, fingerprint: "AB12-CD34", extra: 1 }]) {
       expect(parseLinkReplacement(value)).toBeNull();
     }
