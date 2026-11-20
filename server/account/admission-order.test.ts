@@ -27,7 +27,11 @@ async function key(): Promise<string> {
   return Buffer.from(await crypto.subtle.exportKey("spki", pair.publicKey)).toString("base64url");
 }
 
-const store = (dir: string) => new DeviceStore(dir, null, null, { admissions: AdmissionOrder.open(dir) });
+/** A store as createServer opens it: the order is told which rows this folder held before its first start (T50). */
+const store = (dir: string) => {
+  const before = readDeviceRegistry(join(dir, "devices.json"));
+  return new DeviceStore(dir, null, null, { admissions: AdmissionOrder.open(dir, before.kind === "ok" ? before.devices.map((d) => d.id) : []) });
+};
 
 async function pairRelay(devices: DeviceStore, now: number): Promise<string> {
   const paired = devices.pairRelay(devices.startPairing(now).code, "Phone", await key(), now);
@@ -130,12 +134,13 @@ describe("one admission order per PC (origin and admit_no)", () => {
     expect(remoteReach(at(caller), noOrigin)).toBe(false);
     expect(remoteReach(noOrigin, at(caller))).toBe(false);
 
-    // a merge keeps an origin only when both copies hold the same one; a row only the other dir holds has none here
+    // a merge keeps this folder's own origin for its own rows, whatever the other folder numbered them; a row only the
+    // other folder holds has none here (P21: numbers are per folder)
     const other = { ...at(newer), origin: { ...at(newer).origin!, admit_no: 9 } };
     const onlyThere = { ...at(caller), id: randomBytes(8).toString("hex") };
-    const merged = mergeRegistries({ gate_closed_at: null, devices: [at(caller), at(newer)] }, { gate_closed_at: null, devices: [at(caller), other, onlyThere] }, { own: null, other: null });
+    const merged = mergeRegistries({ gate_closed_at: null, devices: [at(caller), at(newer)] }, { gate_closed_at: null, devices: [at(caller), other, onlyThere] }, { own: null, other: null }, undefined, true);
     expect(merged.devices.find((d) => d.id === caller)?.origin).toEqual(at(caller).origin);
-    expect(merged.devices.find((d) => d.id === newer)?.origin).toBeUndefined();
+    expect(merged.devices.find((d) => d.id === newer)?.origin).toEqual(at(newer).origin);
     expect(merged.devices.find((d) => d.id === onlyThere.id)?.origin).toBeUndefined();
   });
 
@@ -160,12 +165,12 @@ describe("one admission order per PC (origin and admit_no)", () => {
     expect(isRowOrigin({ from: "legacy", how: "legacy", by: null, admit_no: 0, at })).toBe(true);
     expect(isRowOrigin({ from: "remote", how: "code", by: null, admit_no: 0, at })).toBe(false);
     expect(isRowOrigin({ from: "legacy", how: "legacy", by: null, admit_no: 1, at })).toBe(false);
-    // (b) a row the other dir alone holds, or whose copies disagree, claims legacy for nothing after a merge
+    // (b) a row the other dir alone holds, or whose other copy claims legacy, takes nothing from that other copy
     const ours = { ...legacyRow(at), origin: { from: "remote" as const, how: "code" as const, by: null, admit_no: 3, at } };
     const claimed = { ...ours, origin: { from: "legacy" as const, how: "legacy" as const, by: null, admit_no: 0, at } };
     const stranger = { ...legacyRow(at), origin: claimed.origin };
-    const merged = mergeRegistries({ gate_closed_at: null, devices: [ours] }, { gate_closed_at: null, devices: [claimed, stranger] }, { own: null, other: null });
-    expect(merged.devices.find((d) => d.id === ours.id)?.origin).toBeUndefined();
+    const merged = mergeRegistries({ gate_closed_at: null, devices: [ours] }, { gate_closed_at: null, devices: [claimed, stranger] }, { own: null, other: null }, undefined, true);
+    expect(merged.devices.find((d) => d.id === ours.id)?.origin).toEqual(ours.origin);
     expect(merged.devices.find((d) => d.id === stranger.id)?.origin).toBeUndefined();
     // (c) after the pass every admission takes a number of its own, and a row added by hand later is never stamped
     const dir = stateDir();

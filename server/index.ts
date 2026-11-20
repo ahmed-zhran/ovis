@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, mergeAccountTombstones } from "./devices.ts";
+import { DeviceStore, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { SeenStore } from "./seen.ts";
@@ -255,7 +255,11 @@ export function createServer(
   const token = options.token ?? process.env["OVIS_TOKEN"] ?? "";
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
-  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
+  const opensAll = provided.accountOpensAll ?? accountOpensAll();
+  // the rows this folder held before its first start with the flag on, read before its sibling's join it (T50)
+  const ownBefore = readDeviceRegistry(join(stateDir, "devices.json"));
+  const admissions = opensAll ? AdmissionOrder.open(stateDir, ownBefore.kind === "ok" ? ownBefore.devices.map((device) => device.id) : []) : null;
+  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir, undefined, opensAll) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir) {
     try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
@@ -263,13 +267,11 @@ export function createServer(
     if (accountBlocked !== null) console.error(accountBlocked);
   }
   // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
-  const opensAll = provided.accountOpensAll ?? accountOpensAll();
   // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
   const logMerge = opensAll && options.siblingStateDir ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
   const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge) : null;
   // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
   try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
-  const admissions = opensAll ? AdmissionOrder.open(stateDir) : null;
   for (const strict of [safetyLog?.strict, admissions?.strict]) if (strict) console.error(strict);
   const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked, { safety: safetyLog, admissions });
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in

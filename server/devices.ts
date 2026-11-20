@@ -305,8 +305,10 @@ export function readDeviceRegistry(path: string): DeviceRegistry {
       && (d.linked_at === undefined || typeof d.linked_at === "string")
       && (d.link_moved_key === undefined || typeof d.link_moved_key === "boolean")
       && (d.account_add === undefined || isJsonObject(d.account_add))
-      && (d.origin === undefined || isRowOrigin(d.origin)))) return { kind: "bad" };
-  return { kind: "ok", gateClosedAt: parsed.gate_closed_at, devices: parsed.devices as StoredDevice[], placeholder: parsed.placeholder === true && parsed.devices.length === 0 };
+      )) return { kind: "bad" };
+  // an origin that cannot be read is no age (P22): the row stays, without it
+  const devices = (parsed.devices as StoredDevice[]).map((d) => d.origin === undefined || isRowOrigin(d.origin) ? d : (({ origin: _unreadable, ...rest }) => rest)(d));
+  return { kind: "ok", gateClosedAt: parsed.gate_closed_at, devices, placeholder: parsed.placeholder === true && parsed.devices.length === 0 };
 }
 
 /**
@@ -504,8 +506,9 @@ export class DeviceStore {
         rmSync(this.pendingTombstonePath, { force: true });
       }
       this.finishInterruptedWrites();
-      this.stampLegacy();
     }
+    // the one-time legacy pass asks only whether the registry could be read: nothing is admitted before it (T50)
+    if (this.error === null) this.stampLegacy();
   }
 
   /**
@@ -549,11 +552,13 @@ export class DeviceStore {
    * stop between the two stamps them again on the next start and never a row admitted since.
    */
   private stampLegacy(): void {
-    if (!this.admissions?.fresh || this.error !== null) return;
+    if (this.admissions === null || this.error !== null) return;
+    if (!this.admissions.fresh) { this.admissions.checkAbove(this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no])); return; }
     // a row numbered here means this folder had an order file: its loss is damage, and nothing is stamped (P21)
     if (this.devices.some((d) => d.origin !== undefined && d.origin.from !== "legacy")) { this.admissions.missingBeside(); return; }
-    if (this.devices.some((d) => d.origin === undefined)) {
-      const next = this.devices.map((d) => d.origin === undefined ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
+    const preUpgrade = this.admissions.preUpgrade;
+    if (this.devices.some((d) => d.origin === undefined && preUpgrade.has(d.id))) {
+      const next = this.devices.map((d) => d.origin === undefined && preUpgrade.has(d.id) ? { ...d, origin: AdmissionOrder.legacy(d.created_at) } : d);
       this.save(next);
       this.devices = next;
     }
@@ -563,9 +568,12 @@ export class DeviceStore {
   /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */
   private admitted(device: StoredDevice, now: number): StoredDevice {
     if (this.admissions === null) return device;
-    const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : device.added_by !== undefined ? "member" : "code";
-    // `by` names the approving member by its account key, as the shared contract reads it
-    const by = device.added_by === undefined ? null : this.devices.find((d) => d.id === device.added_by)?.relay_public_key ?? null;
+    // `by` is the account member who approved it, by its account key, and only a member (P22): the device that started
+    // the code when it is one, or the member named on the row
+    const approverId = device.added_by ?? this.pending?.startedBy ?? undefined;
+    const approver = approverId !== undefined && this.isAccountApprover(approverId) ? this.devices.find((d) => d.id === approverId) : undefined;
+    const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : approver !== undefined ? "member" : "code";
+    const by = approver?.relay_public_key ?? null;
     return { ...device, origin: this.admissions.admit("remote", how, by, now) };
   }
 

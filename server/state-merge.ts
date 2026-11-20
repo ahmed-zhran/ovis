@@ -16,7 +16,6 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MAX_PREFERENCES_BYTES, sharedPreferencesBody, type PreferencesChange } from "../shared/preferences.ts";
-import { mergedOrigin } from "./account/admission-order.ts";
 import { readDeviceRegistry, VOUCHED, type StoredDevice } from "./devices.ts";
 import { preparePrivateState, publishPrivateState, writePrivateState } from "./private-state.ts";
 import { normalizeEndpoint, PUSH_EXTRA_KEYS } from "./push.ts";
@@ -91,7 +90,7 @@ const earliest = (values: (string | null | undefined)[]): string | null =>
  */
 export function mergeRegistries(own: Registry | null, other: Registry | null,
   bases: { own: ReadonlySet<string> | null; other: ReadonlySet<string> | null },
-  incomplete: { own: boolean; other: boolean } = { own: false, other: false }): Registry {
+  incomplete: { own: boolean; other: boolean } = { own: false, other: false }, perDirOrigins = false): Registry {
   const mine = own?.devices ?? [];
   const theirs = other?.devices ?? [];
   const theirIds = new Set(theirs.map((device) => device.id));
@@ -116,7 +115,7 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // kept one has none: a vouched mark goes with its own account only. Only a missing mark is none
     const { joined_by: own, origin: ownOrigin, ...rest } = device;
     // an origin is kept only when both copies hold the same one: a row's age here is never another dir's word (T27 in 2d)
-    const origin = mergedOrigin(ownOrigin, twin.origin);
+    const origin = perDirOrigins ? ownOrigin : ownOrigin ?? twin.origin;
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -138,9 +137,9 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
   for (const device of theirs) {
     // revoked here since the last merge
     if (myIds.has(device.id) || own !== null && !incomplete.own && bases.own?.has(device.id)) continue;
-    // a row only the other dir holds has no place in this dir's order
+    // a row only the other dir holds has no place in this dir's order (with the release flag on)
     const { origin: _elsewhere, ...imported } = device;
-    devices.push(imported);
+    devices.push(perDirOrigins ? imported : device);
   }
   // every piece of evidence that either side was ever gated keeps the merge gated
   const gate = earliest([own?.gate_closed_at, other?.gate_closed_at, ...mine.map((d) => d.created_at), ...theirs.map((d) => d.created_at)]);
@@ -232,7 +231,7 @@ type Intent = (ids: string[], sides: NonNullable<MergeRecord["pending"]>["sides"
 const closedFor = (read: ReturnType<typeof readDeviceRegistry>): boolean =>
   read.kind === "bad" || read.kind === "ok" && (read.gateClosedAt !== null || read.devices.length > 0);
 
-function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
+function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date, perDirOrigins: boolean): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
   const ownPath = join(active, "devices.json");
   const otherPath = join(sibling, "devices.json");
   const baseOf = (dir: string, path: string): ReadonlySet<string> | null => {
@@ -262,13 +261,16 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
     }
     return { blocked: null, ids: [], changed: 0 };
   }
-  const merged = mergeRegistries(mine, theirs, bases, { own: ownIncomplete, other: otherIncomplete });
+  const merged = mergeRegistries(mine, theirs, bases, { own: ownIncomplete, other: otherIncomplete }, perDirOrigins);
+  // with the release flag on each folder keeps its own rows' origins: the sibling's file gets its own copies' (P21, P22)
+  const theirOrigin = new Map((theirs?.devices ?? []).map((device) => [device.id, device.origin]));
+  const otherMerged = !perDirOrigins ? merged : { ...merged, devices: merged.devices.map(({ origin: _mine, ...device }) => theirOrigin.get(device.id) === undefined ? device : { ...device, origin: theirOrigin.get(device.id)! }) };
   // with a complete registry in it, the result holds every device not revoked since the last merge
   const complete = mine !== null && !ownIncomplete || theirs !== null && !otherIncomplete;
   const onDisk = (read: typeof own) => read.kind === "ok" ? { gate_closed_at: read.gateClosedAt, devices: read.devices, ...(read.placeholder ? { placeholder: true } : {}) } : null;
   const added = merged.devices.filter((device) => !mine?.devices.some((held) => held.id === device.id)).length;
   const needOwn = text(onDisk(own)) !== text(merged);
-  const needOther = text(onDisk(other)) !== text(merged);
+  const needOther = text(onDisk(other)) !== text(otherMerged);
   const ownFailed = (error: unknown) => ({ ids: null, changed: 0, blocked: `Cannot write the paired devices of ${sibling} into ${ownPath} (${error instanceof Error ? error.message : String(error)}). Fix its permissions, then restart the server. External access without a token or trusted Tailscale login remains blocked.` });
   let ownTemp: string | null = null;
   let otherTemp: string | null = null;
@@ -277,7 +279,7 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
     try { ownTemp = preparePrivateState(ownPath, merged); } catch (error) { return ownFailed(error); }
   }
   if (needOther) {
-    try { otherTemp = preparePrivateState(otherPath, merged); } catch (error) { otherUnprepared = error; }
+    try { otherTemp = preparePrivateState(otherPath, otherMerged); } catch (error) { otherUnprepared = error; }
   }
   if (needOwn || needOther) {
     const side = (need: boolean, temp: string | null, base: ReadonlySet<string> | null) => ({ same: !need, temp, base: base === null ? null : [...base] });
@@ -496,11 +498,11 @@ function mergePush(active: string, sibling: string, base: MergeRecord | null, st
   }
 }
 
-export function mergeSiblingState(active: string, sibling: string, now = new Date()): SiblingMerge {
+export function mergeSiblingState(active: string, sibling: string, now = new Date(), perDirOrigins = false): SiblingMerge {
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   let blocked: string | null;
   try {
-    blocked = merge(active, sibling, now, stamp);
+    blocked = merge(active, sibling, now, stamp, perDirOrigins);
   } catch (error) {
     // whatever went wrong, the server still starts, gated: a start that failed would fall back to an older release
     blocked = `Cannot merge the state of ${sibling} into ${active} (${error instanceof Error ? error.message : String(error)}). External access without a token or trusted Tailscale login remains blocked; restart the server once it is fixed.`;
@@ -509,7 +511,7 @@ export function mergeSiblingState(active: string, sibling: string, now = new Dat
   return { devicesBlocked: blocked };
 }
 
-function merge(active: string, sibling: string, now: Date, stamp: string): string | null {
+function merge(active: string, sibling: string, now: Date, stamp: string, perDirOrigins: boolean): string | null {
   const pair = [realpath(active), realpath(sibling)].sort();
   let base: MergeRecord | null;
   try {
@@ -531,7 +533,7 @@ function merge(active: string, sibling: string, now: Date, stamp: string): strin
     try { writePrivateState(join(sibling, RECORD), intent); } catch {}
     return null;
   };
-  const devices = mergeDevices(active, sibling, base, stamp, intend, now);
+  const devices = mergeDevices(active, sibling, base, stamp, intend, now, perDirOrigins);
   const written = intent as MergeRecord | null;
   const preferences = mergePreferences(active, sibling, base, stamp);
   const push = mergePush(active, sibling, base, stamp);
