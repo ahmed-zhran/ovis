@@ -136,9 +136,10 @@ export class PendingRedemptions {
     this.#drop((entry) => entry.key === key, reason);
   }
 
-  dropCode(code: string): void {
-    for (const [challenge, named] of this.#named) if (named.code === code) this.#forgetNamed(challenge);
-    this.#drop((entry) => entry.code === code, "code_ended");
+  /** The code ended (cancelled, run out, used by an admission, Revoke all): what waits on it goes (DeviceStore.onPairingEnded). */
+  dropCode(codeId: string): void {
+    for (const [challenge, named] of this.#named) if (named.codeId === codeId) this.#forgetNamed(challenge);
+    this.#drop((entry) => entry.codeId === codeId, "code_ended");
   }
 
   #drop(which: (entry: PendingRedemption) => boolean, reason: string): void {
