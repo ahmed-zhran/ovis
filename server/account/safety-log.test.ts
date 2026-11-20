@@ -140,14 +140,28 @@ describe("the PC safety log (account-log.json)", () => {
     log.append({ record: pcRecord("unlock", lock2.id), got: "pc" });
     expect(replayed(SafetyLog.open(dir).state())).toEqual({ ...expected, locked: false, locks: [], freezes: [blockC.id] });
 
-    // the server replays it in createServer, before any listener answers; its signer is no member of this PC, so that
-    // same load lifts the block it signed (T73): the lift ends it and its freeze, and its marker stays
+    // T73: startup cannot lift a block just because its signer has no row here.
     const fixture = relayFixture(false, { stateDir: dir, accountOpensAll: true });
     fixtures.push(fixture);
     dirs.splice(dirs.indexOf(dir), 1);
     const served = fixture.app.context.services.safetyLog;
     expect(served).not.toBeNull();
-    expect(replayed(served!.state())).toEqual({ ...expected, locked: false, locks: [], blocks: [], freezes: [] });
+    expect(replayed(served!.state())).toEqual({ ...expected, locked: false, locks: [], freezes: [blockC.id] });
+  });
+
+  test("T73: lifting a standalone service freeze notifies its target after the lift is durable", async () => {
+    const dir = stateDir();
+    const log = SafetyLog.open(dir);
+    const target = await key();
+    const blockId = createHash("sha256").update("standalone freeze").digest("hex");
+    const freeze = serviceFreeze(blockId, target);
+    expect(log.append({ record: freeze, got: "snapshot" }).outcome).toBe("applied");
+    const lift = pcRecord("lift", blockId);
+    const heard: unknown[] = [];
+    log.onLifted((key, cause) => heard.push([key, cause, SafetyLog.open(dir).receipt(lift.id)?.outcome]));
+    expect(log.append({ record: lift, got: "pc", cause: "screen" }).outcome).toBe("applied");
+    expect(log.state().freezes).toEqual([]);
+    expect(heard).toEqual([[target, "screen", "applied"]]);
   });
 
   test("T28: missing or invalid log fails closed once journal exists", async () => {
