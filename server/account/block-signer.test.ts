@@ -140,6 +140,18 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(blocksInForce(open(dir).log)).toEqual([]);
   });
 
+  test("T73, seam for S2-27: every lift is heard with its target key and its cause, once it is on disk", async () => {
+    const { devices, log } = pc();
+    const heard: [string, string][] = [];
+    devices.onLifted((target, cause) => heard.push([target, cause]));
+    const [signer, target] = [await member(devices), await member(devices)];
+    const record = await block(target.spki, signer);
+    await devices.applyBlock(record, "handed");
+    devices.revoke(signer.id);
+    expect(heard).toEqual([[target.spki, "orphan"]]);
+    expect(log.entries().some((entry) => entry.record.kind === "lift" && entry.record.target === record.id)).toBe(true);
+  });
+
   test("T73: service-only removal or later signer reentry never changes those local endings", async () => {
     const { dir, devices, log } = pc();
     const [signer, target] = [await member(devices), await member(devices)];
