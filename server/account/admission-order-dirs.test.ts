@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
 import { readDeviceRegistry, type StoredDevice } from "../devices.ts";
 import { relayFixture } from "../relay/test-helpers.ts";
 import { ADMISSION_FILE, AdmissionOrder } from "./admission-order.ts";
+import { pcRecordId, SafetyLog } from "./safety-log.ts";
+import type { SafetyRecord } from "../../shared/account-records.ts";
 
 const AT = "2026-10-01T00:00:00.000Z";
 const dirs: string[] = [];
@@ -147,7 +149,13 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
       stop(there, b);
       if (damage === "missing") rmSync(join(a, ADMISSION_FILE));
       else writeFileSync(join(a, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
+      // the sibling's log holds a record this folder's does not, which a merge would copy here
+      SafetyLog.open(b).append({ record: { v: 1, id: pcRecordId(), kind: "lock", account: "acct", target: null, signer: "pc", signed_at: AT, signature: "" } as SafetyRecord, got: "pc" });
+      const logs = () => [a, b].map((at) => { try { return readFileSync(join(at, "account-log.json"), "utf8"); } catch { return null; } });
+      const before = logs();
       stop(start(a, b, true), a);
+      // a strict start writes nothing, the safety logs included
+      expect(logs()).toEqual(before);
       // the damage holds at every later start until it is repaired: no merge took the numbered rows away meanwhile
       expect(start(a, b, true).app.context.services.devices.failsClosed).toBe(true);
       expect(Object.keys(persisted(a)!).sort()).toEqual([...ids].sort());
