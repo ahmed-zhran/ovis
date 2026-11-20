@@ -358,4 +358,19 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     // a write that throws publishes nothing
     expect(() => devices.admitListedRows(() => { throw new Error("list write failed"); })).toThrow("list write failed");
   });
+
+  test("LEDGER S2-38 S10-2 (gate r3 at 54b12541, fails closed): a full queue whose overflow mark cannot be written still fails closed after a restart", async () => {
+    const { dir, devices, log } = pc();
+    const signer = await member(devices);
+    const absent = await key();
+    for (let i = 0; i < WAITING_MAX; i += 1) log.wait({ record: await block(absent.spki, signer), got: "mailbox", signer_removed: false });
+    const overflow = await block((await key()).spki, signer);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => { if (String(to).endsWith("account-log.json")) throw new Error("simulated EIO"); return rename(from, to); };
+    try { await devices.applyBlock(overflow, "mailbox"); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
+    log.close();
+    const reopened = open(dir);
+    try { expect(reopened.devices.failsClosed).toBe(true); } finally { reopened.log.close(); }
+  });
 });
