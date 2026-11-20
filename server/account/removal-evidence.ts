@@ -116,9 +116,11 @@ export class RemovalEvidence {
     if (marker?.removals.some((r) => r.id === removal.id)) return false;
     const entry: Removal = { id: removal.id, over: [...this.forgets(key, account)], tomb: removal.id, at: removal.at, ...(removal.records ? { records: [...removal.records] } : {}) };
     let removals = [...marker?.removals ?? [], entry];
+    // only a removal a forget already ended makes room: one that stands is never dropped, however many there are (T61)
     while (removals.length > MARKER_REMOVALS_MAX) {
       const drop = removals.findIndex((r) => r !== entry && !this.removalStands({ key, account, removals }, r));
-      removals.splice(drop >= 0 ? drop : 0, 1);
+      if (drop < 0) break;
+      removals.splice(drop, 1);
     }
     const next = { key, account, removals };
     this.write({ ...this.doc, markers: marker ? this.doc.markers.map((m) => m === marker ? next : m) : [...this.doc.markers, next] });
