@@ -240,15 +240,16 @@ const closedFor = (read: ReturnType<typeof readDeviceRegistry>): boolean =>
   read.kind === "bad" || read.kind === "ok" && (read.gateClosedAt !== null || read.devices.length > 0);
 
 /**
- * The origin a folder's copy keeps after a merge whose row holds `key` (P22, T27 in 2d): its own, for the key it
- * admitted, unless the other copy holds another origin or another key.
+ * The origin a folder's copy keeps after a merge whose row holds `key` (P22, T27 in 2d): its own exactly when its copy
+ * holds that key. Only another origin the other copy gives the same key takes it away; one for another key decides
+ * nothing.
  */
 function keptOrigin(copy: StoredDevice, other: StoredDevice, key: string | undefined): RowOrigin | undefined {
   const own = copy.origin;
   if (own === undefined || copy.relay_public_key !== key) return undefined;
   const theirs = other.origin;
-  if (theirs === undefined) return own;
-  return other.relay_public_key === key && own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
+  if (theirs === undefined || other.relay_public_key !== key) return own;
+  return own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
 }
 
 function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
