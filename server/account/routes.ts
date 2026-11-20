@@ -6,11 +6,14 @@ import { sameOrigin } from "../machine-security.ts";
 import { parseIntroducedPcs } from "./introductions.ts";
 import { ACCOUNT_HELD_MAX } from "./holds.ts";
 import { applyAccountRecords, applyEnrollment, applyLink, type LinkRefusal } from "./records.ts";
+import { LINK_REPLACEMENT_OPT_IN } from "../../shared/account-devices-api.ts";
+import { pairFingerprint } from "../../shared/pair-fingerprint.ts";
+import { askScreenForReplacement } from "./key-proof.ts";
 
 const LINK_STATUS: Record<LinkRefusal, number> = {
   record_invalid: 400, signature_invalid: 400, account_mismatch: 409, signer_not_member: 403,
   tombstoned: 409, link_not_owner: 403, key_in_use: 409, account_unavailable: 503, enrolling: 409, removal_pending: 409,
-  link_required: 403, unverified_device: 403, pairing_ended: 409, older_device: 403,
+  link_required: 403, unverified_device: 403, pairing_ended: 409, older_device: 403, replacement_needs_app: 409,
 };
 
 /**
@@ -95,7 +98,9 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       // disk in the turn that writes its row, before it (applyLink). So one whose link is refused, or outlives its
       // time, leaves none
       if (first && !arrival.provisional) context.services.accountHolds.startEnrolling(peer.device.id, { stale: true });
+      const optedIn = body.replacement === LINK_REPLACEMENT_OPT_IN;
       const linked = await applyLink(devices, body.record, { deviceId: peer.device.id, serverId: peer.serverId, sessionKey: peer.key, sessionId: peer.sessionId }, arrival, {
+        replacement: optedIn,
         gates: context.services.accountMailbox.gates(),
         barrier: () => context.services.accountHolds.startEnrollingBeforeRow(peer.device.id),
         setUpFor: () => context.services.relay.savedRelayAccount(),
@@ -109,6 +114,18 @@ export async function handleAccountRequest(request: Request, pathname: string, c
       }
       // the wait is this device's to end: a link refused meanwhile may have named another; the first link that succeeds keeps it
       if (first) context.services.accountHolds.confirmEnrolling(peer.device.id);
+      // a screen-approved key's move is held for this PC's screen (P22, T72): the challenge is the PC's own, minted with
+      // the replacement, so the fingerprint the app computes over its new key is the one the screen shows
+      const held = optedIn ? devices.pendingReplacement(peer.device.id) : null;
+      if (held !== null) {
+        const fingerprint = await pairFingerprint(peer.serverId, held.challenge, held.key);
+        const confirms = context.services.localConfirms;
+        if (confirms === undefined || !askScreenForReplacement(confirms, devices, { id: peer.device.id, label: linked.device.label }, fingerprint)) {
+          devices.declineReplacement(peer.device.id);
+          return fail("account_unavailable", "This PC's screen cannot approve a new key now", LINK_STATUS.account_unavailable);
+        }
+        return reply({ device: linked.device, replacement: { challenge: held.challenge, fingerprint } }, 202);
+      }
       return reply({ device: linked.device });
     }
     case "/api/account/records": {

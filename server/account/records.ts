@@ -4,9 +4,10 @@
  * a drive member of this PC's account, and never lets a removed key back in.
  */
 import { accountDeviceId, AccountRecordError, ACCOUNT_RECORDS_MAX, parseAccountRecord, verifyAccountRecord, type AccountRecord, type LinkRecord } from "../../shared/account-records.ts";
-import type { DeviceStore, LinkArrival } from "../devices.ts";
+import { ReplacementNeedsAppError, type DeviceStore, type LinkArrival } from "../devices.ts";
 import type { PairedDevice } from "../../shared/protocol.ts";
 import type { Vouch } from "./mailbox.ts";
+import { REPLACEMENT_NEEDS_APP } from "../../shared/account-devices-api.ts";
 
 export type RecordRefusal = "record_invalid" | "signature_invalid" | "account_mismatch" | "signer_not_member" | "tombstoned" | "link_not_owner" | "account_unavailable" | "enrolling" | "removal_pending" | "older_device";
 
@@ -149,10 +150,12 @@ export async function applyEnrollment(store: DeviceStore, values: readonly unkno
   });
 }
 
-export type LinkRefusal = RecordRefusal | "key_in_use" | "link_required" | "unverified_device" | "pairing_ended";
+export type LinkRefusal = RecordRefusal | "key_in_use" | "link_required" | "unverified_device" | "pairing_ended" | typeof REPLACEMENT_NEEDS_APP;
 
 /** What a link is held to on this PC besides its devices (server/account/routes.ts). */
 export interface LinkRules {
+  /** the app shows a replacement's fingerprint itself (LINK_REPLACEMENT_OPT_IN): only then may a screen-approved key's move be held for the screen (P22) */
+  replacement?: boolean;
   /** what holds a key back here (mailbox.ts `gates`) */
   gates?: AddGates;
   /**
@@ -305,7 +308,12 @@ export async function applyLink(store: DeviceStore, value: unknown, session: { d
   if (store.keyHeldByOther(link.key, deviceId)) return { refused: "key_in_use" };
   const takeBack = waits ? rules.barrier?.() : undefined;
   let device: PairedDevice | null = null;
-  try { device = store.linkAccountKey(deviceId, link.old_key, link.key, link.account, sessionId, vouched); }
+  try { device = store.linkAccountKey(deviceId, link.old_key, link.key, link.account, sessionId, vouched, rules.replacement === true); }
+  catch (error) {
+    // an app that cannot show the replacement's fingerprint keeps its key: nothing was written (P22)
+    if (!(error instanceof ReplacementNeedsAppError)) throw error;
+    return { refused: REPLACEMENT_NEEDS_APP, message: error.message };
+  }
   finally {
     // the row was not written: what went to disk for it goes too. Whatever kept the row from being written is the
     // failure to report, so a barrier that could not be taken back either is said beside it

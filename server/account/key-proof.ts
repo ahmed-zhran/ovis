@@ -161,3 +161,35 @@ export function askScreenForKey(confirms: LocalConfirms, pairings: KeyProofPairi
     else pairings.decline(entry.id);
   });
 }
+
+/** The replacement seams of server/devices.ts (Track A, S2-14). */
+export interface ReplacementSeams {
+  pendingReplacement(id: string): { readonly key: string; readonly at: number } | null;
+  declineReplacement(id: string): void;
+  replaceConfirmed(confirm: { row: string; key: string; source: "screen" }): DeviceMatch | null;
+}
+
+/**
+ * Puts a held key replacement on this PC's screen (P22, T72): only the screen's approval of exactly that fingerprint,
+ * used up once, moves the row to the new key. A decline or a confirm that runs out drops it; an answer to a
+ * replacement a newer link has since taken the place of changes nothing.
+ */
+export function askScreenForReplacement(confirms: LocalConfirms, devices: ReplacementSeams, row: { id: string; label: string }, fingerprint: string): boolean {
+  const held = devices.pendingReplacement(row.id);
+  if (held === null) return false;
+  const action = { kind: "approve_replacement" as const, row: row.id, fingerprint };
+  let id: string;
+  try {
+    id = confirms.request(action, { title: "Approve this device's new key", lines: [`${row.label} replaces its key`, "Compare these characters with the ones shown on the device."], fingerprint }).id;
+  } catch {
+    devices.declineReplacement(row.id);
+    return false;
+  }
+  void confirms.answer(id).then((answer) => {
+    const still = devices.pendingReplacement(row.id);
+    if (still === null || still.key !== held.key || still.at !== held.at) return;
+    if (answer === "approved" && confirms.consume(id, action)) devices.replaceConfirmed({ row: row.id, key: held.key, source: "screen" });
+    else devices.declineReplacement(row.id);
+  });
+  return true;
+}
