@@ -273,6 +273,8 @@ export function createServer(
   const blocked = pcAccount?.strict ?? damage(stateDir) ?? (options.siblingStateDir ? damage(options.siblingStateDir) : null);
   if (blocked !== null) console.error(blocked);
   const untouched = blocked !== null;
+  // a binding is trusted only once the sibling folder's clears are read: a cleared bind_id never stands again (P12, T59)
+  if (pcAccount !== null && options.siblingStateDir && !untouched) pcAccount.takeSibling(options.siblingStateDir);
   const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
   let accountBlocked: string | null = null;
   if (options.siblingStateDir && !untouched) {

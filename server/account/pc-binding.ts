@@ -17,7 +17,12 @@ import { DEVICE_JOURNAL_FILE } from "./safety-log.ts";
 
 export type ClearReason = "revoke_all" | "identity_reset" | "left_on_pc";
 export interface AccountClear { readonly bind_id: string; readonly reason: ClearReason; readonly by: string }
-export interface AccountBinding { readonly account: string; readonly bind_id: string }
+export interface AccountBinding {
+  readonly account: string;
+  readonly bind_id: string;
+  /** a first link's binding, on disk before its row: it stands only once the row is (T13) */
+  readonly pending?: true;
+}
 
 interface PcDoc {
   v: 1;
@@ -34,14 +39,18 @@ const REASONS: ReadonlySet<string> = new Set(["revoke_all", "identity_reset", "l
 const ID = /^[0-9a-f]{32}$/;
 const ACCOUNT = /^[A-Za-z0-9_-]{1,64}$/;
 
-function parseDoc(value: unknown): PcDoc | string {
+function parseDoc(value: unknown): (PcDoc & { counterOnly?: true }) | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not this PC's account state";
   const doc = value as Partial<PcDoc>;
   if (doc.v !== 1) return "unknown version";
   if (!Number.isSafeInteger(doc.next_admit) || doc.next_admit! < 1) return "invalid next_admit";
+  // S2-03 wrote the counter alone: the binding is not migrated yet, and the upgrade takes it from the rows (T50)
+  if (doc.binding === undefined && doc.clears === undefined && doc.first === undefined && doc.others_ever === undefined) {
+    return { v: 1, next_admit: doc.next_admit!, binding: null, clears: [], first: null, others_ever: false, counterOnly: true };
+  }
   const binding = doc.binding;
-  if (binding !== null && !(typeof binding === "object" && binding !== undefined && ACCOUNT.test(binding.account) && ID.test(binding.bind_id))) return "invalid binding";
-  if (!Array.isArray(doc.clears) || !doc.clears.every((clear) => typeof clear === "object" && clear !== null && ID.test(clear.bind_id) && REASONS.has(clear.reason) && typeof clear.by === "string")) return "invalid clears";
+  if (binding !== null && !(typeof binding === "object" && binding !== undefined && typeof binding.account === "string" && ACCOUNT.test(binding.account) && typeof binding.bind_id === "string" && ID.test(binding.bind_id) && (binding.pending === undefined || binding.pending === true))) return "invalid binding";
+  if (!Array.isArray(doc.clears) || !doc.clears.every((clear) => typeof clear === "object" && clear !== null && typeof clear.bind_id === "string" && ID.test(clear.bind_id) && REASONS.has(clear.reason) && typeof clear.by === "string")) return "invalid clears";
   if (binding !== null && doc.clears.some((clear) => clear.bind_id === binding.bind_id)) return "a cleared binding stands";
   const first = doc.first;
   if (first !== null && !(typeof first === "object" && first !== undefined && typeof first.key === "string" && (first.list_key === null || typeof first.list_key === "string"))) return "invalid first";
@@ -76,6 +85,8 @@ export class PcAccountState {
     state.doc = { v: 1, next_admit: 1, binding: null, clears: [], first: null, others_ever: false };
     state.problem = null;
     state.fresh = false;
+    state.upgradingFrom = false;
+    state.siblingBinding = null;
     let text: string;
     try { text = readFileSync(state.path, "utf8"); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") state.problem = `Cannot read ${state.path} (${(error as NodeJS.ErrnoException).code ?? String(error)})`;
@@ -87,7 +98,12 @@ export class PcAccountState {
     try { value = JSON.parse(text); } catch { state.problem = `${state.path} is not JSON`; return state; }
     const parsed = parseDoc(value);
     if (typeof parsed === "string") state.problem = `${state.path} cannot be trusted: ${parsed}`;
-    else state.doc = parsed;
+    else {
+      const { counterOnly, ...doc } = parsed;
+      state.upgradingFrom = counterOnly === true;
+      // a first link that stopped before its row was written bound nothing (T13)
+      state.doc = doc.binding?.pending === true ? { ...doc, binding: null, first: null } : doc;
+    }
     return state;
   }
 
@@ -125,7 +141,40 @@ export class PcAccountState {
     return this.problem === null ? null : `${this.problem}: only this PC itself gets in until the account state is restored.`;
   }
 
-  get migrating(): boolean { return this.fresh && this.problem === null; }
+  get migrating(): boolean { return (this.fresh || this.upgrading) && this.problem === null; }
+
+  /** S2-03's counter file, read: the rows are numbered already, and only the binding is migrated (T50). */
+  get upgrading(): boolean { return this.upgradingFrom && this.problem === null; }
+  private upgradingFrom = false;
+
+  /** A standing binding of the sibling folder, taken by this folder's migration (P12). */
+  private siblingBinding: AccountBinding | null = null;
+
+  /**
+   * The sibling folder's account file, read before this folder's binding is trusted (P12, T59): a bind_id either folder
+   * lists among its clears never stands, and two standing bindings to different accounts fail closed. The clears of
+   * both are kept here; the count stays this folder's own. A file that cannot be read fails closed (S19).
+   */
+  takeSibling(siblingDir: string): void {
+    if (this.problem !== null) return;
+    const path = join(realFolder(siblingDir), ADMISSION_FILE);
+    let parsed: ReturnType<typeof parseDoc>;
+    try { parsed = parseDoc(JSON.parse(readFileSync(path, "utf8"))); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      this.problem = `${path} cannot be read (${error instanceof Error ? error.message : String(error)})`;
+      return;
+    }
+    if (typeof parsed === "string") { this.problem = `${path} cannot be trusted: ${parsed}`; return; }
+    const clears = [...new Map([...this.doc.clears, ...parsed.clears].map((clear) => [clear.bind_id, clear])).values()];
+    const standing = (binding: AccountBinding | null) => binding !== null && binding.pending !== true && !clears.some((clear) => clear.bind_id === binding.bind_id) ? binding : null;
+    const own = standing(this.doc.binding);
+    const theirs = standing(parsed.binding);
+    if (own !== null && theirs !== null && own.account !== theirs.account) { this.problem = `${this.path} and ${path} bind this PC to two accounts`; return; }
+    this.siblingBinding = theirs;
+    const doc = { ...this.doc, binding: own, clears, others_ever: this.doc.others_ever || parsed.others_ever };
+    if (this.fresh) { this.doc = doc; return; }
+    if (JSON.stringify(doc) !== JSON.stringify(this.doc)) this.write(doc);
+  }
 
   /**
    * The migration's check, before any row is touched: the rows' accounts. Rows of two accounts name no binding to
@@ -140,8 +189,12 @@ export class PcAccountState {
   /** Ends the migration, once: a PC with rows has had other devices, so it never takes the first-device path (T67). */
   migrate(account: string | null, hadRows: boolean): void {
     if (!this.migrating) return;
-    this.write({ ...this.doc, binding: account === null ? null : { account, bind_id: randomBytes(16).toString("hex") }, others_ever: hadRows });
+    const sibling = this.siblingBinding;
+    if (sibling !== null && account !== null && sibling.account !== account) { this.problem = `${this.path}: this PC's devices name ${account}, its other folder ${sibling.account}`; return; }
+    const binding = sibling ?? (account === null ? null : { account, bind_id: randomBytes(16).toString("hex") });
+    this.write({ ...this.doc, binding, others_ever: this.doc.others_ever || hadRows });
     this.fresh = false;
+    this.upgradingFrom = false;
   }
 
   account(): string | null { return this.doc.binding?.account ?? null; }
@@ -161,12 +214,19 @@ export class PcAccountState {
   }
 
   /** The first link binds the PC; returns what takes this write back, should the row it belongs to not be written. */
-  bind(account: string, key: string): () => void {
+  bind(account: string, key: string): { commit: () => void; takeBack: () => void } {
     if (this.doc.binding !== null) throw new Error("This PC is already in an account");
-    const before = this.doc;
-    this.write({ ...this.doc, binding: { account, bind_id: randomBytes(16).toString("hex") }, first: { key, list_key: null }, others_ever: this.doc.others_ever || this.doc.clears.length > 0 });
-    return () => this.write(before);
+    const { first, others_ever } = this.doc;
+    const binding = { account, bind_id: randomBytes(16).toString("hex") };
+    this.write({ ...this.doc, binding: { ...binding, pending: true }, first: { key, list_key: null }, others_ever: others_ever || this.doc.clears.length > 0 });
+    return {
+      // the row is on disk: the binding stands from here, whatever fails after (T13)
+      commit: () => this.write({ ...this.doc, binding }),
+      // only the binding goes back; the count this turn took stays taken (P21)
+      takeBack: () => this.write({ ...this.doc, binding: null, first, others_ever }),
+    };
   }
+
 
   /** The PC leaves its account: only for one of the three named reasons. The clear is kept, and the file stays. */
   clear(reason: ClearReason, by: string): boolean {

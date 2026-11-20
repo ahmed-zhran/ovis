@@ -559,9 +559,20 @@ export class DeviceStore {
    */
   private migrate(): void {
     if (this.pc === null || this.error !== null) return;
-    if (!this.pc.migrating) { this.pc.checkAbove(this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no])); return; }
+    const numbered = this.devices.flatMap((d) => d.origin === undefined || d.origin.from === "legacy" ? [] : [d.origin.admit_no]);
+    if (!this.pc.migrating) { this.pc.checkAbove(numbered); return; }
+    // a PC that ever had a device, its rows revoked since, is no first-device PC (T67): its gate stayed closed
+    const hadDevices = this.devices.length > 0 || this.gateClosedAt !== null;
+    // S2-03's counter file: the rows are numbered already, and only the binding is migrated (T50)
+    if (this.pc.upgrading) {
+      this.pc.checkAbove(numbered);
+      const account = this.pc.migrationAccount(this.devices);
+      if (this.pc.strict !== null) return;
+      try { this.pc.migrate(account, hadDevices); } catch (error) { this.pc.unwritten(error); }
+      return;
+    }
     // a row numbered here means this folder had an account file: its loss is damage, and nothing is stamped (P21)
-    if (this.devices.some((d) => d.origin !== undefined && d.origin.from !== "legacy")) { this.pc.missingBeside(); return; }
+    if (numbered.length > 0) { this.pc.missingBeside(); return; }
     const account = this.pc.migrationAccount(this.devices);
     if (this.pc.strict !== null) return;
     const own = (d: StoredDevice) => d.origin === undefined && d.imported !== true;
@@ -571,7 +582,7 @@ export class DeviceStore {
       try { this.save(next); } catch (error) { this.pc.unwritten(error); return; }
       this.devices = next;
     }
-    try { this.pc.migrate(account, this.devices.length > 0); } catch (error) { this.pc.unwritten(error); }
+    try { this.pc.migrate(account, hadDevices); } catch (error) { this.pc.unwritten(error); }
   }
 
   /** The PC leaves its account, for one of the three named reasons (P12); nothing else clears the binding. */
@@ -584,12 +595,32 @@ export class DeviceStore {
    * that is not written takes its binding back (T13, T59).
    */
   private bindingWith<T>(account: string, key: string, write: () => T): T {
-    if (this.pc === null || this.pc.account() !== null) return write();
-    const takeBack = this.pc.bind(account, key);
-    try { return write(); } catch (error) {
-      try { takeBack(); } catch (left) { console.error(`[devices] the binding of a link that was not written could not be taken back: ${left instanceof Error ? left.message : String(left)}`); }
+    if (this.pc === null) return write();
+    if (this.pc.account() !== null) {
+      const result = write();
+      // a key other than the one that bound the PC joined it: the PC has had other devices, for good (T67, H2)
+      if (this.pc.first()?.key !== key) this.pc.setOthersEver();
+      return result;
+    }
+    const { commit, takeBack } = this.pc.bind(account, key);
+    const onDisk = () => this.devices.some((d) => d.relay_public_key === key && d.account === account);
+    let result: T;
+    try { result = write(); } catch (error) {
+      // a failure after the row reached the disk takes nothing back: the admission is durable (T13)
+      if (!onDisk()) {
+        try { takeBack(); } catch (left) { console.error(`[devices] the binding of a link that was not written could not be taken back: ${left instanceof Error ? left.message : String(left)}`); }
+        throw error;
+      }
+      this.commitBinding(commit);
       throw error;
     }
+    this.commitBinding(commit);
+    return result;
+  }
+
+  /** The binding of a first link whose row is on disk stands; one that cannot be marked so leaves the PC strict (S19). */
+  private commitBinding(commit: () => void): void {
+    try { commit(); } catch (error) { this.pc?.unwritten(error); }
   }
 
   /** The origin a row admitted now carries; none while the release flag is off. Every path is `remote` until a key confirm on this PC's screen exists (P22). */
@@ -1531,13 +1562,20 @@ export class DeviceStore {
     this.voidPending("revoked");
     this.unconfirmedFirstPairs = [];
     // the PC leaves its account with every row (P8, P12); one that could not be written keeps the PC bound, never less
+    let unbound: unknown = null;
     try { this.clearAccountBinding("revoke_all", "pc"); }
-    catch (error) { console.error(`[devices] Revoke all could not clear this PC's account: ${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) {
+      // the PC fails closed until its account state is written: Revoke all is not reported done (S19)
+      unbound = error;
+      this.pc?.unwritten(error);
+      console.error(`[devices] Revoke all could not clear this PC's account: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const listeners = [...this.revocations.values()];
     this.revocations.clear();
     for (const closes of listeners) for (const close of closes) close();
     for (const listener of [...this.revokeAllListeners]) listener();
     for (const device of gone) this.announceRemoval(device, "pc");
+    if (unbound !== null) throw unbound;
     return revoked;
   }
 

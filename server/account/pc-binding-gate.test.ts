@@ -53,7 +53,7 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     const [a, b] = [stateDir(), stateDir()];
     const one = PcAccountState.open(a);
     one.migrate(null, false);
-    one.bind(ACCOUNT, "first");
+    one.bind(ACCOUNT, "first").commit();
     writeFileSync(join(b, ADMISSION_FILE), readFileSync(join(a, ADMISSION_FILE)), { mode: 0o600 });
     one.clear("left_on_pc", "pc");
     // the stale copy starts beside the folder that cleared its binding
@@ -63,7 +63,7 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     for (const [dir, account] of [[c, "acct_a"], [d, "acct_b"]] as const) {
       const state = PcAccountState.open(dir);
       state.migrate(null, false);
-      state.bind(account, account);
+      state.bind(account, account).commit();
     }
     expect(start(c, true, d).failsClosed).toBe(true);
   });
