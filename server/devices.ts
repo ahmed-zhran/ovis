@@ -1823,6 +1823,16 @@ export class DeviceStore {
     const gateWasOpen = !this.rawGated;
     const denied = this.deny(gone.flatMap((d) => d.relay_public_key ?? []), () => writePrivateState(this.revokeAllPath, { id: randomBytes(16).toString("hex"), by: "pc", at: now, rows: gone }));
     const gate = this.gateClosedAt ?? this.devices[0]?.created_at ?? now;
+    // a file that could not be written holds nothing: the rows stay where the next Revoke all finds them, out of every
+    // session meanwhile, and the PC closed (P8, T20)
+    if (denied !== null) {
+      this.keepOut(gone);
+      this.gateClosedAt = gate;
+      this.voidPending("revoked");
+      this.unconfirmedFirstPairs = [];
+      if (gateWasOpen) this.tellGateClosed();
+      throw denied;
+    }
     this.devices = [];
     this.gateClosedAt = gate;
     this.voidPending("revoked");
@@ -1854,6 +1864,14 @@ export class DeviceStore {
     if (this.pc?.strict != null) throw new Error(this.pc.strict);
     this.clearAccountBinding("revoke_all", "pc");
     rmSync(this.revokeAllPath, { force: true });
+    // every row and key it covered is revoked on disk now: their earlier failures end
+    for (const row of rows) {
+      this.failedRows.delete(row.id);
+      if (row.relay_public_key !== undefined) this.failedDenies.delete(row.relay_public_key);
+    }
+    this.settleDenies();
+    // the tombstone file follows the evidence once nothing keeps account records refused any more (P13)
+    if (this.evidence?.strict === null && this.accountError === null) this.refreshTombstones();
   }
 
   /** The rows a Revoke all covers: those its pending file names, and every row this store holds now (T20). */
