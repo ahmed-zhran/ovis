@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -228,5 +228,52 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     };
     try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
     expect(devices.accountError ?? "").not.toContain("before the upgrade");
+  });
+
+  test("P8, T20: a Revoke all whose Revokes failed and a second Revoke all keep the first one's keys out", async () => {
+    const at = dir();
+    const devices = store(at);
+    const a = await key();
+    devices.pairRelay(devices.startPairing().code, "A", a);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, REMOVAL_FILE)) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    // the file names what it covers, so no later Revoke all can finish it without them
+    expect(JSON.stringify(JSON.parse(readFileSync(join(at, "revoke-all.json"), "utf8")))).toContain(a);
+    try { devices.revokeAll(); } catch { /* the PC is closed until a start finishes it */ }
+    const reopened = store(at);
+    expect(reopened.hasKey(a)).toBe(false);
+    expect(reopened.isTombstoned(a)).toBe(true);
+  });
+
+  test("T3: Revoke all on a store that never closed its gate tells every gate listener", async () => {
+    const at = dir();
+    const devices = store(at);
+    let told = false;
+    devices.onGateClosed(() => { told = true; });
+    devices.revokeAll();
+    await Promise.resolve();
+    expect(told).toBe(true);
+  });
+
+  test("P8, P12: a Revoke all that cannot clear the binding at start keeps its file, and a start after the repair clears it", async () => {
+    const at = dir();
+    const devices = store(at);
+    const k = await key();
+    const id = devices.pairRelay(devices.startPairing().code, "A", k)!.device.id;
+    devices.linkAccountKey(id, k, k, "acct_1");
+    expect(PcAccountState.open(at).account()).toBe("acct_1");
+    const binding = readFileSync(join(at, "account-pc.json"));
+    writeFileSync(join(at, "revoke-all.json"), JSON.stringify({ id: "a".repeat(32), by: "pc", at: new Date().toISOString() }), { mode: 0o600 });
+    writeFileSync(join(at, "account-pc.json"), "not json", { mode: 0o600 });
+    expect(store(at).failsClosed).toBe(true);
+    expect(existsSync(join(at, "revoke-all.json"))).toBe(true);
+    writeFileSync(join(at, "account-pc.json"), binding, { mode: 0o600 });
+    store(at);
+    expect(PcAccountState.open(at).account()).toBeNull();
+    expect(existsSync(join(at, "revoke-all.json"))).toBe(false);
   });
 });
