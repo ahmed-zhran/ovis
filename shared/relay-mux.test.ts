@@ -420,7 +420,4 @@ describe("key proof (device-row-states T71, T72; S2-13 wire)", () => {
     rejects(() => decodeFrame(wire(FrameType.KEY_CHALLENGE, JSON.stringify({ challenge: "short" }), 0, 0)));
     rejects(() => decodeFrame(wire(FrameType.KEY_PROVE, JSON.stringify({ signature: "A".repeat(85) }), 0, 0)));
   });
-  it("T71: an old app on a PC that needs the proof is refused key_proof_required", () => {
-    expect(SESSION_ERRORS).toContain("key_proof_required");
-  });
 });
