@@ -39,11 +39,14 @@ it.each(["en", "ko", "ja", "zh"] as const)("P22/T72: a link the PC holds for its
 
 it("P22/T72: the replacement card's Dismiss only hides it here", async () => {
   const browser = createShellTestPage();
+  // the settings provider reads the page's computed style, which this page does not model
+  const computed = (globalThis as { getComputedStyle?: unknown }).getComputedStyle;
+  (globalThis as { getComputedStyle?: unknown }).getComputedStyle = () => ({ getPropertyValue: () => "" });
   try {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<SettingsProvider><EnrollmentStatus state={{ kind: "replacement", fingerprint: "AB12-CD34" }} pc="Desk" /></SettingsProvider>); });
     const dismiss = renderer.root.find((node) => node.type === "button" && node.props["aria-label"] === translate("en", "Dismiss"));
     await act(async () => { dismiss.props.onClick(); });
     expect(renderer.root.findAll((node) => node.props["data-replacement"] === "AB12-CD34")).toEqual([]);
-  } finally { browser.dispose(); }
+  } finally { (globalThis as { getComputedStyle?: unknown }).getComputedStyle = computed; browser.dispose(); }
 });

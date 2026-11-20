@@ -411,7 +411,8 @@ function listPage(open: readonly OpenConfirm[]): string {
 function confirmPage(open: OpenConfirm, nonce: string): string {
   const lines = open.shown.lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("");
   const fingerprint = open.shown.fingerprint === undefined ? "" : `<p>Key fingerprint: <strong>${escapeHtml(open.shown.fingerprint)}</strong></p>`;
-  return `<!doctype html><title>Ovis: ${escapeHtml(open.shown.title)}</title><h1>${escapeHtml(open.shown.title)}</h1>${lines}${fingerprint}`
+  // Dismiss goes back to the list only: the act stays open until it is answered or runs out
+  return `<!doctype html><title>Ovis: ${escapeHtml(open.shown.title)}</title><a href="/" aria-label="Dismiss" title="Dismiss">&times;</a><h1>${escapeHtml(open.shown.title)}</h1>${lines}${fingerprint}`
     + `<form method="post"><input type="hidden" name="nonce" value="${nonce}">`
     + `<button name="answer" value="approve">Approve</button> <button name="answer" value="decline">Decline</button></form>`;
 }
