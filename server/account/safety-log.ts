@@ -93,6 +93,8 @@ interface LogFile {
   entries: SafetyEntry[];
   /** P19's waiting blocks, at most WAITING_MAX: each with what this PC knew of its signer when it arrived */
   waiting: WaitingBlock[];
+  /** A dropped waiting block keeps the log strict until repair; never cleared automatically (S19, P19). */
+  readonly overflowed?: true;
 }
 
 const GOTS: ReadonlySet<string> = new Set(["handed", "mailbox", "snapshot", "pc", "session", "merge"]);
@@ -132,6 +134,7 @@ function parseLog(value: unknown): LogFile | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not a log";
   const file = value as Partial<LogFile>;
   if (file.v !== 1) return "unknown version";
+  if (file.overflowed !== undefined && file.overflowed !== true) return "invalid overflow marker";
   if (!Number.isSafeInteger(file.next) || file.next! < 1) return "invalid next";
   if (!Array.isArray(file.base) || !file.base.every((line) => typeof line === "object" && line !== null && typeof line.id === "string")) return "invalid base";
   if (!Array.isArray(file.entries) || !Array.isArray(file.waiting)) return "invalid entries";
@@ -213,7 +216,7 @@ export class SafetyLog {
     if (HANDLES.get(this.path) === this) HANDLES.delete(this.path);
   }
 
-  /** Reads the file as open() does; false, with the log strict, when it is missing where it must exist or untrusted. */
+  /** Reads the file as open() does; false when the log is strict and must not be changed. */
   private load(): boolean {
     this.inForce = STRICT_STATE;
     // PC-written endings carry no signature: a log another account could write ends blocks and locks with one line
@@ -231,6 +234,7 @@ export class SafetyLog {
     try { parsed = parseLog(JSON.parse(text)); } catch { parsed = "it is not JSON"; }
     if (typeof parsed === "string") { this.readError = `${this.path} cannot be trusted: ${parsed}`; return false; }
     this.file = parsed;
+    if (parsed.overflowed) return false;
     this.inForce = this.state();
     return true;
   }
@@ -240,7 +244,7 @@ export class SafetyLog {
    * counts until a reload finds the log whole (S19): nothing else is appended on this handle meanwhile.
    */
   get strict(): string | null {
-    const why = this.readError ?? this.writeError;
+    const why = this.reason;
     return why === null ? null : `${why}: only this PC itself gets in until the account safety log is restored.`;
   }
 
@@ -278,7 +282,7 @@ export class SafetyLog {
   append(input: SafetyAppend): SafetyReceipt {
     const { record, got, asof, cause } = input;
     const id = typeof record?.id === "string" ? record.id : "";
-    if (this.readError !== null || this.writeError !== null) return { outcome: "refused", id, code: "log_unavailable" };
+    if (this.strict !== null) return { outcome: "refused", id, code: "log_unavailable" };
     if (!GOTS.has(got) || recordProblem(record, asof) !== null) return { outcome: "refused", id, code: "record_invalid" };
     if (record.kind === "lift" && !LIFT_CAUSES.has(cause as LiftCause)) return { outcome: "refused", id, code: "record_invalid" };
     // what another handle of this folder appended is read first, so no number is given twice and none is lost (P24)
@@ -341,7 +345,7 @@ export class SafetyLog {
    * counts only under the account of the record it names. Returns how many entries folded.
    */
   fold(): number {
-    if (this.readError !== null) return 0;
+    if (this.strict !== null) return 0;
     const state = this.state();
     if (state.locked || state.blocks.length > 0 || state.freezes.length > 0) return 0;
     // an ending ends only the record it names under the same account, as state() reads it (P24)
@@ -382,7 +386,10 @@ export class SafetyLog {
   wait(item: WaitingBlock): boolean {
     if (this.strict !== null || !this.load()) return false;
     if (this.file.waiting.some((kept) => kept.record.id === item.record.id)) return true;
-    if (this.file.waiting.length >= WAITING_MAX) return false;
+    if (this.file.waiting.length >= WAITING_MAX) {
+      this.writeFile({ ...this.file, overflowed: true });
+      return false;
+    }
     return this.writeFile({ ...this.file, waiting: [...this.file.waiting, item] });
   }
 
@@ -401,15 +408,17 @@ export class SafetyLog {
       return false;
     }
     this.file = next;
-    this.inForce = this.state();
+    this.inForce = next.overflowed ? STRICT_STATE : this.state();
     return true;
   }
 
   /** The file as it stands, for a merge. */
-  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly WaitingBlock[] } { return this.file; }
+  snapshot(): { readonly next: number; readonly base: readonly FoldedRecord[]; readonly entries: readonly SafetyEntry[]; readonly waiting: readonly WaitingBlock[]; readonly overflowed?: true } { return this.file; }
 
-  /** Why the log could not be trusted, without the strict tail, or null. */
-  get reason(): string | null { return this.readError ?? this.writeError; }
+  /** Why the log is strict, without the strict tail, or null. */
+  get reason(): string | null {
+    return this.readError ?? this.writeError ?? (this.file.overflowed ? "A block could not be queued because the waiting queue is full" : null);
+  }
 
   /** Whether the log could be read: a merge never writes over one it could not. */
   get readable(): boolean { return this.readError === null; }
@@ -467,7 +476,8 @@ export function mergeSafetyLogs(active: string, sibling: string): string | null 
         .filter((entry) => !held.has(entry.record.id) && !folded.has(entry.record.id))
         .map((entry) => ({ ...entry, n: next++, got: "merge" as const }));
       const waiting = [...mine.waiting, ...theirs.waiting.filter((item) => !mine.waiting.some((own) => JSON.stringify(own) === JSON.stringify(item)))];
-      return { v: 1, next, base, entries: [...mine.entries.filter((entry) => !folded.has(entry.record.id)), ...taken].map(strictest), waiting };
+      return { v: 1, next, base, entries: [...mine.entries.filter((entry) => !folded.has(entry.record.id)), ...taken].map(strictest), waiting,
+        ...(mine.overflowed || theirs.overflowed ? { overflowed: true } : {}) };
     };
     const [forOwn, forOther] = [merged(a, b), merged(b, a)];
     const written: string[] = [];
