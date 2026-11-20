@@ -165,6 +165,38 @@ test.each(["identity reset", "local Revoke"] as const)("P8/T41/P10: pending Revo
   expect(existsSync(join(dir, "revoke-all.json"))).toBe(false);
 });
 
+async function revokeAllWithListedWriteFailing() {
+  const { fixture, device } = await listedPc();
+  const dir = fixture.stateDir;
+  const { devices } = fixture.app.context.services;
+  const fault = failReplacement(join(dir, ACCOUNT_DEVICES_FILE));
+  try { expect(() => devices.revokeAll()).toThrow("replacement failed"); }
+  catch (error) { fault.mockRestore(); throw error; }
+  return { dir, device, devices, fault };
+}
+
+test("P8/T41/P10: a repeat Revoke-all while the listed registry write still fails reports failure, keeps the intent and stays strict", async () => {
+  const { dir, device, devices, fault } = await revokeAllWithListedWriteFailing();
+  try {
+    expect(() => devices.revokeAll()).toThrow("replacement failed");
+    expect(existsSync(join(dir, "revoke-all.json"))).toBe(true);
+    expect(devices.failsClosed).toBe(true);
+    expect(rows(dir).map(row => row.id)).toEqual([device.id]);
+  } finally { fault.mockRestore(); }
+});
+
+test("P8/T41/P10: a repeat Revoke-all after the listed registry write returns finishes the pending intent once", async () => {
+  const { dir, device, devices, fault } = await revokeAllWithListedWriteFailing();
+  fault.mockRestore();
+  devices.revokeAll();
+  expect(rows(dir)).toEqual([]);
+  expect(existsSync(join(dir, "revoke-all.json"))).toBe(false);
+  expect(devices.failsClosed).toBe(false);
+  expect(drops(dir).filter(entry => entry.row === device.id)).toEqual([
+    { kind: "drop", how: "revoke_all", key: device.publicKey, row: device.id, account: ACCOUNT },
+  ]);
+});
+
 test("P8/T41/P10/T44: identity reset preserves a signed leave's pending drop", async () => {
   const pc = await listedPc();
   const { fixture, device } = pc;
