@@ -118,7 +118,10 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
     // with the release flag on this dir keeps its own origin for the key it admitted; only a copy that carries another
     // origin, or another key, takes it away: a copy with none erases nothing (P22, T27 in 2d). With it off this dir's
     // own copy is kept, as main does
-    const origin = !perDirOrigins ? ownOrigin : keptOrigin(device, twin, takes ? twin.relay_public_key : device.relay_public_key);
+    const mergedKey = takes ? twin.relay_public_key : device.relay_public_key;
+    const origin = !perDirOrigins ? ownOrigin : keptOrigin(device, twin, mergedKey);
+    // a key this dir never held is no row of its own here: its one-time legacy pass never stamps it (T50)
+    const notOwnKey = perDirOrigins && mergedKey !== device.relay_public_key;
     const keptMark = takes ? twin.joined_by : own;
     const otherMark = takes ? own : twin.joined_by;
     const marks = [keptMark, otherMark].filter((mark) => mark !== undefined);
@@ -128,6 +131,7 @@ export function mergeRegistries(own: Registry | null, other: Registry | null,
       ...rest,
       ...(joinedBy === undefined ? {} : { joined_by: joinedBy }),
       ...(origin === undefined ? {} : { origin }),
+      ...(notOwnKey ? { imported: true as const } : {}),
       role: device.role === "watch" || twin.role === "watch" ? "watch" : "drive",
       created_at: earliest([device.created_at, twin.created_at])!,
       last_seen_at: [device.last_seen_at, twin.last_seen_at].filter((seen): seen is string => seen !== null).sort().at(-1) ?? null,
@@ -241,9 +245,10 @@ const closedFor = (read: ReturnType<typeof readDeviceRegistry>): boolean =>
  */
 function keptOrigin(copy: StoredDevice, other: StoredDevice, key: string | undefined): RowOrigin | undefined {
   const own = copy.origin;
-  if (own === undefined || copy.relay_public_key !== key || other.relay_public_key !== key) return undefined;
+  if (own === undefined || copy.relay_public_key !== key) return undefined;
   const theirs = other.origin;
-  return theirs === undefined || own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
+  if (theirs === undefined) return own;
+  return other.relay_public_key === key && own.from === theirs.from && own.how === theirs.how && own.by === theirs.by && own.admit_no === theirs.admit_no && own.at === theirs.at ? own : undefined;
 }
 
 function mergeDevices(active: string, sibling: string, base: MergeRecord | null, stamp: string, intend: Intent, now: Date, perDirOrigins: boolean): { blocked: string | null; ids: string[] | null; changed: number; gated?: boolean } {
@@ -286,7 +291,7 @@ function mergeDevices(active: string, sibling: string, base: MergeRecord | null,
     if (copy === undefined) return { ...device, imported: true as const };
     const mineToo = myCopy.get(device.id);
     const kept = mineToo === undefined ? copy.origin : keptOrigin(copy, mineToo, device.relay_public_key);
-    return { ...device, ...(kept === undefined ? {} : { origin: kept }), ...(copy.imported ? { imported: true as const } : {}) };
+    return { ...device, ...(kept === undefined ? {} : { origin: kept }), ...(copy.imported || copy.relay_public_key !== device.relay_public_key ? { imported: true as const } : {}) };
   }) };
   // with a complete registry in it, the result holds every device not revoked since the last merge
   const complete = mine !== null && !ownIncomplete || theirs !== null && !otherIncomplete;

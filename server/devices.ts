@@ -574,7 +574,8 @@ export class DeviceStore {
     if (this.admissions === null) return device;
     // `by` is the account member who approved it, by its account key, and only a member (P22): the member named on the
     // row, or the one that started the code this pairing redeemed; a link approves nothing
-    const approverId = device.added_by ?? path.startedBy ?? undefined;
+    // a link that moves the key admits a key nobody approved (P22)
+    const approverId = device.linked_at !== undefined ? undefined : device.added_by ?? path.startedBy ?? undefined;
     const approver = approverId !== undefined && this.isAccountApprover(approverId) ? this.devices.find((d) => d.id === approverId) : undefined;
     const how = device.linked_at !== undefined ? "link" : device.account_add !== undefined ? "add" : approver !== undefined ? "member" : path.digits === true ? "digits" : "code";
     const by = approver?.relay_public_key ?? null;
