@@ -279,5 +279,23 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     log.append({ record, got: "handed", asof: { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false } });
     expect(await devices.liftAuthority(await lift(record.id, stranger))).toBe(false);
   });
-});
 
+  test("T51, seam for S2-25: rows a list commit writes stand only if no waiting block takes them", async () => {
+    const { devices, log } = pc();
+    const signer = await member(devices);
+    const target = await key();
+    const other = await key();
+    const queued = await block(target.spki, signer);
+    expect(log.wait({ record: queued, got: "mailbox", signer_removed: false })).toBe(true);
+    const ids = [accountDeviceId(SERVER, target.spki), accountDeviceId(SERVER, other.spki)];
+    const standing = devices.admitListedRows(() => {
+      devices.pairRelayApproved("Listed", target.spki, { path: "code", id: ids[0] });
+      devices.pairRelayApproved("Other", other.spki, { path: "code", id: ids[1] });
+      return ids;
+    });
+    expect(standing).toEqual([ids[1]]);
+    expect(devices.has(ids[0]!)).toBe(false);
+    // a write that throws publishes nothing
+    expect(() => devices.admitListedRows(() => { throw new Error("list write failed"); })).toThrow("list write failed");
+  });
+});
