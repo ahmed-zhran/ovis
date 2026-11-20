@@ -112,6 +112,25 @@ test("T71/S31: dropping a named key releases its code use and its challenge cann
   expect(released).toEqual([{ codeId: "use-1", key: phone.spki }]);
 });
 
+test("LEDGER S2-38 S13-1: a proof in flight when its code ends never reaches the waiting list or the screen", async () => {
+  const { pending } = store();
+  const phone = await device();
+  const codeId = "use-1";
+  const { challenge } = pending.name("code1", "Phone", phone.spki, "relay", undefined, { codeId });
+  const signature = await signPairProof(SERVER, challenge, phone.spki, phone.keys.privateKey);
+  const screenUpdates: number[] = [];
+  pending.onChange(() => { screenUpdates.push(pending.view().length); });
+
+  // Verification yields before the proof can publish an entry. End the code in that same turn,
+  // at the store callback shared by Revoke all, identity reset and expiry.
+  const verifying = pending.prove(challenge, signature);
+  pending.dropCode(codeId);
+
+  const result = await verifying;
+  expect({ proved: result?.label ?? null, waiting: pending.view().map((entry) => entry.label), screenUpdates })
+    .toEqual({ proved: null, waiting: [], screenUpdates: [] });
+});
+
 test("T71: the PC's screen sees every redemption of a code side by side, with how each came", async () => {
   const { pending } = store();
   await proved(pending, "code1", "Phone");
