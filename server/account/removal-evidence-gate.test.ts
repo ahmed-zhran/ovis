@@ -335,4 +335,14 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     expect(devices.has(again)).toBe(true);
     expect(await signsIn(fixture, device)).toBe(false);
   });
+
+  test("with the flag off, a row a tombstone covers stays out whatever form its times take, as on main", async () => {
+    for (const [created, removed] of [["2026-10-01T00:00:00.000Z", "not-a-time"], ["+010000-01-01T00:00:00.000Z", "2026-10-02T00:00:00.000Z"]] as const) {
+      const dir = stateDir();
+      const k = await key();
+      put(dir, "devices.json", { gate_closed_at: AT, devices: [row("aaaaaaaaaaaaaaaa", k, created)] });
+      put(dir, "account-tombstones.json", tombstones([{ key: k, account: "", record_id: "local", removed_at: removed }]));
+      expect(new DeviceStore(dir).hasKey(k)).toBe(false);
+    }
+  });
 });
