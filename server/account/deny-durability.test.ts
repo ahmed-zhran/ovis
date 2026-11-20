@@ -3,7 +3,9 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
-import { DeviceStore } from "../devices.ts";
+import { DeviceStore, readDeviceRegistry } from "../devices.ts";
+import { privateStateFs } from "../private-state.ts";
+import { REMOVAL_FILE } from "./removal-evidence.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
 import { SafetyLog } from "./safety-log.ts";
@@ -67,5 +69,45 @@ describe("a deny holds for every row and every live session (P8, S19)", () => {
     mkdirSync(join(at, "account-tombstones.json"));
     const reopened = store(at);
     expect(reopened.list(null)).toEqual([]);
+  });
+
+  test("P8: a Revoke whose deny cannot be written changes nothing on disk, and only that key's own deny ends the closing", async () => {
+    const at = dir();
+    const devices = store(at);
+    const [a, b] = [await key(), await key()];
+    const rowA = devices.pairRelay(devices.startPairing().code, "A", a)!.device.id;
+    const rowB = devices.pairRelay(devices.startPairing().code, "B", b)!.device.id;
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, REMOVAL_FILE)) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revoke(rowA)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    // the row stays on disk, where the failed Revoke stays visible; in this run it is out and the PC fails closed
+    const registry = readDeviceRegistry(join(at, "devices.json"));
+    expect(registry.kind === "ok" && registry.devices.some((d) => d.id === rowA)).toBe(true);
+    expect(devices.hasKey(a)).toBe(false);
+    expect(devices.failsClosed).toBe(true);
+    // another key's deny landing does not end it
+    devices.revoke(rowB);
+    expect(devices.failsClosed).toBe(true);
+    expect(devices.hasKey(a)).toBe(false);
+    // that key's own deny does
+    devices.revoke(rowA);
+    expect(devices.failsClosed).toBe(false);
+    expect(store(at).isTombstoned(a)).toBe(true);
+  });
+
+  test("P8: a Revoke all that fails after its intent is on disk fails the PC closed at once", async () => {
+    const at = dir();
+    const devices = store(at);
+    devices.pairRelay(devices.startPairing().code, "A", await key());
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => {
+      if (to === join(at, "devices.json")) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.revokeAll()).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
   });
 });
