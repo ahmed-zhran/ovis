@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
 import { privateStateFs } from "../private-state.ts";
+import { loadRelayIdentity } from "../relay/identity.ts";
 import { relayFixture } from "../relay/test-helpers.ts";
 import { ADMISSION_FILE } from "./admission-order.ts";
 import { PcAccountState } from "./pc-binding.ts";
@@ -162,5 +163,45 @@ describe("the PC's account binding holds through upgrades, siblings and failures
     expect(strict.failsClosed).toBe(true);
     expect(() => strict.revokeAll()).not.toThrow();
     expect(strict.clearAccountBinding("identity_reset", "pc")).toBe(false);
+  });
+
+  test("T13: a first link whose binding cannot be made to stand is no success, and a pending binding whose row is on disk stands at the next start", async () => {
+    const dir = stateDir();
+    const devices = store(dir);
+    const k = await key();
+    const id = devices.pairRelay(devices.startPairing().code, "First", k)!.device.id;
+    const rename = privateStateFs.renameSync;
+    let writes = 0;
+    privateStateFs.renameSync = (from, to) => {
+      // the pending binding is written, then the row; the write that makes the binding stand fails
+      if (to === join(dir, ADMISSION_FILE) && ++writes === 3) throw new Error("simulated EIO");
+      return rename(from, to);
+    };
+    try { expect(() => devices.linkAccountKey(id, k, k, ACCOUNT)).toThrow(); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
+    // the row is on disk with its pending binding: the next start makes it stand
+    expect(store(dir).account()).toBe(ACCOUNT);
+  });
+
+  test("P12: a folder taking its sibling's standing binding takes the key that first bound it too", async () => {
+    const [a, b] = [stateDir(), stateDir()];
+    store(a);
+    const there = store(b);
+    const first = await linked(there, "acct_x");
+    start(a, true, b);
+    expect(PcAccountState.open(a).first()?.key).toBe(first.key);
+  });
+
+  test("P12: only a binding of this PC's own relay identity counts: another identity's folder is no sibling of it", () => {
+    const [a, b] = [stateDir(), stateDir()];
+    for (const [dir, account] of [[a, "acct_a"], [b, "acct_b"]] as const) {
+      const state = PcAccountState.open(dir);
+      state.migrate(null, false);
+      state.bind(account, account).commit();
+      loadRelayIdentity(dir);
+    }
+    const devices = start(a, true, b);
+    expect(devices.failsClosed).toBe(false);
+    expect(devices.account()).toBe("acct_a");
   });
 });
