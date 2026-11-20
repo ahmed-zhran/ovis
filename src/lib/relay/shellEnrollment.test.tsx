@@ -5,6 +5,7 @@ import { ACCOUNT_FEATURE, RELAY_PROTOCOL } from "../../../shared/relay-mux.ts";
 import { encodeOffer } from "../../../shared/relay-offer.ts";
 import { exportPublicKey, generateKeyPair } from "../../../shared/relay-e2ee.ts";
 import { deriveServerId } from "../../../shared/relay-server-proof.ts";
+import { pairChallenge, pairFingerprint } from "../../../shared/pair-fingerprint.ts";
 import { RelayPcTable } from "../../components/RelayPcTable.tsx";
 import { ReadyCheckpoint, RelayShell, type RelayShellProps } from "../../components/RelayShell.tsx";
 import { myPcs } from "../account/myPcs.ts";
@@ -40,13 +41,14 @@ describe("account pairing completion", () => {
   beforeEach(() => { browser = createShellTestPage(); browser.setVisibility("hidden"); });
   afterEach(() => { globalThis.setTimeout = setTimer; jest.useRealTimers(); for (const transport of transports.splice(0)) transport.close(); setTransport(nativeTransport); browser.dispose(); waiting = []; });
 
-  async function pairing(introduction?: () => Response, options: { readonly code?: string; readonly outdatedFirst?: boolean } = {}) {
+  async function pairing(introduction?: () => Response, options: { readonly code?: string; readonly outdatedFirst?: boolean; readonly challenge?: string } = {}) {
     const identity = generateKeyPair();
     const offer = { v: 1 as const, server_id: deriveServerId(identity.publicKey), server_public_key: exportPublicKey(identity.publicKey), relay: "wss://relay.ovis.sh", name: "Desk", ...(options.code === undefined ? {} : { code: options.code }) };
     const accountStore = memoryAccountStore();
     await accountStore.set("session", { service: "https://account.ovis.sh", account: "acct-test", provider: "github", access_token: "access", refresh_token: "refresh", expires_at: Date.now() + 3_600_000 });
     const key = await accountStore.key();
-    const devices = new Map<string, RelayDevice>([[offer.server_id, { ...offer, device_id: "12".repeat(8), private_key: key.private_key, public_spki: key.public_spki, label: "Phone" }]]);
+    const original = options.challenge ? await memoryAccountStore().key() : key;
+    const devices = new Map<string, RelayDevice>([[offer.server_id, { ...offer, device_id: "12".repeat(8), private_key: original.private_key, public_spki: original.public_spki, label: "Phone" }]]);
     const store: ShellDeviceStore = {
       get: async (id) => devices.get(id), list: async () => [...devices.values()], remove: async (id) => { devices.delete(id); }, removeRow: async (id, row) => { if (devices.get(id)?.device_id !== row) return false; devices.delete(id); return true; },
       update: async (id, change) => { const device = change(devices.get(id)); devices.set(id, device); changed(); return device; },
@@ -73,7 +75,10 @@ describe("account pairing completion", () => {
         if (this.closed) throw new TypeError("Enrollment connection was closed");
         switch (path) {
           case "/api/account/status": return Response.json({ account: linked ? "acct-test" : null, unlinked: [], removals: [], enrolling: true });
-          case "/api/account/link": linked = true; return Response.json({});
+          case "/api/account/link":
+            if (options.challenge) return Response.json({ replacement: { challenge: options.challenge } }, { status: 202 });
+            linked = true; return Response.json({});
+          case "/api/account/devices/replace": return new Response(null, { status: 204 });
           case "/api/account/enroll": enrolls++; return response;
           case "/api/account/introduction": introductionReads++; return introduction?.() ?? Response.json({ pcs: [{ ...offer, server_id: deriveServerId(other.publicKey), server_public_key: exportPublicKey(other.publicKey) }] });
           default: throw new TypeError(`Unexpected PC request: ${path}`);
@@ -104,14 +109,22 @@ describe("account pairing completion", () => {
       await until(() => { const state = current().state; return state.kind === "outdated" && state.update.phase === "manual"; });
       current().onRetry();
     }
-    await until(() => enrolls > 0);
+    await until(() => options.challenge ? apps > 0 || current().state.kind === "ready" : enrolls > 0);
     const rows = async () => myPcs([], await store.list(), { now: Date.now(), accountKey: key.public_spki, account: "acct-test" });
     const dashboard = async () => dashboardPcs(await rows(), await store.list());
     const pcPage = `https://app.ovis.sh/s/${offer.server_id}/`;
     /** the wait for the next look armed after the `reads`th read of the introduction */
     const polled = (reads: number): boolean => timers.some((timer) => timer.ms === 3_000 && timer.reads === reads);
-    return { current, enrollment, rows, dashboard, mountAt, pcPage, kinds, polled, enrolls: () => enrolls, apps: () => apps, retrySuccess: () => { response = Promise.resolve(Response.json({ results: [] })); } };
+    return { current, enrollment, rows, dashboard, mountAt, pcPage, kinds, polled, fingerprint: options.challenge && await pairFingerprint(offer.server_id, options.challenge, key.public_spki), enrolls: () => enrolls, apps: () => apps, retrySuccess: () => { response = Promise.resolve(Response.json({ results: [] })); } };
   }
+
+  it("P22/T72: fresh pairing stops at the replacement card instead of opening or recording failure", async () => {
+    const run = await pairing(undefined, { challenge: pairChallenge() });
+    expect(run.apps()).toBe(0);
+    expect((await run.rows())[0]?.enrollment).toBe("pending");
+    const props = run.current();
+    expect(renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(RelayShell, props) }))).toContain(`data-replacement="${run.fingerprint}"`);
+  });
 
   it("enters the PC as soon as a sheet join is admitted, with no Ready screen, and finishes the account's part behind it", async () => {
     const run = await pairing();
