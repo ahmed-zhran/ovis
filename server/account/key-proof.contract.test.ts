@@ -15,11 +15,11 @@ import { provingDevice } from "./key-proof.test-helpers.ts";
 const pcs: Pc[] = [];
 afterEach(async () => { for (const pc of pcs.splice(0)) await pc.close(); });
 
-async function pc(accountOpensAll: boolean, platform?: NodeJS.Platform) {
+async function pc(accountOpensAll: boolean, platform: NodeJS.Platform = "linux") {
   const told: { pending: { id: string; action: { kind: string; pending?: string; fingerprint?: string } }[] }[] = [];
   let push!: (line: string) => void;
   const input = new ReadableStream<Uint8Array>({ start(controller) { push = (line) => controller.enqueue(new TextEncoder().encode(line)); } });
-  const made = await pairingPc({ server: { accountOpensAll, ...(platform ? { platform } : {}), desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
+  const made = await pairingPc({ server: { accountOpensAll, platform, desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
   pcs.push(made);
   const screen = {
     told,
