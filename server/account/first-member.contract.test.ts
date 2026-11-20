@@ -13,16 +13,16 @@ const fresh = () => ({ account, own_sign_in: true, signed_in_at: new Date().toIS
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const stop of cleanup.splice(0).reverse()) stop(); });
 
-async function pc(answer: (r: Request) => Promise<Response> = async () => Response.json(fresh())) {
+async function pc(answer: (r: Request) => Promise<Response> = async () => Response.json(fresh()), accessToken = "") {
   const calls: Request[] = [];
-  const f = relayFixture(false, { accountOpensAll: false, accountService: { url: service, fetch: req => { calls.push(req); return answer(req); } } });
+  const f = relayFixture(false, { token: accessToken, accountOpensAll: false, accountService: { url: service, fetch: req => { calls.push(req); return answer(req); } } });
   cleanup.push(() => f.close());
   const id = loadRelayIdentity(f.stateDir).server_id;
   const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
   const key = await exportAccountKey(keys.publicKey);
   const base = `http://127.0.0.1:${f.app.port}`;
   const post = (route: string, body: unknown, headers: Record<string, string> = {}) => fetch(base + route, {
-    method: "POST", headers: { origin: base, "content-type": "application/json", "x-herdr-machine": "1", ...headers }, body: JSON.stringify(body),
+    method: "POST", headers: { origin: base, "content-type": "application/json", "x-herdr-machine": "1", ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}), ...headers }, body: JSON.stringify(body),
   });
   const challenge = async () => {
     const r = await post(path + "/challenge", { label: "Study browser" });
@@ -31,12 +31,14 @@ async function pc(answer: (r: Request) => Promise<Response> = async () => Respon
     expect(challenge).toMatch(/^[0-9a-f]{32}$/);
     return String(challenge);
   };
-  const record = (nonce: string) => signAccountRecord({ v: 1, kind: "link", account, key, signer: key, old_key: key,
-    server_id: id, device_id: accountDeviceId(id, key), issued_at: new Date().toISOString(), id: nonce }, keys.privateKey);
+  const record = (nonce: string, forAccount = account, signer = { key, privateKey: keys.privateKey }) => signAccountRecord({
+    v: 1, kind: "link", account: forAccount, key: signer.key, signer: signer.key, old_key: signer.key,
+    server_id: id, device_id: accountDeviceId(id, signer.key), issued_at: new Date().toISOString(), id: nonce }, signer.privateKey);
   const token = newRecordId();
   const claim = async (nonce: string) => post(path, { account, record: await record(nonce), token });
   const devices = f.app.context.services.devices;
-  return { f, post, challenge, claim, record, token, calls, devices, key, id, privateKey: keys.privateKey };
+  const enroll = (grant: string, headers: Record<string, string> = {}) => post("/api/account/enroll", { account, records: [], last: true }, { "x-ovis-first-enroll": grant, ...headers });
+  return { f, post, challenge, claim, record, token, calls, devices, key, id, privateKey: keys.privateKey, enroll };
 }
 
 async function refused(r: Response, status: number, code: string) {
@@ -175,5 +177,76 @@ test("Revoke all during the session read cancels the outstanding admission", asy
   await arrived.promise;
   try { p.devices.revokeAll(); } finally { release.resolve(); }
   await refused(await claim, 409, "challenge_invalid");
+  expect(p.devices.list(null)).toEqual([]);
+});
+
+test("only a fresh claim by the sole enrolling member rotates its grant without rewriting its row or journal", async () => {
+  let own = true;
+  const p = await pc(async () => Response.json({ ...fresh(), own_sign_in: own }));
+  const first = await p.claim(await p.challenge());
+  expect(first.status).toBe(200);
+  const before = p.devices.list(null, true);
+  const journal = () => readFileSync(join(p.f.stateDir, "first-member-journal.json"), "utf8");
+  const audit = journal();
+  own = false;
+  await refused(await p.claim(await p.challenge()), 403, "own_sign_in_required");
+  own = true;
+  const recovered = await p.claim(await p.challenge());
+  expect(recovered.status).toBe(200);
+  expect(await recovered.json()).toEqual(await first.json());
+  const grant = recovered.headers.get("x-ovis-first-enroll") ?? "";
+  expect(grant).not.toBe(first.headers.get("x-ovis-first-enroll"));
+  expect(p.calls).toHaveLength(3);
+  expect(p.devices.list(null, true)).toEqual(before);
+  expect(journal()).toBe(audit);
+  const pending = await p.challenge();
+  expect((await p.enroll(first.headers.get("x-ovis-first-enroll") ?? "")).status).toBe(403);
+  expect((await p.enroll(grant)).status).toBe(200);
+  await refused(await p.claim(pending), 409, "in_account");
+  await refused(await p.post(path + "/challenge", {}), 409, "in_account");
+});
+
+for (const mismatch of ["another key", "another account"] as const) test(`an enrolling PC refuses a fresh claim for ${mismatch}`, async () => {
+  const p = await pc();
+  expect((await p.claim(await p.challenge())).status).toBe(200);
+  const nonce = await p.challenge();
+  const forAccount = mismatch === "another account" ? "acct_other" : account;
+  const signer = mismatch === "another key" ? await pc() : p;
+  await refused(await p.post(path, { account: forAccount, token: p.token, record: await p.record(nonce, forAccount, signer) }), 409, "in_account");
+});
+
+for (const race of ["identity reset", "new challenge"] as const) test(`${race} during the session read refuses the claim without a row, barrier or journal`, async () => {
+  const arrived = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const p = await pc(async () => { arrived.resolve(); await release.promise; return Response.json(fresh()); });
+  const claim = p.claim(await p.challenge());
+  await arrived.promise;
+  try {
+    if (race === "identity reset") await p.f.app.context.services.relay.resetIdentity();
+    else await p.challenge();
+  } finally { release.resolve(); }
+  await refused(await claim, 409, race === "identity reset" ? "account_unavailable" : "challenge_invalid");
+  expect(p.devices.list(null)).toEqual([]);
+  expect(p.devices.account()).toBeNull();
+  expect(p.f.app.context.services.accountHolds.enrolling()).toBe(false);
+  expect(existsSync(join(p.f.stateDir, "first-member-journal.json"))).toBe(false);
+});
+
+for (const reason of ["expired", "revoked member", "forwarded window"] as const) test(`a grant cannot enroll: ${reason}`, async () => {
+  const p = await pc(undefined, reason === "forwarded window" ? newRecordId() : "");
+  const admitted = await p.claim(await p.challenge());
+  expect(admitted.status).toBe(200);
+  const grant = admitted.headers.get("x-ovis-first-enroll");
+  if (!grant) throw new Error("Missing enrollment grant");
+  if (reason === "revoked member") expect(p.devices.revoke(accountDeviceId(p.id, p.key))).toBe(true);
+  const clock = reason === "expired" ? spyOn(Date, "now").mockReturnValue(Date.now() + 600_001) : null;
+  try {
+    await refused(await p.enroll(grant, reason === "forwarded window" ? { "x-forwarded-for": "127.0.0.1" } : {}), 403, "account_required");
+  } finally { clock?.mockRestore(); }
+});
+
+test("a recovery claim never creates a first member on an empty PC", async () => {
+  const p = await pc();
+  await refused(await p.post(path, { account, record: await p.record(await p.challenge()), token: p.token, recover: true }), 409, "in_account");
   expect(p.devices.list(null)).toEqual([]);
 });

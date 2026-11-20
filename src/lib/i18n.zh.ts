@@ -508,7 +508,7 @@ const BASE: Record<string, string> = {
   "Waiting. The window reopens by itself if Ovis restarts.": "正在等待。即使 Ovis 重启，也会自动重新开放。",
   "Stop waiting": "停止等待",
   "Continue on another device": "在另一台设备上继续",
-  "This sign-in can't add this PC by itself. Continue on another device to compare digits.": "仅凭此次登录无法添加这台电脑。请在另一台设备上继续并核对数字。",
+  "This sign-in can't add this PC directly. Confirm the number on another device.": "此次登录无法直接添加这台电脑。请在另一台设备上核对数字。",
   "This PC has its first member, but setup didn't finish. Try again.": "这台电脑已添加第一台设备，但尚未完成设置。请重试。",
   "This PC stopped waiting after 30 minutes.": "已过 30 分钟，此电脑已停止等待。",
   "Keep waiting": "继续等待",

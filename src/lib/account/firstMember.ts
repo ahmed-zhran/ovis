@@ -15,8 +15,9 @@ import { PEER_STATUS_MS } from "./join.ts";
 const local = (path: string, init?: RequestInit) => fetch(path, { ...init, mode: "same-origin", redirect: "error", cache: "no-store" });
 export interface FirstEnrollment { readonly account: string; finish(): Promise<void> }
 
-export async function firstMember(service: AccountService, session: AccountSession, running: () => boolean): Promise<FirstEnrollment | null> {
-  if (session.service !== pcAccountServiceOf(document, window.isSecureContext)) return null;
+export async function firstMember(service: AccountService, session: AccountSession, running: () => boolean,
+  attempt: { sent: (id: string) => void } | { recover: string }): Promise<FirstEnrollment> {
+  if (session.service !== pcAccountServiceOf(document, window.isSecureContext)) throw new AccountPcError(409, "account_mismatch");
   const account = session.account;
   const own = async () => {
     const now = await service.session();
@@ -25,6 +26,7 @@ export async function firstMember(service: AccountService, session: AccountSessi
   };
   const label = deviceLabel(navigator.userAgent, navigator.maxTouchPoints);
   const base = "/api/account/first-member";
+  await own();
   const { challenge } = await (await post(local, base + "/challenge", { label })).json();
   if (typeof challenge !== "string" || !/^[0-9a-f]{32}$/.test(challenge)) throw new AccountPcError(400, "challenge_invalid");
   const response = await local("/api/relay/link");
@@ -35,6 +37,7 @@ export async function firstMember(service: AccountService, session: AccountSessi
   const device = { ...accountDevice(offer, key), label, account };
   const serverId = offer.server_id;
   const id = accountDeviceId(serverId, key.public_spki);
+  if ("recover" in attempt && attempt.recover !== id) throw new AddPcWaitOver("pc");
   const record = await signAccountRecord({ v: 1, kind: "link", account, key: key.public_spki, signer: key.public_spki, old_key: key.public_spki,
     server_id: serverId, device_id: id, issued_at: new Date().toISOString(), id: challenge }, key.private_key);
   await own();
@@ -47,17 +50,18 @@ export async function firstMember(service: AccountService, session: AccountSessi
     return reserved ? { ...current, linking: { ...current.linking, [link]: serverId } } : current;
   });
   if (!reserved) throw new AddPcWaitOver("sign-in");
-  const admitted = await post(local, base, { account, record, token: session.access_token }).finally(() =>
+  if ("sent" in attempt) attempt.sent(id);
+  const admitted = await post(local, base, { account, record, token: session.access_token, ...("recover" in attempt ? { recover: true } : {}) }).finally(() =>
     indexedAccountStore.update("linking", current => {
       const { [link]: _ended, ...rest } = current ?? {};
       return Object.keys(rest).length ? rest : undefined;
     }));
   const grant = admitted.headers.get("x-ovis-first-enroll");
   const row = (await admitted.json()).device;
+  if (!grant || row?.id !== id || row.role !== "drive") throw new AccountPcError(403, "account_required");
   const directory = service.forSignIn(session);
   return { account, async finish() {
     await own();
-    if (!grant || row?.id !== id || row.role !== "drive") throw new AccountPcError(403, "account_required");
     // Keep the pairing and enrollment plan before touching the directory: the usual member can resume them over AUTH.
     await indexedDeviceStore.update(serverId, current => {
       if (current && current.server_public_key !== offer.server_public_key) throw new AddPcWaitOver("pc");

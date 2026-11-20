@@ -12,6 +12,7 @@ import { fakeIndexedDB } from "../lib/indexedDB.fake.ts";
 import { SettingsProvider } from "../lib/settings.ts";
 import { nativeTransport, setTransport } from "../lib/transport.ts";
 import { AccountSection } from "./AccountSection.tsx";
+import { DevicesPanel } from "./DevicesPanel.tsx";
 import { RelayTab } from "./ConnectPhoneDialog.tsx";
 import type { RelayState } from "../lib/useRelay.ts";
 import type { RelayStatus } from "../../shared/protocol.ts";
@@ -36,6 +37,8 @@ describe("signing in on the PC's own window", () => {
   let firstMember: "missing" | "available";
   let challenge: string;
   let enrollments: number;
+  let lostClaimResponses: number;
+  let loseGrantOnly: boolean;
   /** holds the code's exchange until released, and says when it was asked */
   let exchange: { asked: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | null;
 
@@ -49,8 +52,9 @@ describe("signing in on the PC's own window", () => {
     pcAccount = null;
     enrolling = false;
     firstMember = "missing";
-    challenge = newRecordId();
     enrollments = 0;
+    lostClaimResponses = 0;
+    loseGrantOnly = false;
     exchange = null;
     for (const key of ["window", "document", "navigator", "indexedDB", "getComputedStyle", "location", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -60,7 +64,7 @@ describe("signing in on the PC's own window", () => {
     const here = { href: `http://127.0.0.1:${PORT}/`, protocol: "http:", hostname: "127.0.0.1", port: String(PORT), pathname: "/", origin: `http://127.0.0.1:${PORT}` };
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: here });
     const tab = new Map<string, string>();
-    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: Object.assign(new EventTarget(), {
       isSecureContext: true,
       location: here,
       sessionStorage: { getItem: (key: string) => tab.get(key) ?? null, setItem: (key: string, value: string) => { tab.set(key, value); }, removeItem: (key: string) => { tab.delete(key); } },
@@ -70,8 +74,8 @@ describe("signing in on the PC's own window", () => {
         let href = "about:blank";
         return { opener: "ovis", closed: false, close() {}, location: { get href() { return href; }, set href(next: string) { href = next; sent.resolve(next); } } };
       },
-      addEventListener: () => {}, removeEventListener: () => {},
-    } });
+      setInterval, clearInterval,
+    }) });
     Object.defineProperty(globalThis, "document", { configurable: true, value: {
       hidden: false,
       documentElement: { lang: "", dataset: {}, style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => "" } },
@@ -81,17 +85,26 @@ describe("signing in on the PC's own window", () => {
     const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input instanceof Request ? input.url : input), `http://127.0.0.1:${PORT}`);
       if (url.origin !== SERVICE) {
-        if (firstMember === "available" && url.pathname === "/api/account/first-member/challenge") return Response.json({ challenge });
+        if (firstMember === "available" && url.pathname === "/api/account/first-member/challenge") {
+          challenge = newRecordId();
+          return Response.json({ challenge });
+        }
         if (firstMember === "available" && url.pathname === "/api/account/first-member") {
           const body = JSON.parse(String(init?.body));
           const proof = await (await fake.fetch(SERVICE + "/v1/session", { headers: { authorization: `Bearer ${body.token}` } })).json();
-          if (proof.own_sign_in !== true || proof.account !== body.account) return Response.json({ error: { code: "own_sign_in_required" } }, { status: 403 });
+          const lost = lostClaimResponses > 0;
+          if (lost) lostClaimResponses--;
+          if (proof.own_sign_in !== true || proof.account !== body.account) {
+            if (lost) throw new TypeError("claim response lost");
+            return Response.json({ error: { code: "own_sign_in_required" } }, { status: 403 });
+          }
           const record = await readAccountRecord(body.record);
           const key = await indexedAccountStore.key();
           if (record?.kind !== "link" || record.id !== challenge || record.server_id !== SERVER || record.signer !== key.public_spki) return new Response(null, { status: 400 });
           pcAccount = record.account;
           enrolling = true;
-          return Response.json({ device: { id: accountDeviceId(SERVER, key.public_spki), label: "Linux · Chrome", role: "drive" } }, { headers: { "x-ovis-first-enroll": "for-this-window" } });
+          if (lost && !loseGrantOnly) throw new TypeError("claim response lost");
+          return Response.json({ device: { id: accountDeviceId(SERVER, key.public_spki), label: "Linux · Chrome", role: "drive" } }, { headers: lost ? {} : { "x-ovis-first-enroll": "for-this-window" } });
         }
         if (url.pathname === "/api/account/enroll" && enrolling && new Headers(init?.headers).get("x-ovis-first-enroll") === "for-this-window") {
           enrollments++; enrolling = false;
@@ -101,6 +114,7 @@ describe("signing in on the PC's own window", () => {
         if (url.pathname === "/api/health") return Response.json({ ok: true, bridge_protocol: 1, own_window: { port: PORT }, auth: { required: false, authenticated: true, via: "local", role: "drive" } });
         if (url.pathname === "/api/relay") return Response.json({ phase: relayPhase, relay: "wss://relay.ovis.example", app: "https://app.ovis.example", sessions: 0, blocked: null, error: null });
         if (url.pathname === "/api/account/status") return Response.json({ account: pcAccount, enrolling, unlinked: [], removals: [], adds: [], blocked: [] });
+        if (url.pathname === "/api/devices") return Response.json({ devices: pcAccount ? [{ id: "first", label: "Study browser", role: "drive", current: false }] : [] });
         if (url.pathname === "/api/relay/link") { links++; return Response.json({ url: OFFER }); }
         if (url.pathname === "/api/relay/link/close") return Response.json({ ok: true });
         return Response.json({ error: { code: "not_found", message: "no such route" } }, { status: 404 });
@@ -145,8 +159,9 @@ describe("signing in on the PC's own window", () => {
 
   it("adds and enrolls from an own redirect without opening the digit window", async () => {
     firstMember = "available";
-    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /><DevicesPanel auth={null} /></SettingsProvider>); });
     await until(() => buttons().includes("Continue with Google"));
+    expect(words()).toContain("No devices paired yet.");
     await press("Continue with Google");
     const stop = handOverReturn(await back(await sent.promise), () => undefined);
     try { await until(() => words().includes("This PC is in your account.") || buttons().includes("Stop waiting")); }
@@ -155,6 +170,32 @@ describe("signing in on the PC's own window", () => {
     expect(links).toBe(0);
     expect(enrollments).toBe(1);
     expect(fake.pcs("acct_google").map(pc => pc.server_id)).toEqual([SERVER]);
+    expect(words()).toContain("Study browser");
+  });
+
+  for (const loss of ["response", "grant header", "two responses"] as const) it(`finishes after losing ${loss}, retrying by hand only if recovery failed`, async () => {
+    firstMember = "available";
+    lostClaimResponses = loss === "two responses" ? 2 : 1;
+    loseGrantOnly = loss === "grant header";
+    await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
+    await until(() => buttons().includes("Continue with Google"));
+    await press("Continue with Google");
+    const stop = handOverReturn(await back(await sent.promise), () => undefined);
+    const done = () => words().includes("This PC is in your account.");
+    try {
+      await until(() => done() || buttons().includes("Try again") || words().includes("Not finished yet"));
+      if (loss === "two responses") {
+        expect(buttons()).toContain("Try again");
+        expect(enrolling).toBe(true);
+        expect(fake.pcs("acct_google")).toEqual([]);
+        await press("Try again");
+        await until(done);
+      }
+      expect(enrollments).toBe(1);
+      expect(done()).toBe(true);
+      expect(links).toBe(0);
+      expect(fake.pcs("acct_google").map(pc => pc.server_id)).toEqual([SERVER]);
+    } finally { stop(); }
   });
 
   it("does not admit or list the key while this browser is leaving the account", async () => {
@@ -171,8 +212,9 @@ describe("signing in on the PC's own window", () => {
     expect(fake.pcs("acct_google")).toEqual([]);
   });
 
-  it("explains a device-code refusal and lists nothing until the separate digit flow is chosen", async () => {
+  for (const lost of [false, true]) it(`lists nothing after a device-code refusal (response lost: ${lost})`, async () => {
     firstMember = "available";
+    lostClaimResponses = lost ? 1 : 0;
     const codes = await (await fake.fetch(SERVICE + "/v1/signin/github/device", { method: "POST" })).json();
     fake.approveDevice(codes.user_code, "acct_device");
     const tokens = await (await fake.fetch(SERVICE + "/v1/token", { method: "POST", body: JSON.stringify({
@@ -182,17 +224,25 @@ describe("signing in on the PC's own window", () => {
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
     await until(() => buttons().includes("Add this PC to my account"));
     await press("Add this PC to my account");
-    await until(() => buttons().includes("Continue on another device") || buttons().includes("Stop waiting"));
+    await until(() => buttons().includes("Continue on another device") || buttons().includes("Stop waiting") || words().includes("This PC could not be listed"));
     expect(fake.pcs("acct_device")).toEqual([]);
+    expect(links).toBe(0);
     for (const query of ["", "?include=unconfirmed"]) expect(await (await fake.fetch(SERVICE + "/v1/pcs" + query, { headers: { authorization: `Bearer ${tokens.access_token}` } })).json()).toEqual({ pcs: [] });
     expect(pcAccount).toBeNull();
-    expect(words()).toContain("This sign-in can't add this PC by itself.");
+    if (lost) {
+      expect(words()).toContain("This PC could not be listed in your account. Try again.");
+      expect(buttons()).toContain("Add this PC to my account");
+      expect(buttons()).not.toContain("Continue on another device");
+      return;
+    }
+    expect(words()).toContain("This sign-in can't add this PC directly. Confirm the number on another device.");
     await press("Continue on another device");
     await until(() => buttons().includes("Stop waiting"));
     expect(fake.pcs("acct_device").map(pc => pc.server_id)).toEqual([SERVER]);
+    expect(words()).not.toContain("Signed in. Adding this PC to your account…");
   });
 
-  it("offers the providers, says it adds this PC, and lists the PC once the return comes back", async () => {
+  it("offers the providers and completes sign-in, but lists nothing when the PC has no first-member route", async () => {
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
     await until(() => words().includes("Signing in adds this PC to your account."));
     expect(buttons()).toContain("Continue with Google");
@@ -201,10 +251,11 @@ describe("signing in on the PC's own window", () => {
     const start = await sent.promise;
     expect(new URL(start).searchParams.get("redirect_uri")).toBe(`http://127.0.0.1:${PORT}/callback`);
     const stop = handOverReturn(await back(start), () => undefined);
-    await until(() => buttons().includes("Stop waiting"));
-    stop();
+    try { await until(() => words().includes("This PC could not be listed in your account. Try again.")); }
+    finally { stop(); }
     expect((await indexedAccountStore.get("session"))?.provider).toBe("google");
-    expect(links).toBeGreaterThan(0);
+    expect(fake.pcs("acct_google")).toEqual([]);
+    expect(links).toBe(0);
   });
 
   it("offers the provider's page as a link when the tab was blocked, and keeps no sign-in cancelled while its code was exchanged", async () => {
@@ -264,6 +315,8 @@ describe("the relay tab reopened already signed in", () => {
     } });
     const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input instanceof Request ? input.url : input), `http://127.0.0.1:${PORT}`);
+      if (url.pathname === "/api/account/first-member/challenge") { pressed.push(url.pathname); return Response.json({ challenge: newRecordId() }); }
+      if (url.pathname === "/api/account/first-member") return Response.json({ error: { code: "own_sign_in_required" } }, { status: 403 });
       if (url.pathname === "/api/health") return Response.json({ ok: true, bridge_protocol: 1, own_window: { port: PORT }, auth: { required: false, authenticated: true, via: "local", role: "drive" }, security: { pairing_gate: "closed", token_configured: false } });
       if (url.pathname === "/api/relay") return Response.json(status(state.relay));
       if (url.pathname === "/api/relay/start") { state.relay = "online"; return Response.json(status("online")); }
@@ -310,6 +363,11 @@ describe("the relay tab reopened already signed in", () => {
     await act(async () => { renderer = create(tabAt(phase), { createNodeMock: () => ({ closest: () => null, querySelector: () => null, focus() {} }) }); });
   };
   const button = (label: string) => renderer!.root.findAll((node) => node.type === "button" && text(node) === label);
+  const continueWithDigits = async () => {
+    await until(() => button("Continue on another device").length === 1);
+    await act(async () => { button("Continue on another device")[0]!.props.onClick(); });
+    await until(() => button("Stop waiting").length === 1);
+  };
 
   it("with the relay off, offers the relay's own add button rather than a plain Add that would fail", async () => {
     await mount("off");
@@ -342,7 +400,7 @@ describe("the relay tab reopened already signed in", () => {
     await until(() => button("Add this PC to my account").length === 1);
   });
 
-  it("offers the one press again when the relay's switch turns it off, and that press adds the PC", async () => {
+  it("offers the relay start again when the switch turns off, then lets the owner continue with digits", async () => {
     state.relay = "online";
     await mount("online");
     await until(() => button("Add this PC to my account").length === 1);
@@ -350,7 +408,7 @@ describe("the relay tab reopened already signed in", () => {
     await act(async () => { renderer!.update(tabAt("off")); });
     await until(() => button("Turn on the relay and add this PC").length === 1);
     await act(async () => { button("Turn on the relay and add this PC")[0]!.props.onClick(); });
-    await until(() => button("Stop waiting").length === 1);
+    await continueWithDigits();
   });
 
   it("goes on with a press of Turn on the relay and add this PC while the relay's state is read again", async () => {
@@ -360,7 +418,7 @@ describe("the relay tab reopened already signed in", () => {
     await act(async () => { button("Turn on the relay and add this PC")[0]!.props.onClick(); });
     await act(async () => { renderer!.update(tabAt("online")); });
     linkGate.resolve();
-    await until(() => button("Stop waiting").length === 1);
+    await continueWithDigits();
   });
 
   it("adds the PC in one press from the relay tab where the PC's step-2 switch is on, as Settings does", async () => {

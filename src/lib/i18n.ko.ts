@@ -501,7 +501,7 @@ const BASE: Record<string, string> = {
   "Waiting. The window reopens by itself if Ovis restarts.": "기다리는 중입니다. Ovis가 다시 시작되어도 자동으로 다시 열립니다.",
   "Stop waiting": "그만 기다리기",
   "Continue on another device": "다른 기기에서 계속",
-  "This sign-in can't add this PC by itself. Continue on another device to compare digits.": "이 로그인만으로는 이 PC를 추가할 수 없습니다. 다른 기기에서 계속해 숫자를 확인하세요.",
+  "This sign-in can't add this PC directly. Confirm the number on another device.": "이 로그인으로는 바로 추가할 수 없어요. 다른 기기에서 숫자를 확인해 주세요.",
   "This PC has its first member, but setup didn't finish. Try again.": "이 PC에 첫 기기가 추가됐지만 설정을 마치지 못했습니다. 다시 시도하세요.",
   "This PC stopped waiting after 30 minutes.": "30분이 지나 이 PC가 기다리기를 멈췄습니다.",
   "Keep waiting": "계속 기다리기",

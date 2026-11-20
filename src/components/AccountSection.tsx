@@ -25,6 +25,7 @@ import { currentLocale, useT, type Translate } from "../lib/i18n.ts";
 import { inMacApp, inNativeApp } from "../lib/nativeApp.ts";
 import { pairThisBrowser, UnconfirmedPairing } from "../lib/pairing.ts";
 import { deviceLabel, deviceOs } from "../lib/phone.ts";
+import { DEVICES_CHANGED_EVENT } from "../lib/useRelay.ts";
 import { ExternalLink } from "../lib/externalLink.ts";
 import { AccountPcList, AccountSignIn, HOSTED_APP_URL, PROVIDER_NAMES, ProviderMark, providerChoice } from "./AccountPcs.tsx";
 import { QrCode } from "./QrCode.tsx";
@@ -512,6 +513,7 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
       if (error instanceof AddPcWaitOver) return { kind: "offer" };
       return { kind: "unfinished", enrollment };
     }
+    window.dispatchEvent(new Event(DEVICES_CHANGED_EVENT));
     onListed?.();
     return joinedAs(enrollment.account, false);
   };
@@ -545,20 +547,30 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
         const service = accountService();
         const session = await service.session();
         if (!current()) return null;
-        if (session && (as === null || session.account === as)) {
+        if (!session || (as !== null && session.account !== as)) throw new AddPcWaitOver("sign-in");
+        listAs = session.account;
+        if (!opensAll()) {
+          let claimed: string | undefined;
           try {
-            const enrollment = await firstMember(service, session, current);
-            if (enrollment !== null) return await finish(enrollment);
+            const enrollment = await firstMember(service, session, current, { sent: id => { claimed = id; } });
+            return finish(enrollment);
           } catch (error) {
             if (!current()) return null;
             if (error instanceof AddPcWaitOver) throw error;
-            if (error instanceof AccountPcError && error.code === "own_sign_in_required") return { kind: "digits", account: session.account };
-            // A lost answer may follow a committed row. Don't open a window or list under a different sign-in.
+            if (claimed !== undefined && error instanceof AccountPcError && error.status === 403 && error.code === "own_sign_in_required") return { kind: "digits", account: session.account };
             const status = await thisPcMembership();
-            if (status.account !== null) return joinedAs(status.account, status.enrolling);
+            if (!current()) return null;
+            if (status.account === null) throw error;
+            const recover = claimed;
+            if (recover !== undefined && status.account === session.account && status.enrolling) {
+              // The PC may have committed before the reply was lost. Try again repeats only this member's recovery.
+              return finish({ account: session.account, async finish() {
+                const enrollment = await firstMember(service, session, current, { recover });
+                await enrollment.finish();
+              } });
+            }
+            return joinedAs(status.account, status.enrolling);
           }
-          if (!current()) return null;
-          listAs = session.account;
         }
       }
       const { name, serverId, account } = await listThisPc(accountService(), { relistMs: RELIST_MS, ...(listAs === null ? {} : { as: { account: listAs, running: current, reached } }) });
@@ -578,7 +590,7 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
       const mark = account === null ? null : { name, until: now + WAITING_MS, serverId, account, listedAt: now };
       pressed.current = mark?.until ?? null;
       keepAddPcWaiting(mark);
-      return { kind: "waiting", name, until: now + WAITING_MS, mark, resumed: false, signedIn: as !== null };
+      return { kind: "waiting", name, until: now + WAITING_MS, mark, resumed: false, signedIn: as !== null && !digits };
     })();
     // an attempt given up, or whose screen went, while its window was still being opened: closed once it is open
     if (as !== null) listing.then(() => {}, () => {}).then(() => { if (!current()) closeOpened(); });
@@ -704,7 +716,7 @@ export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service
         </>
       ) : state.kind === "digits" ? (
         <>
-          <p className="settings-description">{t("This sign-in can't add this PC by itself. Continue on another device to compare digits.")}</p>
+          <p className="settings-description">{t("This sign-in can't add this PC directly. Confirm the number on another device.")}</p>
           <button type="button" className="btn btn-primary" onClick={() => add(state.account, true)}>{t("Continue on another device")}</button>
         </>
       ) : state.kind === "unfinished" ? (

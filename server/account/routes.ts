@@ -5,7 +5,7 @@ import { jsonResponse, readJsonObject, setRequestRoute } from "../http.ts";
 import { sameOrigin } from "../machine-security.ts";
 import { parseIntroducedPcs } from "./introductions.ts";
 import { ACCOUNT_HELD_MAX } from "./holds.ts";
-import { FIRST_CHALLENGE, FIRST_MEMBER, claimFirstMember, firstChallenge, localEnroller } from "./first-member.ts";
+import { FIRST_CHALLENGE, FIRST_MEMBER, claimFirstMember, firstChallenge, firstMemberSlot, localEnroller } from "./first-member.ts";
 import { applyAccountRecords, applyEnrollment, applyLink, type LinkRefusal } from "./records.ts";
 
 const LINK_STATUS: Record<LinkRefusal, number> = {
@@ -58,7 +58,7 @@ export async function handleAccountRequest(request: Request, pathname: string, c
   if (pathname === FIRST_CHALLENGE || pathname === FIRST_MEMBER) {
     setRequestRoute(pathname);
     if (!ownWindow || peer.kind !== "socket") return fail("own_window_required", "Use this PC's own window", 403);
-    if (devices.account() !== null || devices.list(null).length !== 0) return fail("in_account", "This PC already has a member", 409);
+    if (firstMemberSlot(context.services) === "occupied") return fail("in_account", "This PC already has a member", 409);
     if (devices.opensAll() || devices.error || devices.accountError || context.services.accountHolds.error) return fail("account_unavailable", "Use the existing pairing flow", 409);
   }
   const body = await readJsonObject(request);

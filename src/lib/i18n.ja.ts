@@ -503,7 +503,7 @@ const BASE: Record<string, string> = {
   "Waiting. The window reopens by itself if Ovis restarts.": "待機中です。Ovisが再起動しても自動的に受け付けを再開します。",
   "Stop waiting": "待機をやめる",
   "Continue on another device": "別のデバイスで続ける",
-  "This sign-in can't add this PC by itself. Continue on another device to compare digits.": "このサインインだけではこのPCを追加できません。別のデバイスで続けて数字を照合してください。",
+  "This sign-in can't add this PC directly. Confirm the number on another device.": "このサインインではこのPCを直接追加できません。別のデバイスで番号を確認してください。",
   "This PC has its first member, but setup didn't finish. Try again.": "このPCに最初のデバイスが追加されましたが、設定は完了していません。もう一度お試しください。",
   "This PC stopped waiting after 30 minutes.": "30分が過ぎたため、このPCは待機を終了しました。",
   "Keep waiting": "待機を続ける",
