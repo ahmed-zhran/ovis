@@ -108,14 +108,14 @@ describe("the PC safety log (account-log.json)", () => {
     log.append({ record: lock2, got: "pc" });
     // a lift ends the block it names and that block's freeze; its marker stands
     const liftA = await signedLift(blockA.id, by);
-    log.append({ record: liftA, got: "snapshot" });
+    log.append({ record: liftA, got: "snapshot", cause: "snapshot" });
     // a forgetting lift ends block B and its marker
-    log.append({ record: pcRecord("lift", blockB.id, true), got: "pc" });
+    log.append({ record: pcRecord("lift", blockB.id, true), got: "pc", cause: "screen" });
     // an unlock ends the one lock it names
     log.append({ record: pcRecord("unlock", lock1.id), got: "pc" });
     // endings that name a record of another kind end nothing
     log.append({ record: pcRecord("unlock", blockC.id), got: "pc" });
-    log.append({ record: pcRecord("lift", lock2.id), got: "pc" });
+    log.append({ record: pcRecord("lift", lock2.id), got: "pc", cause: "screen" });
     const replayed = (state: ReturnType<SafetyLog["state"]>) => ({
       locked: state.locked,
       locks: ids(state.locks),
@@ -136,7 +136,7 @@ describe("the PC safety log (account-log.json)", () => {
 
     // a lift of a service freeze's block ends that freeze (by `f:` and the block's id)
     const liftFreeze = pcRecord("lift", freeze.id.slice(2));
-    log.append({ record: liftFreeze, got: "pc" });
+    log.append({ record: liftFreeze, got: "pc", cause: "screen" });
     log.append({ record: pcRecord("unlock", lock2.id), got: "pc" });
     expect(replayed(SafetyLog.open(dir).state())).toEqual({ ...expected, locked: false, locks: [], freezes: [blockC.id] });
 

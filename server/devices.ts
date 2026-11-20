@@ -15,7 +15,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { admissionPosition, compareAdmission, compareAdmissionPositions, isRowOrigin, legacyOrigin, type AdmissionPosition, type RowOrigin } from "./account/admission-order.ts";
 import { type ClearReason, PcAccountState } from "./account/pc-binding.ts";
-import type { BlockAsOf, SafetyGot, SafetyLog } from "./account/safety-log.ts";
+import type { BlockAsOf, LiftCause, SafetyGot, SafetyLog } from "./account/safety-log.ts";
 import type { RemovalEvidence } from "./account/removal-evidence.ts";
 import type { DeviceJournal, JournalEntry } from "./account/device-journal.ts";
 import type { DeviceNotice, NoticeReplay } from "../shared/account-devices-api.ts";
@@ -791,6 +791,11 @@ export class DeviceStore {
   /** P14: this PC's denial counter, 0 while the release flag is off; the admission guard compares it (records.ts). */
   gen(): number { return this.pc?.gen() ?? 0; }
 
+  /** Hears every lift appended to this PC's safety log once it is on disk: its target key and cause (seam for S2-27). */
+  onLifted(listener: (target: string, cause: LiftCause) => void): () => void {
+    return this.safety?.onLifted(listener) ?? (() => {});
+  }
+
   /** Hears every key a deny takes, in the deny turn, rows or not (Revoke, account remove, block, Revoke all). */
   onKeyRemoved(listener: (key: string, cause: KeyRemovedCause) => void): () => void {
     this.keyRemovedListeners.add(listener);
@@ -979,7 +984,7 @@ export class DeviceStore {
     for (const entry of this.safety.state().blocks) {
       const record = entry.record as BlockRecord;
       if (this.memberRows(record.signer, record.account).length > 0) continue;
-      this.safety.append({ record: { v: 1, id: randomBytes(16).toString("hex"), kind: "lift", account: record.account, target: record.id, signer: "pc", signed_at: new Date().toISOString(), forget: false, signature: "" }, got: "pc" });
+      this.safety.append({ record: { v: 1, id: randomBytes(16).toString("hex"), kind: "lift", account: record.account, target: record.id, signer: "pc", signed_at: new Date().toISOString(), forget: false, signature: "" }, got: "pc", cause: "orphan" });
     }
   }
 
