@@ -77,7 +77,7 @@ export class PcAccountState {
     const path = join(realFolder(stateDir), ADMISSION_FILE);
     const state = HANDLES.get(path) ?? new PcAccountState(path);
     HANDLES.set(path, state);
-    state.doc = { v: 1, next_admit: 1, binding: null, clears: [], first: null, others_ever: false };
+    state.doc = { v: 1, next_admit: 1, binding: null, clears: [], first: null, others_ever: false, gen: 0 };
     state.problem = null;
     state.fresh = false;
     let text: string;
