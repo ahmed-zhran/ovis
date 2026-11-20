@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
-import { relayFixture } from "../relay/test-helpers.ts";
+import { relayFixture, TestClock } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
@@ -225,5 +225,18 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
       expect(ends).toEqual([codeId]);
       expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
     } finally { f.close(); }
+  });
+
+  test("T71: a code that runs out its ten minutes ends on the store's own clock, and the hook hears it with nobody looking", async () => {
+    const ends: string[] = [];
+    const devices = store(dir());
+    const clock = new TestClock();
+    devices.useClock(clock);
+    devices.onPairingEnded((codeId) => ends.push(codeId));
+    const k = await key();
+    const { codeId } = devices.redeemCode(devices.startPairing().code, "code", k) as { codeId: string };
+    clock.advance(10 * 60 * 1000 + 1);
+    expect(ends).toEqual([codeId]);
+    expect(devices.admitConfirmed({ codeId, key: k, label: "Phone", source: "screen" })).toBeNull();
   });
 });
