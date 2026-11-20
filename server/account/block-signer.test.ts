@@ -2,18 +2,25 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
+import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
 import { DeviceStore } from "../devices.ts";
+import { bounded, relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
 import { AccountHolds } from "./holds.ts";
 import { AccountMailbox } from "./mailbox.ts";
 import { PcAccountState } from "./pc-binding.ts";
+import { applyAccountRecords } from "./records.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
 import { pcRecordId, SafetyLog } from "./safety-log.ts";
 
 const ACCOUNT = "acct_1";
+const SERVER = "0123456789abcdef0123456789abcdef";
 const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const fixtures: ReturnType<typeof relayFixture>[] = [];
+afterEach(() => {
+  for (const fixture of fixtures.splice(0)) fixture.close();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 interface Key { keys: CryptoKeyPair; spki: string }
 async function key(): Promise<Key> {
@@ -87,22 +94,49 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(log.waitingBlocks().map((waiting) => waiting.record.id)).toEqual([record.id]);
     expect(log.entries()).toHaveLength(0);
     // its signer is removed here before the target appears: applying the queue writes nothing and empties it
-    const target = devices.pairRelayApproved("Later", later.spki, { path: "account", addedBy: signer.id })!;
     devices.revoke(signer.id);
-    expect(await devices.applyWaitingBlocks()).toEqual([]);
+    const target = devices.pairRelayApproved("Later", later.spki, { path: "code" });
     expect(log.state().blocks).toHaveLength(0);
     expect(log.waitingBlocks()).toHaveLength(0);
-    expect(devices.has(target.device.id)).toBe(true);
+    expect(target).not.toBeNull();
+    expect(devices.hasKey(later.spki)).toBe(true);
+  });
 
-    // with its signer still a member, the queued block applies once its target is here
-    const fresh = pc();
-    const keeper = await member(fresh.devices);
-    const other = await key();
-    const queued = await block(other.spki, keeper);
-    await fresh.devices.applyBlock(queued, "mailbox");
-    const row = fresh.devices.pairRelayApproved("Other", other.spki, { path: "account", addedBy: keeper.id })!;
-    expect((await fresh.devices.applyWaitingBlocks()).map((receipt) => receipt.outcome)).toEqual(["applied"]);
-    expect(fresh.devices.has(row.device.id)).toBe(false);
+  test.each(["relay pairing", "account add", "startup"] as const)("T51: %s applies a waiting block before relay sign-in", async (path) => {
+    const stateDir = mkdtempSync(join(tmpdir(), "ovis-waiting-relay-"));
+    dirs.push(stateDir);
+    const target = await key();
+    const id = accountDeviceId(SERVER, target.spki);
+    let queued: BlockRecord | undefined;
+    if (path === "startup") {
+      const { devices, log } = open(stateDir);
+      const signer = await member(devices);
+      expect(devices.pairRelayApproved("Joining", target.spki, { path: "code", id })).not.toBeNull();
+      queued = await block(target.spki, signer);
+      // P19: startup can find the row and the waiting block together after a merge.
+      expect(log.wait({ record: queued, got: "mailbox", signer_removed: false })).toBe(true);
+    }
+    const fixture = relayFixture(false, { stateDir, accountOpensAll: true });
+    fixtures.push(fixture);
+    const { devices, safetyLog } = fixture.app.context.services;
+    if (path !== "startup") {
+      const signer = await relayDevice(fixture);
+      devices.linkAccountKey(signer.id, signer.publicKey, signer.publicKey, ACCOUNT);
+      queued = await block(target.spki, { keys: signer.keys, spki: signer.publicKey });
+      expect(await devices.applyBlock(queued, "mailbox")).toMatchObject({ outcome: "refused", reason: "unknown_target" });
+      if (path === "account add") {
+        const add = await signAccountRecord({ v: 1, kind: "add", account: ACCOUNT, key: target.spki, label: "Joining", role: "drive", id: newRecordId(), issued_at: new Date().toISOString(), signer: signer.publicKey }, signer.keys.privateKey);
+        await applyAccountRecords(devices, [add], SERVER);
+      }
+    }
+    const link = await relayConnection(fixture);
+    const signIn = path === "relay pairing"
+      ? link.pair(devices.startPairing().code, target.spki)
+      : link.auth({ id, keys: target.keys, publicKey: target.spki });
+    expect(await bounded(Promise.race([link.serverError, signIn.then(() => "auth_ok")]))).toBe("auth_failed");
+    if (!queued || !safetyLog) throw new Error("Waiting block fixture did not initialize");
+    expect(safetyLog.receipt(queued.id)).toMatchObject({ outcome: "applied" });
+    expect(safetyLog.waitingBlocks()).toEqual([]);
   });
 
   test("T73, S29: a blocked start lifts nothing at load, though a block's signer is no member here", async () => {
@@ -152,7 +186,7 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(log.entries().some((entry) => entry.record.kind === "lift" && entry.record.target === record.id)).toBe(true);
   });
 
-  test("T73: service-only removal or later signer reentry never changes those local endings", async () => {
+  test("T73: later signer reentry never changes those local endings", async () => {
     const { dir, devices, log } = pc();
     const [signer, target] = [await member(devices), await member(devices)];
     const record = await block(target.spki, signer);
@@ -166,15 +200,42 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     const reopened = open(dir);
     expect(blocksInForce(reopened.log)).toEqual([]);
     expect(reopened.devices.removedByAccount(target.spki)).toBe(true);
+  });
 
-    // a block whose signer left before the PC restarted is lifted at that load, before anything is served
-    const other = pc();
-    const [s2, t2] = [await member(other.devices), await member(other.devices)];
-    const b2 = await block(t2.spki, s2);
-    await other.devices.applyBlock(b2, "handed");
-    const rows = JSON.parse(await Bun.file(join(other.dir, "devices.json")).text()) as { gate_closed_at: string; devices: { id: string }[] };
-    writeFileSync(join(other.dir, "devices.json"), JSON.stringify({ ...rows, devices: rows.devices.filter((row) => row.id !== s2.id) }), { mode: 0o600 });
-    expect(blocksInForce(open(other.dir).log)).toEqual([]);
+  test("T73: startup preserves a block when its signer row is missing without a removal", async () => {
+    const { dir, devices, log } = pc();
+    const [signer, target] = [await member(devices), await member(devices)];
+    const record = await block(target.spki, signer);
+    await devices.applyBlock(record, "handed");
+    const rows = JSON.parse(readFileSync(join(dir, "devices.json"), "utf8")) as { devices: { id: string }[] };
+    writeFileSync(join(dir, "devices.json"), JSON.stringify({ ...rows, devices: rows.devices.filter((row) => row.id !== signer.id) }), { mode: 0o600 });
+    const reopened = open(dir);
+    expect(blocksInForce(reopened.log)).toEqual([record.id]);
+    expect(reopened.log.state().freezes.map((entry) => entry.record.id)).toEqual([record.id]);
+    expect(reopened.log.entries()).toEqual(log.entries());
+  });
+
+  test("T73: a signed account removal lifts only blocks of the key removed here", async () => {
+    const { devices, log } = pc();
+    const [signer, target] = [await member(devices), await member(devices)];
+    const local = await block(target.spki, signer);
+    expect(await devices.applyBlock(local, "handed")).toMatchObject({ outcome: "applied" });
+    const service = await block((await key()).spki, await key());
+    expect(log.append({ record: service, got: "snapshot", asof: { signer_no: null, target_no: null, after: null, joined: null, signer_removed: false } }).outcome).toBe("applied");
+    const removal = await signAccountRecord({ v: 1, kind: "remove", account: ACCOUNT, key: signer.spki, id: newRecordId(), issued_at: new Date().toISOString(), signer: signer.spki }, signer.keys.privateKey);
+    expect(await applyAccountRecords(devices, [removal], SERVER)).toEqual([{ id: removal.id, outcome: "applied" }]);
+    expect(blocksInForce(log)).toEqual([service.id]);
+  });
+
+  test("P23: Revoke all ends no standing block or freeze and emits no lift", async () => {
+    const { devices, log } = pc();
+    const [signer, target] = [await member(devices), await member(devices)];
+    const record = await block(target.spki, signer);
+    expect(await devices.applyBlock(record, "handed")).toMatchObject({ outcome: "applied" });
+    const heard: string[] = [];
+    devices.onLifted((key) => heard.push(key));
+    expect(devices.revokeAll()).toContain(signer.id);
+    expect([blocksInForce(log), log.state().freezes.map((entry) => entry.record.id), heard]).toEqual([[record.id], [record.id], []]);
   });
 
   test("P23: a device lift counts only from a signer older here than the blocked key", async () => {
