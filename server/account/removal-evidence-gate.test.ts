@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAccountKey } from "../../shared/account-records.ts";
@@ -104,5 +104,34 @@ describe("removal evidence holds through crashes, siblings and damaged files (P1
     chmodSync(join(dir, REMOVAL_FILE), 0o666);
     const devices = open(dir);
     expect(devices.failsClosed || devices.accountError !== null).toBe(true);
+  });
+
+  test("P13, S19: a Revoke made while the tombstone file is damaged stands as evidence, and its row stays out after a stop", async () => {
+    const dir = stateDir();
+    const k = await key();
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+    const kept = readFileSync(join(dir, "devices.json"));
+    rmSync(join(dir, "account-tombstones.json"), { force: true });
+    mkdirSync(join(dir, "account-tombstones.json"));
+    const damaged = open(dir);
+    expect(damaged.failsClosed).toBe(true);
+    damaged.revoke(id);
+    expect((JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[] }).revokes).toHaveLength(1);
+    // a stop before the row left the registry
+    writeFileSync(join(dir, "devices.json"), kept, { mode: 0o600 });
+    rmSync(join(dir, "account-tombstones.json"), { recursive: true, force: true });
+    const restarted = open(dir);
+    expect(restarted.has(id)).toBe(false);
+    expect((JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: { id: string }[] }).revokes).toHaveLength(1);
+  });
+
+  test("P13: a Revoke is imported once: its own id is the one a restart reads it back under", async () => {
+    const dir = stateDir();
+    const devices = open(dir);
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", await key())!.device.id;
+    devices.revoke(id);
+    open(dir);
+    expect((JSON.parse(readFileSync(join(dir, REMOVAL_FILE), "utf8")) as { revokes: unknown[] }).revokes).toHaveLength(1);
   });
 });
