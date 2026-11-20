@@ -49,6 +49,8 @@ describe("signing in on the PC's own window", () => {
   let memberKey: string;
   let challenges: number;
   let membershipReadsBeforeHealthFailure: number | null;
+  /** what the failing bridge health read answers: a 503, a 200 shaped as an error, or an own_window without its port */
+  let healthFailure: "503" | "error-200" | "no-port";
   /** holds the code's exchange until released, and says when it was asked */
   let exchange: { asked: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | null;
 
@@ -74,6 +76,7 @@ describe("signing in on the PC's own window", () => {
     memberKey = "";
     challenges = 0;
     membershipReadsBeforeHealthFailure = null;
+    healthFailure = "503";
     exchange = null;
     for (const key of ["window", "document", "navigator", "indexedDB", "getComputedStyle", "location", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -146,6 +149,8 @@ describe("signing in on the PC's own window", () => {
         if (url.pathname === "/api/health") {
           if (membershipReadsBeforeHealthFailure !== null && membershipReadsBeforeHealthFailure >= 2 && url.searchParams.get("scope") === "bridge") {
             membershipReadsBeforeHealthFailure = null;
+            if (healthFailure === "error-200") return Response.json({ error: { code: "unavailable" } });
+            if (healthFailure === "no-port") return Response.json({ ok: true, bridge_protocol: 1, own_window: {}, auth: { required: false, authenticated: true, via: "local", role: "drive" } });
             return Response.json({ error: { code: "unavailable" } }, { status: 503 });
           }
           return Response.json({ ok: true, bridge_protocol: 1, ...(membershipReadsBeforeHealthFailure === null && { own_window: { port: PORT } }), auth: { required: false, authenticated: true, via: "local", role: "drive" } });
@@ -323,8 +328,9 @@ describe("signing in on the PC's own window", () => {
     return tokens;
   };
 
-  for (const own of [true, false]) it(`lists nothing on a failed ownership read and checks again on retry (own sign-in: ${own})`, async () => {
+  for (const failure of ["503", "error-200", "no-port"] as const) for (const own of [true, false]) it(`lists nothing on an unreadable ownership read and checks again on retry (${failure}, own sign-in: ${own})`, async () => {
     firstMember = "available";
+    healthFailure = failure;
     if (!own) { await storeDeviceSignIn(); membershipReadsBeforeHealthFailure = 0; }
     await act(async () => { renderer = create(<SettingsProvider><AccountSection /></SettingsProvider>); });
     let stop: (() => void) | undefined;
