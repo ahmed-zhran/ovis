@@ -17,12 +17,22 @@ async function device() {
   return { keys, spki: await exportAccountKey(keys.publicKey) };
 }
 
-function setup(options: { codeOk?: boolean; admitted?: boolean } = {}) {
+function setup(options: { codeOk?: boolean; admitted?: boolean; shared?: boolean } = {}) {
   const calls: string[] = [];
+  const held = new Set<string>();
   const seams: RedeemSeams = {
-    redeemCode: (code, how, key) => { calls.push(`redeem ${code} ${how}`); return options.codeOk === false ? { ok: false, reason: "invalid_code" } : { ok: true, codeId: `use-${calls.length}`, origin: "pc" }; },
-    releaseRedemption: (codeId) => { calls.push(`release ${codeId}`); },
-    admitConfirmed: ({ codeId, source }) => { calls.push(`admit ${codeId} ${source}`); return options.admitted === false ? null : { id: "0123456789abcdef", label: "Phone", role: "drive" }; },
+    redeemCode: (code, how, key) => {
+      calls.push(`redeem ${code} ${how}`);
+      if (options.codeOk === false) return { ok: false, reason: "invalid_code" };
+      const codeId = options.shared ? code : `use-${calls.length}`;
+      held.add(JSON.stringify([codeId, key]));
+      return { ok: true, codeId, origin: "pc" };
+    },
+    releaseRedemption: (codeId, key) => { calls.push(`release ${codeId}`); held.delete(JSON.stringify([codeId, key])); },
+    admitConfirmed: ({ codeId, key, source }) => {
+      calls.push(`admit ${codeId} ${source}`);
+      return options.admitted === false || !held.delete(JSON.stringify([codeId, key])) ? null : { id: "0123456789abcdef", label: "Phone", role: "drive" };
+    },
   };
   const pending = new PendingRedemptions({ serverId: SERVER, journalDrop: () => {}, release: (codeId, key) => seams.releaseRedemption(codeId, key) });
   const pairings = new KeyProofPairings({ pending, seams });
@@ -98,4 +108,25 @@ test("T72: an approval the admission refuses admits nobody", async () => {
   const decided = pairings.decision(started.session);
   expect(pairings.approve(proved.pending.id, proved.pending.fingerprint, "screen")).toBeNull();
   expect(await bounded(decided)).toEqual({ admitted: null });
+});
+
+test.each(["named", "waiting"] as const)("T72/S31: another session can still be approved after a %s session leaves their shared reservation", async (stage) => {
+  const { pairings } = setup({ shared: true });
+  const phone = await device();
+  const request = { code: "123456", label: "Phone", publicKey: phone.spki, how: "code", via: "relay", keyProof: true } as const;
+  const first = pairings.pair(request);
+  const second = pairings.pair(request);
+  if (!("challenge" in first) || !("challenge" in second)) throw new Error("Expected two challenges");
+  if (stage === "waiting") {
+    const proved = await pairings.prove(first.session, await signPairProof(SERVER, first.challenge, phone.spki, phone.keys.privateKey));
+    expect(proved).toHaveProperty("pending");
+  }
+  const proved = await pairings.prove(second.session, await signPairProof(SERVER, second.challenge, phone.spki, phone.keys.privateKey));
+  if (!("pending" in proved)) throw new Error("Expected the second session to wait");
+  const decision = pairings.decision(second.session);
+
+  pairings.leave(first.session);
+  pairings.approve(proved.pending.id, proved.pending.fingerprint, "screen");
+
+  expect(await bounded(decision)).toEqual({ admitted: { id: "0123456789abcdef", label: "Phone", role: "drive" } });
 });
