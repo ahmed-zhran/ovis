@@ -17,7 +17,7 @@ async function device() {
   return { keys, spki: await exportAccountKey(keys.publicKey) };
 }
 
-function setup(options: { codeOk?: boolean; admitted?: boolean; shared?: boolean } = {}) {
+function setup(options: { codeOk?: boolean; admitted?: boolean | "throws"; shared?: boolean } = {}) {
   const calls: string[] = [];
   const held = new Set<string>();
   const seams: RedeemSeams = {
@@ -31,6 +31,7 @@ function setup(options: { codeOk?: boolean; admitted?: boolean; shared?: boolean
     releaseRedemption: (codeId, key) => { calls.push(`release ${codeId}`); held.delete(JSON.stringify([codeId, key])); },
     admitConfirmed: ({ codeId, key, source }) => {
       calls.push(`admit ${codeId} ${source}`);
+      if (options.admitted === "throws") throw new Error("Admission storage failed");
       return options.admitted === false || !held.delete(JSON.stringify([codeId, key])) ? null : { id: "0123456789abcdef", label: "Phone", role: "drive" };
     },
   };
@@ -108,6 +109,21 @@ test("T72: an approval the admission refuses admits nobody", async () => {
   const decided = pairings.decision(started.session);
   expect(pairings.approve(proved.pending.id, proved.pending.fingerprint, "screen")).toBeNull();
   expect(await bounded(decided)).toEqual({ admitted: null });
+});
+
+test("T72: an admission error resolves the wait without a device and releases the reservation", async () => {
+  const { pairings, calls } = setup({ admitted: "throws" });
+  const phone = await device();
+  const started = pairings.pair({ code: "123456", label: "Phone", publicKey: phone.spki, how: "code", via: "relay", keyProof: true });
+  if (!("challenge" in started)) throw new Error("Expected a challenge");
+  const proved = await pairings.prove(started.session, await signPairProof(SERVER, started.challenge, phone.spki, phone.keys.privateKey));
+  if (!("pending" in proved)) throw new Error("Expected a pending proof");
+  const decided = pairings.decision(started.session);
+
+  expect(pairings.approve(proved.pending.id, proved.pending.fingerprint, "screen")).toBeNull();
+
+  expect(await bounded(decided)).toEqual({ admitted: null });
+  expect(calls.filter((call) => call.startsWith("release "))).toEqual(["release use-1"]);
 });
 
 test.each(["named", "waiting"] as const)("T72/S31: another session can still be approved after a %s session leaves their shared reservation", async (stage) => {
