@@ -29,8 +29,9 @@ async function key(): Promise<string> {
   return Buffer.from(await crypto.subtle.exportKey("spki", pair.publicKey)).toString("base64url");
 }
 
-function store(dir: string, journal = DeviceJournal.open(dir)): DeviceStore {
+function store(dir: string, journal?: DeviceJournal): DeviceStore {
   const safety = SafetyLog.open(dir);
+  journal ??= DeviceJournal.open(dir, () => safety.ensureFile());
   return new DeviceStore(dir, null, null, { safety, pc: PcAccountState.open(dir), removals: RemovalEvidence.open(dir, safety), journal });
 }
 
