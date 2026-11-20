@@ -339,12 +339,12 @@ function withRecords(records: readonly unknown[] | undefined, more: readonly unk
   return kept.length ? kept : undefined;
 }
 
-/** Null for a file that exists and will not parse; an absent file holds no tombstones. */
 /** Every tombstone a folder holds, its pending file's included, as read before any merge coalesces them (T48). */
 export function folderTombstones(dir: string): AccountTombstone[] {
   return ["account-tombstones.json", "account-tombstones.pending.json"].flatMap((file) => readTombstones(join(dir, file)) ?? []);
 }
 
+/** Null for a file that exists and will not parse; an absent file holds no tombstones. */
 function readTombstones(path: string): AccountTombstone[] | null {
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
@@ -1887,12 +1887,14 @@ export class DeviceStore {
     if (this.evidence !== null && this.evidence.strict === null) {
       for (const key of new Set(rows.flatMap((d) => d.relay_public_key ?? []))) this.evidence.addRevoke(key, rows.find((d) => d.relay_public_key === key)?.account ?? null, now);
     }
-    if (this.evidence !== null) {
-      // a tombstone file that cannot be read is left as it is: the evidence holds the Revoke until it is repaired (S19)
+    // the evidence holds the Revoke when it is sound; a tombstone file that cannot be read is left as it is (S19)
+    if (this.evidence !== null && this.evidence.strict === null) {
       if (this.accountError === null) this.refreshTombstones();
       this.dropWaiting(rows.flatMap((d) => d.relay_public_key ?? []));
       return;
     }
+    // evidence that cannot be trusted holds nothing: the Revoke leaves main's tombstone, which a later start takes in
+    // as a Revoke (P13, rule 1)
     const keys = [...new Set(rows.flatMap((d) => d.relay_public_key === undefined || this.isTombstoned(d.relay_public_key) ? [] : [d.relay_public_key]))];
     const removedAt = new Date(now).toISOString();
     const next = [...this.tombstones,
