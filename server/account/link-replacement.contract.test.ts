@@ -108,3 +108,19 @@ test("flag off: a link without the opt-in is answered as on main, never replacem
   expect((await link(session, await linkRecord(paired.id, ACCOUNT, key, next), false)).status).toBe(200);
   expect(rowOf(made, paired.id)?.relay_public_key).toBe(next.spki);
 });
+
+test("T59: no link sets the first device's sign-in key: plain, opted in, or a replacement the screen approved", async () => {
+  const made = await pc(true, "darwin");
+  const key = await phone();
+  const paired = await pair(made, await made.offerCode(), key);
+  if ("error" in paired) throw new Error(paired.error);
+  const session = await signIn(made, paired.id, key);
+  if ("error" in session) throw new Error(session.error);
+  expect((await link(session, await linkRecord(paired.id, ACCOUNT, key), false)).status).toBe(200);
+  expect(JSON.parse(readFileSync(join(made.stateDir, "account-pc.json"), "utf8")).binding).not.toBeNull();
+  expect(listKey(made)).toBeNull();
+  const again = await signIn(made, paired.id, key);
+  if ("error" in again) throw new Error(again.error);
+  expect((await link(again, await linkRecord(paired.id, ACCOUNT, key, await phone()), true)).status).toBe(200);
+  expect(listKey(made)).toBeNull();
+});
