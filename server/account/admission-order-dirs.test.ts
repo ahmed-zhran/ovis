@@ -130,13 +130,30 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(a)?.[id]).toMatchObject({ how: "link", by: null, admit_no: 2 });
   });
 
-  test("P22: with the release flag off a twin keeps this folder's own origin as main does, never the sibling's", () => {
+  test("P22: with the release flag off a twin keeps this folder's own origin, never the sibling's", () => {
     const [a, b] = [dir(), dir()];
     put(a, [row("aaaaaaaaaaaaaaaa")]);
     put(b, [row("aaaaaaaaaaaaaaaa", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
     start(a, b, false);
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
-    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
+    expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ admit_no: 1 }) });
+  });
+
+  test("P22: a merge with the flag off, then a start with it on, neither locks this PC nor takes the sibling's number, whichever dir had the flag", async () => {
+    const at = (admit_no: number) => ({ from: "remote" as const, how: "code" as const, by: null, admit_no, at: AT });
+    for (const flagOnFirst of ["sibling", "this"] as const) {
+      const [a, b] = [dir(), dir()];
+      const [numbered, plain] = flagOnFirst === "sibling" ? [b, a] : [a, b];
+      writeFileSync(join(numbered, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 4 }), { mode: 0o600 });
+      put(numbered, [row("bbbbbbbbbbbbbbbb", { origin: at(3) })]);
+      put(plain, []);
+      stop(start(plain, numbered, false), plain);
+      expect(persisted(plain)).toEqual({ bbbbbbbbbbbbbbbb: undefined });
+      const devices = start(plain, numbered, true).app.context.services.devices;
+      expect(devices.failsClosed).toBe(false);
+      expect(persisted(plain)).toEqual({ bbbbbbbbbbbbbbbb: undefined });
+      expect(persisted(numbered)).toEqual({ bbbbbbbbbbbbbbbb: expect.objectContaining({ admit_no: 3 }) });
+    }
   });
 
   test("P21: a folder opened by its real path and through a link to it is one order", () => {
@@ -158,12 +175,12 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(at)?.[id]).toMatchObject({ how: "digits", by: null });
   });
 
-  test("P22: with the release flag off a merge keeps every row's origin as main does, and an unreadable origin is no age, not a bad registry", () => {
+  test("P22: with the release flag off a merge copies a sibling's row with no origin, and an unreadable origin is no age, not a bad registry", () => {
     const [a, b] = [dir(), dir()];
     put(a, []);
     put(b, [row("bbbbbbbbbbbbbbbb", { origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
     start(a, b, false);
-    expect(persisted(a)?.["bbbbbbbbbbbbbbbb"]).toMatchObject({ admit_no: 1 });
+    expect(persisted(a)).toEqual({ bbbbbbbbbbbbbbbb: undefined });
     expect(persisted(b)?.["bbbbbbbbbbbbbbbb"]).toMatchObject({ admit_no: 1 });
     const c = dir();
     put(c, [row("cccccccccccccccc", { origin: { from: "nowhere" } as never })]);
