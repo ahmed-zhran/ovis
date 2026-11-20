@@ -249,3 +249,22 @@ export async function provingDevice(made: Pc, code: string) {
   link.mux.sendSession({ type: FrameType.KEY_PROVE, flags: 0, stream_id: 0, payload: { signature: await signPairProof(SERVER_ID, sent, device.spki, device.keys.privateKey) } });
   return { device, link, challenge: sent, pending: bounded(pending.promise), fingerprint: await pairFingerprint(SERVER_ID, sent, device.spki) };
 }
+
+/**
+ * A PC whose screen a test drives through the desktop owner channel: `told` is every list of open confirms the PC
+ * wrote; approve and decline answer one by its id.
+ */
+export async function screenPc(accountOpensAll: boolean, platform?: NodeJS.Platform) {
+  const told: { pending: { id: string; action: { kind: string; pending?: string; row?: string; fingerprint?: string } }[] }[] = [];
+  let push!: (line: string) => void;
+  const input = new ReadableStream<Uint8Array>({ start(controller) { push = (line) => controller.enqueue(new TextEncoder().encode(line)); } });
+  const made = await pairingPc({ server: { accountOpensAll, ...(platform ? { platform } : {}), desktopOwner: { input, write: (line) => { told.push(JSON.parse(line)); } } } });
+  const screen = {
+    told,
+    approve: (id: string) => push(`${JSON.stringify({ approve: id })}\n`),
+    decline: (id: string) => push(`${JSON.stringify({ decline: id })}\n`),
+    open: (kind: string) => told.at(-1)?.pending.find((entry) => entry.action.kind === kind),
+    keyConfirm: () => told.at(-1)?.pending.find((entry) => entry.action.kind === "approve_key"),
+  };
+  return Object.assign(made, { screen });
+}
