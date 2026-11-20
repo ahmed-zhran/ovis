@@ -195,6 +195,7 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     const at = dir();
     const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
     const oldKey = await newKey();
+    writeFileSync(join(at, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 2 }), { mode: 0o600 });
     put(at, [row("aaaaaaaaaaaaaaaa", { relay_public_key: oldKey, origin: { from: "remote", how: "code", by: null, admit_no: 1, at: AT } })]);
     start(at, undefined, false).app.context.services.devices.linkAccountKey("aaaaaaaaaaaaaaaa", oldKey, await newKey(), "acct");
     expect(persisted(at)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
