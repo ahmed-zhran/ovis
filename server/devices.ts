@@ -1521,7 +1521,7 @@ export class DeviceStore {
    * caller without the key learns nothing; else the row's own verdict, read after the proof (T66).
    */
   async matchAccountRelay(deviceId: string, nonce: Uint8Array, signature: string, serverId: string): Promise<{ match: DeviceMatch } | { refused: Exclude<AccessAnswer, { ok: true }>; holdUntil: string | null } | null> {
-    if (this.joinedRows === null || this.failsClosed() || nonce.byteLength !== 32 || !/^[A-Za-z0-9_-]{86}$/.test(signature)) return null;
+    if (this.joinedRows === null || this.failsClosed || nonce.byteLength !== 32 || !/^[A-Za-z0-9_-]{86}$/.test(signature)) return null;
     if (this.devices.some((d) => d.id === deviceId)) return null;
     const row = this.joinedRows.row(deviceId);
     if (row === null || this.accountRowStale(row)) return null;
