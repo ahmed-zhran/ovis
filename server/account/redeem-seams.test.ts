@@ -324,4 +324,14 @@ describe("a code redeemed now, its key admitted on the PC's screen later (S2-13 
       setSystemTime();
     }
   });
+
+  test("LEDGER S2-38 S08-CR1 (CodeRabbit on #4308, history): a local Revoke tells key-removed listeners once, with cause revoke", async () => {
+    const devices = store(dir());
+    const k = await key();
+    const id = devices.pairRelay(devices.startPairing().code, "Phone", k)!.device.id;
+    const heard: string[] = [];
+    devices.onKeyRemoved((gone, cause) => heard.push(`${gone === k}:${cause}`));
+    devices.revoke(id);
+    expect(heard).toEqual(["true:revoke"]);
+  });
 });
