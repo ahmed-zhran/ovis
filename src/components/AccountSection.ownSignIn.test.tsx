@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { relayDevice, relayFixture } from "../../server/relay/test-helpers.ts";
@@ -12,7 +12,7 @@ import { indexedAccountStore } from "../lib/account/store.ts";
 import { fakeIndexedDB } from "../lib/indexedDB.fake.ts";
 import { SettingsProvider } from "../lib/settings.ts";
 import { nativeTransport, setTransport } from "../lib/transport.ts";
-import { AccountSection } from "./AccountSection.tsx";
+import { AccountSection, ADDING_MS } from "./AccountSection.tsx";
 import { DevicesPanel } from "./DevicesPanel.tsx";
 import { RelayTab } from "./ConnectPhoneDialog.tsx";
 import type { RelayState } from "../lib/useRelay.ts";
@@ -42,6 +42,7 @@ describe("signing in on the PC's own window", () => {
   let loseGrantOnly: boolean;
   let pc: ReturnType<typeof relayFixture> | null;
   let claimRefusal: Response | null;
+  let preClaim: { path: string; answer: () => Response | Promise<Response> } | null;
   let missingAccountAnswer: boolean;
   let statusAfterClaim: "fail" | "empty" | null;
   let loseEnrollAck: boolean;
@@ -65,6 +66,7 @@ describe("signing in on the PC's own window", () => {
     loseGrantOnly = false;
     pc = null;
     claimRefusal = null;
+    preClaim = null;
     missingAccountAnswer = false;
     statusAfterClaim = null;
     loseEnrollAck = false;
@@ -101,6 +103,7 @@ describe("signing in on the PC's own window", () => {
     const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input instanceof Request ? input.url : input), `http://127.0.0.1:${PORT}`);
       if (url.origin !== SERVICE) {
+        if (preClaim && url.pathname === preClaim.path && (url.pathname !== "/api/relay/link" || init?.method !== "POST")) return preClaim.answer();
         if (pc && (url.pathname === "/api/account/first-member/challenge" || url.pathname === "/api/account/status" || (url.pathname === "/api/relay/link" && init?.method !== "POST"))) {
           const origin = `http://127.0.0.1:${pc.app.port}`;
           const headers = new Headers(init?.headers);
@@ -207,7 +210,9 @@ describe("signing in on the PC's own window", () => {
     expect(words()).toContain("Study browser");
   });
 
-  for (const loss of ["response", "grant header", "two responses"] as const) it(`finishes after losing ${loss}, retrying by hand only if recovery failed`, async () => {
+  for (const loss of ["response", "grant header", "two responses"] as const) it(loss === "two responses"
+    ? "returns Try again at the retry deadline and ignores the late membership reply"
+    : `finishes after losing ${loss}, retrying by hand only if recovery failed`, async () => {
     firstMember = "available";
     lostClaimResponses = loss === "two responses" ? 2 : 1;
     loseGrantOnly = loss === "grant header";
@@ -222,6 +227,25 @@ describe("signing in on the PC's own window", () => {
         expect(buttons()).toContain("Try again");
         expect(enrolling).toBe(true);
         expect(fake.pcs("acct_google")).toEqual([]);
+        // A late membership read must not replace the next attempt's challenge.
+        const asked = Promise.withResolvers<void>();
+        const held = Promise.withResolvers<Response>();
+        const issued = challenges;
+        preClaim = { path: "/api/account/status", answer: () => { asked.resolve(); return held.promise; } };
+        jest.useFakeTimers();
+        try {
+          await press("Try again");
+          await asked.promise;
+          expect(buttons()).not.toContain("Try again");
+          await act(async () => { jest.advanceTimersByTime(ADDING_MS); });
+          expect(buttons()).toContain("Try again");
+          await act(async () => { held.resolve(Response.json({ account: pcAccount, enrolling: true })); });
+          expect(challenges).toBe(issued);
+          expect(buttons()).toContain("Try again");
+        } finally {
+          preClaim = null;
+          jest.useRealTimers();
+        }
         await press("Try again");
         await until(done);
       }
@@ -335,6 +359,22 @@ describe("signing in on the PC's own window", () => {
     await press("Add this PC to my account");
     await until(() => buttons().includes("Stop waiting") || buttons().includes("Turn on the relay and add this PC") || words().includes("This PC could not be listed"));
   };
+
+  for (const path of ["/api/account/first-member/challenge", "/api/relay/link"]) {
+    for (const reply of ["503", "unreadable 409", "uncoded 409", "unknown 409", "network"] as const) it(`does not list after ${reply} from ${path}`, async () => {
+      firstMember = "available";
+      preClaim = { path, answer: () => {
+        if (reply === "network") throw new TypeError("PC unreachable");
+        if (reply === "503") return Response.json({ error: { code: "account_unavailable" } }, { status: 503 });
+        if (reply === "unknown 409") return Response.json({ error: { code: "unknown_conflict" } }, { status: 409 });
+        return new Response(reply === "uncoded 409" ? "{}" : "unreadable", { status: 409 });
+      } };
+      await pressSignedInAdd();
+      expect({ directory: fake.pcs("acct_existing").map(row => row.server_id), pairingPosts: links }).toEqual({ directory: [], pairingPosts: 0 });
+      expect(words()).toContain("This PC could not be listed in your account. Try again.");
+      expect(buttons()).toContain("Add this PC to my account");
+    });
+  }
 
   for (const paired of [true, false]) it(paired ? "lists a paired PC in no account after its challenge is refused" : "offers to turn on the relay after GET /api/relay/link answers relay_off", async () => {
     pc = relayFixture(false, { accountOpensAll: false });

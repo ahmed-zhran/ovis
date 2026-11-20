@@ -496,10 +496,17 @@ and nothing else.
   its grant without writing another row or journal entry. Adding `"recover": true` requests rotation only:
   it cannot add a row to an empty PC.
 
+`first-member-journal.json` in the PC's state directory is the append-only audit of successful first-member
+admissions, not a source of access. Each addition records the account, member ID, public key, label, and time.
+Failed claims and grant rotations add no entry. Like the device journal, it retains the latest 1,000 entries.
+
 Success returns `{ "device": <member> }` and the `x-ovis-first-enroll` response header. The own window sends
 that header on `POST /api/account/enroll`; it is not a relay credential. It expires after ten minutes and no
 longer works after rotation, revocation, or completion of enrollment. A lost claim response is not permission
 to list the PC or open pairing: the window reads membership before deciding whether enrollment can resume.
+Before the claim, only `409 in_account` or an older PC's `404 not_found` falls back to digit pairing, and
+only after the PC reports `account: null`. `409 relay_off` offers to start the relay instead. A network
+failure, unreadable or uncoded refusal, or `5xx` (including `503 account_unavailable`) lists nothing.
 
 `GET /api/account/status`
 

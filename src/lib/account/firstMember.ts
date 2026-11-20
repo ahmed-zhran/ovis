@@ -46,6 +46,8 @@ export async function firstMember(service: AccountService, session: AccountSessi
   if ("recover" in attempt) {
     const { serverId, id } = attempt.recover;
     const status = await firstMemberMembership();
+    // A read that outlives its retry must not replace a newer attempt's challenge.
+    if (!running()) throw new AddPcWaitOver("ended");
     if (status.account === null) throw new AccountPcError(409, "claim_not_applied");
     if (status.account !== account) throw new AddPcWaitOver("sign-in");
     if (status.enrolling !== true) {
