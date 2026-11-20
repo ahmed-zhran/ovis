@@ -714,10 +714,10 @@ export class DeviceStore {
 
   /** The safety log or the admission order fails closed: no device gets in by a row or a code. */
   get failsClosed(): boolean {
-    // with the flag on, an account tombstone file that cannot be read is a key out nobody can tell: only this PC gets in (S19)
-    if (this.evidence !== null && this.accountProblem !== null) return true;
-    return (this.safety?.strict ?? this.pc?.strict ?? this.evidence?.strict ?? this.denyProblem) !== null;
+    // one rule (S19): with the flag on, anything that makes account records refused makes only this PC get in
+    return (this.safety !== null || this.pc !== null || this.evidence !== null) && this.accountError !== null;
   }
+
 
   /**
    * The one-time migration of a PC from before the upgrade (T50): the rows' one account becomes the binding, and every
