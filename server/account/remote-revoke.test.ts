@@ -3,6 +3,7 @@ import { exportAccountKey, newRecordId, signAccountRecord } from "../../shared/a
 import type { DeviceStore } from "../devices.ts";
 import { relayConnection, relayFixture, caughtUp } from "../relay/test-helpers.ts";
 import { applyAccountRecords } from "./records.ts";
+import { memberSnapshotPc } from "./listed-pc.test-helpers.ts";
 import { handleRelayRequest } from "../relay/routes.ts";
 
 const ACCOUNT = "acct_1";
@@ -93,8 +94,11 @@ describe("remote Revokes reach the caller itself and the rows that joined after 
   });
 
   test("T36: signed leave or an older member's authorized remove can commit, with all duplicates checked", async () => {
-    const { devices } = pc();
+    const { fixture, firstRead } = memberSnapshotPc();
+    fixtures.push(fixture);
+    const { devices } = fixture.app.context.services;
     const [older, target, leaving] = [await member(devices), await member(devices), await member(devices)];
+    await firstRead();
     const remove = (of: string, by: Key) => signAccountRecord({ v: 1, kind: "remove", account: ACCOUNT, key: of, issued_at: new Date().toISOString(), id: newRecordId(), signer: by.spki }, by.keys.privateKey);
     // a newer member signs the remove of an older one: refused, nothing changes
     expect((await applyAccountRecords(devices, [await remove(older.spki, leaving)], SERVER_ID))[0]).toMatchObject({ outcome: "refused", code: "older_device" });
