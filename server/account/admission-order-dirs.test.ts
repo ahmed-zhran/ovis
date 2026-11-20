@@ -53,7 +53,7 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, bbbbbbbbbbbbbbbb: expect.objectContaining({ from: "remote", admit_no: 1 }) });
   });
 
-  test("P22, T27: twins with two origins for one key keep none; a folder keeps its own origin exactly when its copy holds the key the row ends up with", async () => {
+  test("P22, T27, flag off (with it on, S2-17 drops a row whose keys differ): twins with two origins for one key keep none; a folder keeps its own origin exactly when its copy holds the key the row ends up with", async () => {
     const [a, b] = [dir(), dir()];
     const newKey = async () => exportAccountKey((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])).publicKey);
     const [keyA, firstKey, movedKey, ourOld, ourNew] = [await newKey(), await newKey(), await newKey(), await newKey(), await newKey()];
@@ -63,7 +63,7 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     const linked = { account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true };
     put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: keyA, origin: at(1) }), row("cccccccccccccccc", { relay_public_key: firstKey, origin: at(2) }), row("dddddddddddddddd", { relay_public_key: ourNew, ...linked, origin: at(4, "link") })]);
     put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: keyA, origin: at(3) }), row("cccccccccccccccc", { relay_public_key: movedKey, ...linked, origin: at(5, "link") }), row("dddddddddddddddd", { relay_public_key: ourOld, origin: at(6) })]);
-    start(a, b, true);
+    start(a, b, false);
     // the sibling linked c and numbered its new key; this folder linked d and numbered its own
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: undefined, dddddddddddddddd: expect.objectContaining({ how: "link", admit_no: 4 }) });
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: undefined, cccccccccccccccc: expect.objectContaining({ how: "link", admit_no: 5 }), dddddddddddddddd: undefined });
@@ -115,6 +115,9 @@ describe("a row's age is its own folder's word (P21, P22, T50)", () => {
     put(a, [row("aaaaaaaaaaaaaaaa", { relay_public_key: oldKey })]);
     writeFileSync(join(b, ADMISSION_FILE), JSON.stringify({ v: 1, next_admit: 5 }), { mode: 0o600 });
     put(b, [row("aaaaaaaaaaaaaaaa", { relay_public_key: linkedKey, account: "acct", linked_at: "2026-10-02T00:00:00.000Z", link_moved_key: true, origin: { from: "remote", how: "link", by: null, admit_no: 4, at: AT } })]);
+    // the key comes in by a flag-off merge (with the flag on, S2-17 drops a row whose keys differ); the first flag-on
+    // start then finds a key this folder never held
+    stop(start(a, b, false), a);
     start(a, b, true);
     expect(persisted(a)).toEqual({ aaaaaaaaaaaaaaaa: undefined });
     expect(persisted(b)).toEqual({ aaaaaaaaaaaaaaaa: expect.objectContaining({ how: "link", admit_no: 4 }) });
