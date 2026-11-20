@@ -4,13 +4,13 @@
  * KEY_PENDING, and a row only when this PC's screen approves that very key.
  */
 import { afterEach, expect, test } from "bun:test";
-import { FrameType, KEY_PROOF_FEATURE, type MuxFrame } from "../../shared/relay-mux.ts";
-import { pairFingerprint, signPairProof } from "../../shared/pair-fingerprint.ts";
+import { FrameType, KEY_PROOF_FEATURE } from "../../shared/relay-mux.ts";
 import { bounded, deferred, relayConnection, TestClock } from "../relay/test-helpers.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOURNAL_FILE } from "./device-journal.ts";
-import { pairingPc, phone, SERVER_ID, setUpFor, type Pc } from "./pairing.test-helpers.ts";
+import { pairingPc, phone, setUpFor, type Pc } from "./pairing.test-helpers.ts";
+import { provingDevice } from "./key-proof.test-helpers.ts";
 
 const pcs: Pc[] = [];
 afterEach(async () => { for (const pc of pcs.splice(0)) await pc.close(); });
@@ -28,23 +28,6 @@ async function pc(accountOpensAll: boolean, platform?: NodeJS.Platform) {
     keyConfirm: () => told.at(-1)?.pending.find((entry) => entry.action.kind === "approve_key"),
   };
   return Object.assign(made, { screen });
-}
-
-/** A device that offers the proof: it pairs, answers the challenge, and reports what it saw. */
-async function provingDevice(made: Pc, code: string) {
-  const device = await phone();
-  const link = await relayConnection(made);
-  const challenge = deferred<string>();
-  const pending = deferred<MuxFrame>();
-  link.onFrame = (frame) => {
-    if (frame.type === FrameType.KEY_CHALLENGE) challenge.resolve(frame.payload.challenge);
-    if (frame.type === FrameType.KEY_PENDING) pending.resolve(frame);
-  };
-  await link.hello([KEY_PROOF_FEATURE]);
-  link.mux.sendSession({ type: FrameType.PAIR, flags: 0, stream_id: 0, payload: { code, label: "New phone", public_key: device.spki } });
-  const sent = await bounded(challenge.promise);
-  link.mux.sendSession({ type: FrameType.KEY_PROVE, flags: 0, stream_id: 0, payload: { signature: await signPairProof(SERVER_ID, sent, device.spki, device.keys.privateKey) } });
-  return { device, link, challenge: sent, pending: bounded(pending.promise), fingerprint: await pairFingerprint(SERVER_ID, sent, device.spki) };
 }
 
 test("T71/T72: the device proves its key, waits, and is let in only when the PC's screen approves that key", async () => {
