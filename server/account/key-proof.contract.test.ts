@@ -6,7 +6,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { FrameType, KEY_PROOF_FEATURE, type MuxFrame } from "../../shared/relay-mux.ts";
 import { pairFingerprint, signPairProof } from "../../shared/pair-fingerprint.ts";
-import { bounded, deferred, relayConnection } from "../relay/test-helpers.ts";
+import { bounded, deferred, relayConnection, TestClock } from "../relay/test-helpers.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOURNAL_FILE } from "./device-journal.ts";
@@ -269,4 +269,17 @@ test("S31/T71: admitting one of two devices on a code withdraws the other's prom
   expect(prompts(made)).toEqual([]);
   made.screen.approve(secondPrompt.id);
   expect(made.stored().some((row) => row.relay_public_key === second.device.spki)).toBe(false);
+});
+
+test("T71/T72: a code that runs out drops the devices waiting on it and withdraws their prompts, with nobody looking", async () => {
+  const made = await pc(true, "linux");
+  const clock = new TestClock();
+  made.devices.useClock(clock);
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  expect(prompts(made)).toHaveLength(1);
+  clock.advance(10 * 60_000 + 1);
+  expect(prompts(made)).toEqual([]);
+  expect(await bounded(paired.link.serverError)).toBe("auth_failed");
+  expect((await made.local("/api/devices/pending")).body.pending).toEqual([]);
 });
