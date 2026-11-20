@@ -22,6 +22,7 @@ export function openPcRecovery(options: {
   readonly pairings: KeyProofPairings | undefined;
   readonly sibling?: string | null | undefined;
   readonly retryRestamp?: boolean;
+  readonly restampSiblingEligible: (origin: string, sibling: string) => boolean;
 }) {
   const { stateDir, devices, pcAccount, journal, safetyLog, releases, pending, pairings } = options;
   // The log's freeze set already includes each standing block once.
@@ -31,7 +32,7 @@ export function openPcRecovery(options: {
   });
   const seams: RecoverySeams = {
     restamp: restampAct({
-      stateDir, sibling: options.sibling, journal,
+      stateDir, sibling: options.sibling, journal, siblingEligible: options.restampSiblingEligible,
       install: process.env["OVIS_DESKTOP_APP"] === "1" ? "desktop" : process.env["HERDR_PLUGIN_ROOT"] ? "plugin" : "other",
       problem: () => devices.restampRefusal(options.retryRestamp === true),
     }),

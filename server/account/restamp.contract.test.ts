@@ -514,7 +514,7 @@ posix("r2 H2b: the local denial is durable when the second tombstone projection 
   expect(durable).toBe(true);
 });
 
-posix("r2 H3a: a missing participant cannot terminate a partial two-folder rewrite", async () => {
+posix.each(["origin", "sibling"] as const)("r2 H3a: a missing %s cannot terminate a partial two-folder rewrite", async missing => {
   const [active, sibling, holding] = [dir(), dir(), dir()];
   const first = row();
   const k = key();
@@ -528,14 +528,17 @@ posix("r2 H3a: a missing participant cannot terminate a partial two-folder rewri
   expect(failRename(join(sibling, "account-tombstones.json"), () => start(active, sibling).stop())).toBe(true);
   expect(registered(sibling)[0]?.created_at).toBe(stamp(1));
   const moved = join(holding, "missing");
-  renameSync(sibling, moved);
+  const unavailableDir = missing === "origin" ? active : sibling;
+  const availableDir = missing === "origin" ? sibling : active;
+  renameSync(unavailableDir, moved);
   try {
-    const unavailable = start(active);
+    const unavailable = start(availableDir);
     expect(unavailable.devices.failsClosed).toBe(true);
     unavailable.stop();
-    expect(existsSync(join(active, "restamp-refused.json"))).toBe(false);
-    expect(pending(active) || existsSync(join(active, "restamp-rollback.json"))).toBe(true);
-  } finally { renameSync(moved, sibling); }
+    const origin = missing === "origin" ? moved : active;
+    expect(existsSync(join(origin, "restamp-refused.json"))).toBe(false);
+    expect(pending(origin) || existsSync(join(origin, "restamp-rollback.json"))).toBe(true);
+  } finally { renameSync(moved, unavailableDir); }
   const rollback = start(active, sibling);
   expect(rollback.devices.failsClosed).toBe(true);
   for (const folder of [active, sibling]) {

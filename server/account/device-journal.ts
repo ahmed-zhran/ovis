@@ -52,8 +52,12 @@ interface Doc {
   snapshot_lift_n?: number;
   /** Transfer slot: written with the notice, retained until its evidence receipt is durable. */
   last_row_drop?: RowDrop & { readonly journalled: number };
+  /** Transaction approval and refusal receipts are pending work, not bounded history. */
+  restamp?: { readonly digest: string; readonly audits: readonly string[] };
+  restamp_reconcile?: string;
 }
 
+const isDigest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const isTextOrNull = (value: unknown) => value === null || typeof value === "string";
 
@@ -90,6 +94,9 @@ function receiptProblem(doc: Doc, drops: readonly RowDrop[]): string | null {
 }
 
 function documentProblem(doc: Doc, drops: readonly RowDrop[] = []): string | null {
+  if ((doc.restamp !== undefined && (!doc.restamp || !isDigest(doc.restamp.digest) ||
+      !Array.isArray(doc.restamp.audits) || !doc.restamp.audits.every(audit => typeof audit === "string"))) ||
+    (doc.restamp_reconcile !== undefined && !isDigest(doc.restamp_reconcile))) return "has invalid restamp receipts";
   if (doc.last_row_drop !== undefined && (!isRowDrop(doc.last_row_drop) || doc.last_row_drop.journalled === undefined)) {
     return "has an invalid account row receipt";
   }
@@ -147,9 +154,25 @@ export class DeviceJournal {
     return Bun.deepEquals(onDisk, this.exists ? this.doc : undefined) ? null : `${this.path} changed since it was opened; restart Ovis before restamping.`;
   }
 
-  appendRestamp(input: JournalInput): JournalEntry {
-    return this.appendEntry(input, undefined, undefined, undefined, true);
+  approveRestamp(digest: string, input: JournalInput): void {
+    this.appendEntry(input, undefined, undefined, undefined, { restamp: { digest, audits: [] } });
   }
+
+  approvesRestamp(digest: string): boolean { return this.doc.restamp?.digest === digest; }
+
+  auditRestamp(digest: string, input: JournalInput): void {
+    const approved = this.doc.restamp;
+    if (approved?.digest !== digest) throw new Error("restamp.json does not match the approved plan in the device journal");
+    const receipt = JSON.stringify([input.how, input.label]);
+    if (approved.audits.includes(receipt)) return;
+    this.appendEntry(input, undefined, undefined, undefined, { restamp: { digest, audits: [...approved.audits, receipt] } });
+  }
+
+  approveRestampReconciliation(digest: string, input: JournalInput): void {
+    this.appendEntry(input, undefined, undefined, undefined, { restamp_reconcile: digest });
+  }
+
+  approvesRestampReconciliation(digest: string): boolean { return this.doc.restamp_reconcile === digest; }
 
   /** A trimmed notice need not survive its receipt, but an unallocated or contradictory sequence proves nothing. */
   checkRowReceipts(drops: readonly RowDrop[]): void {
@@ -228,7 +251,7 @@ export class DeviceJournal {
     }
   }
 
-  private appendEntry(input: JournalInput, liftNumber?: number, decides?: string, drop?: RowDrop, preservePermissions = false): JournalEntry {
+  private appendEntry(input: JournalInput, liftNumber?: number, decides?: string, drop?: RowDrop, restamp?: Pick<Doc, "restamp" | "restamp_reconcile">): JournalEntry {
     if (this.problem !== null) throw new Error(this.strict!);
     const entry: JournalEntry = { ...input, seq: this.doc.next_seq, id: randomBytes(16).toString("hex"), at: new Date().toISOString() };
     let entries = [...this.doc.entries, entry];
@@ -249,8 +272,8 @@ export class DeviceJournal {
     });
     const open = entry.kind === "admit" && !entry.awaitingListCheck ? [...remaining, entry] : remaining;
     if (!this.exists) this.companions();
-    this.write({ ...this.doc, next_seq: entry.seq + 1, entries, open, trimmed, ...(drop && { last_row_drop: { ...drop, journalled: entry.seq } }),
-      ...(liftNumber === undefined ? {} : { snapshot_lift_n: liftNumber }) }, preservePermissions);
+    this.write({ ...this.doc, ...restamp, next_seq: entry.seq + 1, entries, open, trimmed, ...(drop && { last_row_drop: { ...drop, journalled: entry.seq } }),
+      ...(liftNumber === undefined ? {} : { snapshot_lift_n: liftNumber }) }, restamp !== undefined);
     this.exists = true;
     return entry;
   }

@@ -13,13 +13,14 @@ import { RelayReceiptIds } from "./machine-relay.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { OrderSequence } from "./order-sequence.ts";
 import { readHerdrProfiles, type HerdrMachineProfile } from "./herdr-profiles.ts";
-import { accessSync, chmodSync, constants, mkdirSync, rmSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { version } from "../package.json";
 import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, folderTombstones, mergeAccountTombstones, readDeviceRegistry, type StoredDevice } from "./devices.ts";
+import { DeviceStore, importFolderTombstones, mergeAccountTombstones, readDeviceRegistry, type StoredDevice } from "./devices.ts";
+import { syncDirectory } from "./private-state.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { readBrowserToolSetting } from "./agent-launch.ts";
@@ -71,7 +72,7 @@ import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
 import { RecoveryReleases } from "./account/recovery.ts";
 import { openPcRecovery } from "./account/recovery-server.ts";
-import { applyRestamp, deferRestampTombstoneMerge } from "./account/restamp.ts";
+import { applyRestamp, restampTombstoneMergeClock } from "./account/restamp.ts";
 import { checkRestampFile } from "./account/restamp-state.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
@@ -278,15 +279,21 @@ export function createServer(
   // A folder of another relay identity is another PC, not a source of rows or account state (P12, T48).
   const sameIdentity = (other: string) => { const [mine, theirs] = [savedServerId(stateDir), savedServerId(other)]; return mine === undefined || theirs === undefined || mine === theirs; };
   const candidate = options.siblingStateDir;
-  const restamp = opensAll ? applyRestamp({ stateDir, sibling: candidate }, () => {
-    if (!candidate) return true;
-    checkRestampFile(relayIdentityPath(stateDir));
-    checkRestampFile(relayIdentityPath(candidate));
-    return sameIdentity(candidate);
-  }) : {};
+  const restampSiblingEligible = (origin: string, other: string) => {
+    const read = (dir: string) => {
+      const path = relayIdentityPath(dir);
+      checkRestampFile(path);
+      const id = savedServerId(dir);
+      if (id === undefined && existsSync(path)) throw new Error(`Cannot read ${path}`);
+      return id;
+    };
+    const mine = read(origin), theirs = read(other);
+    return mine === undefined || theirs === undefined || mine === theirs;
+  };
+  const restamp = opensAll ? applyRestamp({ stateDir, sibling: candidate }, restampSiblingEligible) : {};
   const restampBlocked = restamp.problem !== undefined && restamp.retry !== true;
   const foreignSibling = opensAll && !!candidate && !restampBlocked && !sameIdentity(candidate);
-  const sibling = foreignSibling || restampBlocked ? null : candidate;
+  const sibling = restamp.sibling !== undefined ? restamp.sibling : foreignSibling || restampBlocked ? null : candidate;
   if (restamp.problem) console.error(restamp.problem);
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = (typeof options.relay === "function" ? options.relay() : options.relay)
@@ -305,12 +312,20 @@ export function createServer(
   const damage = (dir: string) => checkedOrder(dir).strict;
   const blocked = pcAccount?.strict ?? damage(stateDir) ?? (sibling ? damage(sibling) : null);
   if (blocked !== null) console.error(blocked);
-  const untouched = blocked !== null || restamp.problem !== undefined;
-  const deferTombstones = opensAll && sibling && !untouched && deferRestampTombstoneMerge({ stateDir, sibling });
+  let clockProblem: string | null = null;
+  let clock: ReturnType<typeof restampTombstoneMergeClock> | undefined;
+  if (opensAll && sibling && blocked === null && restamp.problem === undefined) {
+    try { clock = restampTombstoneMergeClock(stateDir, sibling); }
+    catch (error) {
+      clockProblem = error instanceof Error ? error.message : String(error);
+      console.error(clockProblem);
+    }
+  }
+  const untouched = blocked !== null || restamp.problem !== undefined || clockProblem !== null;
   // a binding is trusted only once the sibling folder's clears are read: a cleared bind_id never stands again (P12, T59)
   if (pcAccount !== null && sibling && !untouched) pcAccount.takeSibling(sibling);
   // every tombstone of both folders is evidence before the merge below coalesces them one per key (T48, P13)
-  const carried = opensAll && sibling && !untouched ? [...folderTombstones(stateDir), ...folderTombstones(sibling)] : [];
+  const carried = clock?.carried ?? [];
   // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
   // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
   const logMerge = opensAll && sibling && !untouched ? mergeSafetyLogs(stateDir, sibling) : null;
@@ -322,13 +337,27 @@ export function createServer(
   const conflicts: StoredDevice[] = [];
   const closure = safetyLog !== null && (safetyLog.strict !== null || safetyLog.state().locked || safetyLog.state().freezes.length > 0);
   const merge = sibling && !untouched ? mergeSiblingState(stateDir, sibling, undefined, opensAll ? { holdImports: closure, dropConflictingKeys: true, onDropped: (device) => conflicts.push(device) } : {}) : null;
-  let accountBlocked: string | null = accountMerge;
-  if (sibling && !untouched && !deferTombstones && accountBlocked === null) {
-    try { accountBlocked = mergeAccountTombstones(stateDir, sibling, opensAll); }
+  let accountBlocked: string | null = clockProblem ?? accountMerge;
+  const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
+  if (sibling && !untouched && clock?.ahead === undefined && accountBlocked === null) {
+    try {
+      if (removals !== null && carried.length > 0) {
+        if (safetyLog?.strict) throw new Error(safetyLog.strict);
+        if (merge?.devicesBlocked) throw new Error(merge.devicesBlocked);
+        const siblingEvidence = RemovalEvidence.open(sibling, safetyLog);
+        if (pcAccount?.evidenceWritten()) removals.missingAfterWritten();
+        if (PcAccountState.open(sibling).evidenceWritten()) siblingEvidence.missingAfterWritten();
+        importFolderTombstones(stateDir, removals, carried);
+        importFolderTombstones(sibling, siblingEvidence, carried);
+        if (process.platform !== "win32") for (const dir of [stateDir, sibling]) {
+          if (!syncDirectory(dir, process.platform).directorySynced) throw new Error(`Cannot make the imported denials durable in ${dir}`);
+        }
+      }
+      accountBlocked = mergeAccountTombstones(stateDir, sibling, opensAll);
+    }
     catch (error) { accountBlocked = `cannot merge the account tombstones of ${sibling}: ${error instanceof Error ? error.message : String(error)}`; }
     if (accountBlocked !== null) console.error(accountBlocked);
   }
-  const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
   // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
   const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
   // Step 2 (S2-24): with the release flag on, each pull is followed by a whole read applied to this PC's log and rows
@@ -361,7 +390,7 @@ export function createServer(
   }) : null;
   const devices: DeviceStore = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, {
     safety: safetyLog, pc: pcAccount, removals, journal, carried, joinedRows: rowsForDevices, held: (key) => accountMailbox.gates().held(key),
-    restampProblem: restamp.problem, restampRetry: restamp.retry === true,
+    restampProblem: restamp.problem, restampRetry: restamp.retry === true, reconcileRestamp: restamp.reconcile === true, futureTime: clock?.ahead,
   });
   const accountRows = opened.rows;
   const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
@@ -608,7 +637,7 @@ export function createServer(
   }) : undefined;
   const recoverySocket = recoveryReleases && journal && safetyLog ? openPcRecovery({
     stateDir, devices, pcAccount, journal, safetyLog, releases: recoveryReleases, pending: pendingRedemptions, pairings: keyProofPairings,
-    sibling, retryRestamp: restamp.retry === true,
+    sibling, retryRestamp: restamp.retry === true, restampSiblingEligible,
   }) : null;
   // the lock is written only after this PC's screen approves it, then the rows it does not let in end (T46)
   const lockSignal = safetyLog ? new LockSignal() : undefined;

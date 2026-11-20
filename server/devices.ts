@@ -336,6 +336,10 @@ export function readDeviceRegistry(path: string, opensAll = accountOpensAll(), r
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "bad" };
   }
+  return parseDeviceRegistry(parsed, opensAll);
+}
+
+export function parseDeviceRegistry(parsed: unknown, opensAll: boolean): Exclude<DeviceRegistry, { kind: "missing" }> {
   if (!isJsonObject(parsed) || !Array.isArray(parsed.devices)
     || !(parsed.gate_closed_at === null || typeof parsed.gate_closed_at === "string")
     || !parsed.devices.every((d) => isJsonObject(d) && typeof d.id === "string"
@@ -380,7 +384,22 @@ function withRecords(records: readonly unknown[] | undefined, more: readonly unk
 
 /** Every tombstone a folder holds, its pending file's included, as read before any merge coalesces them (T48). */
 export function folderTombstones(dir: string): AccountTombstone[] {
-  return ["account-tombstones.json", "account-tombstones.pending.json"].flatMap((file) => readTombstones(join(dir, file)) ?? []);
+  return ["account-tombstones.json", "account-tombstones.pending.json"].flatMap(file => {
+    const path = join(dir, file);
+    const read = readTombstones(path);
+    if (read === null) throw new Error(`Cannot read ${path}: account records are refused until it is restored or fixed.`);
+    return read;
+  });
+}
+
+/** Persist each original denial before a sibling merge publishes a one-per-key projection. */
+export function importFolderTombstones(dir: string, evidence: RemovalEvidence, found: readonly AccountTombstone[]): void {
+  if (evidence.strict !== null) throw new Error(evidence.strict);
+  const path = join(dir, "devices.json");
+  const registry = readDeviceRegistry(path, true, false);
+  if (registry.kind === "bad") throw new Error(`Cannot read ${path}`);
+  const rows = registry.kind === "ok" ? registry.devices.map(row => ({ ...row, pairedHere: pairedHere(row) })) : [];
+  evidence.takeIn(found, rows, Date.now());
 }
 
 /** The same file shape for startup recovery, without opening a DeviceStore. */
@@ -572,7 +591,7 @@ export class DeviceStore {
   private waitingForListedRestore = false;
   private futureProblem: string | null = null;
   private readonly restampProblem: string | null;
-  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean; restampProblem?: string | undefined; restampRetry?: boolean } = {}) {
+  constructor(stateDir: string, blocked: string | null = null, accountBlocked: string | null = null, account: { safety?: SafetyLog | null; pc?: PcAccountState | null; removals?: RemovalEvidence | null; journal?: DeviceJournal | null; carried?: readonly AccountTombstone[]; joinedRows?: AccountRowSource | ((devices: DeviceStore) => AccountRowSource | null) | null; held?: (key: string) => boolean; restampProblem?: string | undefined; restampRetry?: boolean; reconcileRestamp?: boolean; futureTime?: string | undefined } = {}) {
     this.joinedRows = typeof account.joinedRows === "function" ? account.joinedRows(this) : account.joinedRows ?? null;
     this.safety = account.safety ?? null;
     this.handedLifts = new HandedLifts(stateDir);
@@ -620,7 +639,7 @@ export class DeviceStore {
     if (this.restampProblem !== null) {
       // A sibling that finished rolling back may not yet have its own journal companions.
       if (account.restampRetry && this.restampRefusal(true) === null) {
-        this.migrate();
+        if (!account.reconcileRestamp) this.migrate();
         this.prepareRestampAudit();
       }
       return;
@@ -646,7 +665,7 @@ export class DeviceStore {
     // a time this PC wrote that lies more than a day ahead is no time it wrote: it would push every later stamp past it,
     // so the PC fails closed until it is repaired (S19, P13)
     if (this.evidence !== null) {
-      const ahead = [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t) || Date.parse(t) > Date.now() + DAY_MS);
+      const ahead = account.futureTime ?? [...this.ownTimes(), ...this.carried.filter((t) => t.record_id === "local").map((t) => t.removed_at)].find((t) => !isIsoTime(t) || Date.parse(t) > Date.now() + DAY_MS);
       if (ahead !== undefined) this.futureProblem = `A time this PC wrote lies in the future (${ahead}): account records are refused until it is repaired.`;
     }
     if (this.error === null && this.accountProblem === null && this.futureProblem === null && this.pc?.strict == null && !this.revokeAllIntent?.strict) {
@@ -689,6 +708,7 @@ export class DeviceStore {
 
   private prepareRestampAudit(): void {
     this.evidence?.recover(() => {
+      this.pc?.ensureRestampAudit();
       this.evidence?.ensureFile();
       this.safety?.ensureFile();
     });

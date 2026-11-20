@@ -54,14 +54,16 @@ export async function runRecover(args: readonly string[], io: RecoverIo): Promis
   }
   try {
     if (restamp) {
-      const preview = await io.send({ act: "restamp" }) as { error?: string; confirm?: string; moves?: { old: string; new: string }[] };
+      const preview = await io.send({ act: "restamp" }) as { error?: string; confirm?: string; reconcile?: boolean; moves?: { old: string; new: string }[] };
       if (preview.error !== undefined) { io.out(`${terminalText(preview.error)}\n`); return 1; }
-      if (preview.confirm === undefined || !Array.isArray(preview.moves) || preview.moves.length === 0) {
+      if (preview.confirm === undefined || !Array.isArray(preview.moves) || (preview.moves.length === 0 && preview.reconcile !== true)) {
         io.out("Ovis did not return a restamp plan.\n");
         return 1;
       }
       for (const { old, new: next } of preview.moves) io.out(`${terminalText(old)} -> ${terminalText(next)}\n`);
-      const answer = (await io.ask("Apply these timestamp changes on the next start? [y/N] ")).trim().toLowerCase();
+      const answer = (await io.ask(preview.reconcile === true
+        ? "Keep the independently changed current times and finish rollback on the next start? [y/N] "
+        : "Apply these timestamp changes on the next start? [y/N] ")).trim().toLowerCase();
       if (answer !== "y" && answer !== "yes") { io.out("Not queued.\n"); return 0; }
       const reply = await io.send({ act: "restamp", confirm: preview.confirm }) as { error?: string; queued?: boolean; install?: string };
       if (reply.error !== undefined) { io.out(`${terminalText(reply.error)}\n`); return 1; }

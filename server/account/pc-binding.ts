@@ -65,6 +65,17 @@ export function parsePcAccount(value: unknown): (PcDoc & { counterOnly?: true })
   return doc as PcDoc;
 }
 
+export function memberBindingProblem(path: string, bound: string | null, accounts: readonly string[]): string | null {
+  const other = accounts.find(account => account !== bound);
+  return other === undefined ? null : `this PC's devices name ${other}, and ${path} binds it to ${bound ?? "no account"}`;
+}
+
+export function rowNumberProblem(path: string, next: number | null, rows: readonly { readonly origin?: RowOrigin | undefined }[]): string | null {
+  const highest = Math.max(0, ...rows.flatMap(row => !row.origin || row.origin.from === "legacy" ? [] : [row.origin.admit_no]));
+  return highest === 0 ? null : next === null ? `${path} is missing beside rows this PC numbered`
+    : highest >= next ? `${path} is behind the number ${highest} a row here carries` : null;
+}
+
 /** A folder by what it is on disk, so a link to it and its real path are one folder (P21). */
 function realFolder(stateDir: string): string {
   try { return realpathSync(stateDir); } catch { return resolve(stateDir); }
@@ -118,10 +129,9 @@ export class PcAccountState {
    * a row it numbered, or one at or behind such a number, is damage. Run before the merge.
    */
   checkRows(rows: readonly { readonly origin?: RowOrigin | undefined }[]): void {
-    const numbers = rows.flatMap((row) => row.origin === undefined || row.origin.from === "legacy" ? [] : [row.origin.admit_no]);
-    if (numbers.length === 0) return;
-    if (this.fresh) this.missingBeside();
-    else this.checkAbove(numbers);
+    if (this.problem !== null) return;
+    this.problem = rowNumberProblem(this.path, this.fresh ? null : this.doc.next_admit, rows);
+    if (this.problem !== null) this.fresh = false;
   }
 
   /**
@@ -137,9 +147,7 @@ export class PcAccountState {
 
   /** Member rows of an account this PC is not in: the binding and the rows disagree, which is damage (P12, S19). */
   checkMembers(accounts: readonly string[]): void {
-    const bound = this.doc.binding?.account ?? null;
-    const other = accounts.find((account) => account !== bound);
-    if (this.problem === null && other !== undefined) this.problem = `this PC's devices name ${other}, and ${this.path} binds it to ${bound ?? "no account"}`;
+    this.problem ??= memberBindingProblem(this.path, this.doc.binding?.account ?? null, accounts);
   }
 
   /** A row numbered at or past the next number: the file is behind its rows, which is damage (P21). */
@@ -168,6 +176,14 @@ export class PcAccountState {
   }
 
   get migrating(): boolean { return (this.fresh || this.upgrading) && this.problem === null; }
+
+  /** Give a recovery audit its required companion without migrating any member rows during rollback. */
+  ensureRestampAudit(): void {
+    if (!this.fresh || this.problem !== null) return;
+    writePrivateState(this.path, { v: 1, next_admit: this.doc.next_admit });
+    this.fresh = false;
+    this.upgradingFrom = true;
+  }
 
   /** S2-03's counter file, read: the rows are numbered already, and only the binding is migrated (T50). */
   get upgrading(): boolean { return this.upgradingFrom && this.problem === null; }

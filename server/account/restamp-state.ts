@@ -3,13 +3,13 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isIsoTime } from "../../shared/account-records.ts";
 import { parseAccountDevicesFile } from "../../shared/account-snapshot.ts";
-import { parseTombstones, readDeviceRegistry } from "../devices.ts";
+import { folderTombstones, parseDeviceRegistry, parseTombstones, readDeviceRegistry, type StoredDevice } from "../devices.ts";
 import { isJsonObject } from "../http.ts";
 import { privateStateRefusal } from "../private-state.ts";
 import { ACCOUNT_DEVICES_FILE } from "./account-devices.ts";
 import { ADMISSION_FILE } from "./admission-order.ts";
 import { restampJournalProblem } from "./device-journal.ts";
-import { parsePcAccount } from "./pc-binding.ts";
+import { memberBindingProblem, parsePcAccount, rowNumberProblem } from "./pc-binding.ts";
 import { localRevokeId, parseEvidence, REMOVAL_FILE, type Unrevoke } from "./removal-evidence.ts";
 import { DEVICE_JOURNAL_FILE, parseLog, SAFETY_LOG_FILE } from "./safety-log.ts";
 
@@ -23,6 +23,10 @@ type Slot = RestampAddress & { readonly value: string; readonly row: Doc };
 
 export function readRestampJson(path: string): unknown {
   checkRestampFile(path);
+  return readStateJson(path);
+}
+
+function readStateJson(path: string): unknown {
   try { return JSON.parse(readFileSync(path, "utf8")); }
   catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
@@ -30,12 +34,67 @@ export function readRestampJson(path: string): unknown {
   }
 }
 
+/** Ordinary boot reads only the stores with own times; strict restamp trust starts with a pending plan. */
+export function readSiblingMergeClock(stateDir: string, sibling: string, limit: number) {
+  const carried = [...folderTombstones(stateDir), ...folderTombstones(sibling)];
+  const times = carried.filter(t => t.record_id === "local").map(t => t.removed_at);
+  for (const dir of [stateDir, sibling]) {
+    const registryPath = join(dir, "devices.json");
+    const registry = readDeviceRegistry(registryPath, true, false);
+    if (registry.kind === "bad") throw new Error(`Cannot read ${registryPath}`);
+    if (registry.kind === "ok") for (const row of registry.devices) times.push(row.created_at);
+
+    const path = join(dir, REMOVAL_FILE);
+    const raw = readStateJson(path);
+    if (raw !== undefined) {
+      const evidence = parseEvidence(raw);
+      if (evidence === null) throw new Error(`Cannot read ${path}`);
+      for (const row of [...evidence.revokes, ...evidence.unrevokes]) times.push(row.at);
+    }
+  }
+  const listPath = join(stateDir, ACCOUNT_DEVICES_FILE);
+  const list = readStateJson(listPath);
+  if (list !== undefined) {
+    try {
+      for (const row of parseAccountDevicesFile(list).devices) times.push(row.confirmed_at);
+    } catch (error) { throw new Error(`Cannot read ${listPath}`, { cause: error }); }
+  }
+  const invalid = times.find(time => !isIsoTime(time));
+  if (invalid !== undefined) throw new Error(`Invalid time this PC wrote (${invalid}): account records are refused until it is repaired.`);
+  return { carried, ahead: times.find(time => Date.parse(time) > limit) };
+}
+
 /** Restamp trusts the file as found. In particular, never soften the safety log's or ledger's write-mode rule. */
 export function checkRestampFile(path: string): void {
   const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (stat && (!stat.isFile() || (stat.mode & 0o022) !== 0)) throw new Error(`${path} is not a private regular file`);
+  if (stat && (!stat.isFile() || (stat.mode & 0o022) !== 0)) throw new RestampTrustError(`${path} is not a private regular file`);
   const refused = privateStateRefusal(path, undefined, undefined, false);
-  if (refused !== null) throw new Error(refused);
+  if (refused !== null) throw new RestampTrustError(refused);
+}
+
+export class RestampTrustError extends Error {}
+
+/** Check all paths before a refusal audit: a later trust refusal must not leave earlier writes behind. */
+export function checkRestampInputs({ stateDir, sibling }: RestampFolders): void {
+  for (const dir of sibling ? [stateDir, sibling] : [stateDir]) {
+    for (const file of ["devices.json", ACCOUNT_DEVICES_FILE, DEVICE_JOURNAL_FILE, ADMISSION_FILE, REMOVAL_FILE,
+      "account-tombstones.json", "account-tombstones.pending.json", SAFETY_LOG_FILE]) checkRestampFile(join(dir, file));
+  }
+}
+
+/** An authenticated plan may be refused before the full state parses; audit only against healthy companions. */
+export function openRestampAudit(dir: string): ReturnType<typeof readRestampJson> {
+  const path = (file: string) => join(dir, file);
+  const journal = readRestampJson(path(DEVICE_JOURNAL_FILE));
+  const binding = parsePcAccount(readRestampJson(path(ADMISSION_FILE)));
+  const evidence = parseEvidence(readRestampJson(path(REMOVAL_FILE)));
+  const log = parseLog(readRestampJson(path(SAFETY_LOG_FILE)));
+  if (journal === undefined || typeof binding === "string" || evidence === null || typeof log === "string" || log.overflowed) {
+    throw new Error(`Cannot trust the restamp audit companions in ${dir}`);
+  }
+  const problem = restampJournalProblem(journal, evidence.row_drops ?? []);
+  if (problem !== null) throw new Error(`${path(DEVICE_JOURNAL_FILE)} ${problem}`);
+  return journal;
 }
 
 export function restampAddress({ store, ref, field }: RestampAddress): string {
@@ -48,7 +107,7 @@ export function readRestampState(folders: RestampFolders) {
   const revokes = new Set<Slot>();
   const localTombstones = new Set<Slot>();
   const unrevokes = new Map<string, readonly Unrevoke[]>();
-  const bindings: Exclude<ReturnType<typeof parsePcAccount>, string>[] = [];
+  const bindings: { path: string; pc: Exclude<ReturnType<typeof parsePcAccount>, string> | null; rows: readonly StoredDevice[] }[] = [];
   const journals = new Map<string, unknown>();
   let nonOwn = -Infinity;
   const floor = (value: string) => {
@@ -56,7 +115,6 @@ export function readRestampState(folders: RestampFolders) {
     nonOwn = Math.max(nonOwn, Date.parse(value));
   };
   const sibling = folders.sibling;
-  const real = (dir: string) => realpathSync(dir, { encoding: "utf8" });
   const read = (dir: string, store: string, file: string) => {
     const path = join(dir, file);
     const doc = readRestampJson(path);
@@ -84,7 +142,10 @@ export function readRestampState(folders: RestampFolders) {
 
   const main = folders.stateDir;
   const dirs = [{ dir: main, prefix: "" }];
-  if (sibling && resolve(main) !== resolve(sibling) && existsSync(sibling) && real(main) !== real(sibling)) dirs.push({ dir: sibling, prefix: "sibling/" });
+  if (sibling && resolve(main) !== resolve(sibling)) {
+    if (!existsSync(sibling)) throw new Error(`Restamp participant ${sibling} is unavailable`);
+    if (realpathSync(main) !== realpathSync(sibling)) dirs.push({ dir: sibling, prefix: "sibling/" });
+  }
   for (const { dir, prefix } of dirs) {
     // Sibling merges share the ordinary registry and evidence; their old copies must not be imported again.
     const store = prefix + "devices.json";
@@ -95,15 +156,17 @@ export function readRestampState(folders: RestampFolders) {
     const binding = readRestampJson(join(dir, ADMISSION_FILE));
     const pc = binding === undefined ? null : parsePcAccount(binding);
     if (typeof pc === "string" || (pc === null && hasJournal)) throw new Error(`Cannot read ${prefix}${ADMISSION_FILE}`);
-    if (pc) bindings.push(pc);
+    const bindingPath = join(dir, ADMISSION_FILE);
+    let memberRows: readonly StoredDevice[] = [];
     if (devices !== undefined) {
-      const registry = readDeviceRegistry(join(dir, "devices.json"), true, false);
+      const registry = parseDeviceRegistry(devices, true);
       if (registry.kind !== "ok") throw new Error(`Cannot read ${store}`);
-      if (registry.devices.some(row => row.origin && row.origin.from !== "legacy" && (!pc || row.origin.admit_no >= pc.next_admit))) {
-        throw new Error(`${prefix}${ADMISSION_FILE} does not account for its numbered rows`);
-      }
+      memberRows = registry.devices;
+      const orderProblem = rowNumberProblem(bindingPath, pc?.next_admit ?? null, memberRows);
+      if (orderProblem !== null) throw new Error(orderProblem);
       rows(devices.devices, (row) => slot(store, String(row.id), "created_at", row));
     }
+    bindings.push({ path: bindingPath, pc, rows: memberRows });
     if (prefix === "") {
       const listed = read(dir, ACCOUNT_DEVICES_FILE, ACCOUNT_DEVICES_FILE);
       if (listed !== undefined) {
@@ -150,9 +213,21 @@ export function readRestampState(folders: RestampFolders) {
       for (const { record } of parsed.waiting) floor(record.signed_at);
     }
   }
-  const cleared = new Set(bindings.flatMap(pc => pc.clears.map(clear => clear.bind_id)));
-  const standing = bindings.flatMap(({ binding }) => binding && !binding.pending && !cleared.has(binding.bind_id) ? [binding.account] : []);
+  const cleared = new Set(bindings.flatMap(({ pc }) => pc?.clears.map(clear => clear.bind_id) ?? []));
+  const bound = bindings.map(({ pc, rows }) => {
+    const binding = pc?.binding;
+    if (!binding || cleared.has(binding.bind_id)) return null;
+    if (binding.pending && !rows.some(row => row.account === binding.account && row.relay_public_key === pc?.first?.key)) return null;
+    return binding.account;
+  });
+  const standing = bound.filter(account => account !== null);
   if (new Set(standing).size > 1) throw new Error("The two folders bind this PC to two accounts");
+  for (const [index, { path, pc, rows }] of bindings.entries()) {
+    const accounts = [...new Set(rows.flatMap(row => row.account === undefined ? [] : [row.account]))];
+    const account = bound[index] ?? standing[0] ?? (pc === null || pc.counterOnly ? accounts[0] ?? null : null);
+    const problem = memberBindingProblem(path, account, accounts);
+    if (problem !== null) throw new Error(problem);
+  }
   return { own, nonOwn, docs, revokes, localTombstones, unrevokes, journals };
 }
 

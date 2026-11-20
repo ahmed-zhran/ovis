@@ -1007,7 +1007,9 @@ who runs Ovis. On Windows the command is not available.
 
 - `ovis recover --restamp` shows which timestamps this PC wrote too far ahead and asks you to
   confirm. It queues the repair without changing device or account records. Restart Ovis as
-  the command directs to apply it. Past timestamps and removals are kept.
+  the command directs to apply it. Past timestamps and removals are kept. If a repair was
+  interrupted and another write changed a timestamp, Ovis stays closed. Run the command again
+  to review and confirm keeping the independently changed times, then restart to finish rollback.
 
 ### Limits of this release
 
