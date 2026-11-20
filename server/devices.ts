@@ -810,7 +810,7 @@ export class DeviceStore {
    * (`recover`). Every guard is asked again in this turn, and only the very key and code reserved commit. A key a row
    * already holds gives that row the new origin and makes no second row (T5 in 2d).
    */
-  admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover"; unrevokes?: readonly string[] }, now = Date.now()): DeviceMatch | null {
+  admitConfirmed(confirm: { codeId: string; key: string; label: string; source: "screen" | "recover"; by?: string; unrevokes?: readonly string[] }, now = Date.now()): DeviceMatch | null {
     const pending = this.pending;
     const reserved = pending?.reserved?.get(confirm.key);
     if (this.safety === null || this.pc === null || pending === null || pending.id !== confirm.codeId || reserved === undefined || this.codeOver(pending, now)) return null;
@@ -836,7 +836,7 @@ export class DeviceStore {
       return { id: existing.id, label: existing.label, role: existing.role };
     }
     const device: StoredDevice = { id: randomBytes(8).toString("hex"), label: normalizeLabel(confirm.label, "Device"), role: "drive", token_hash: hash(randomBytes(32).toString("hex")), relay_public_key: confirm.key, created_at: new Date(now).toISOString(), last_seen_at: null, origin };
-    this.enroll(device, now, [], true, { confirm: proof });
+    this.enroll(device, now, [], true, { confirm: proof, ...(confirm.by === undefined ? {} : { by: confirm.by }) });
     if (revokes.length > 0) this.clearTombstone(confirm.key);
     return { id: device.id, label: device.label, role: device.role };
   }
@@ -1519,7 +1519,7 @@ export class DeviceStore {
   }
 
   /** One authorization write precedes every state change and enrollment announcement. */
-  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof } = {}): void {
+  private enroll(admitting: StoredDevice, now: number, origin: readonly string[], codeSpent = true, path: { startedBy?: string | null; digits?: boolean; confirm?: ConfirmProof; by?: string } = {}): void {
     // the final guard, in the commit turn: nothing waits between it and the write
     if (!this.admits(admitting.relay_public_key, path.confirm)) throw new AdmissionRefusedError();
     const admitted = this.knowingRemovals(this.admitted(admitting, now, path));
@@ -1813,9 +1813,11 @@ export class DeviceStore {
    * An admission's journal entry, on disk before its row (G14): a journal that cannot be written throws, and nobody
    * is admitted. Then every listener hears it, each on its own.
    */
-  private journalAdmission(device: StoredDevice): void {
+  /** `by`: the OS user of an `ovis recover` admission (P24, T70). */
+  private journalAdmission(device: StoredDevice, by?: string): void {
     if (this.journal === null) return;
-    this.publish(this.journal.append({ kind: "admit", how: device.origin?.how ?? "code", key: device.relay_public_key ?? null, no: device.origin?.admit_no ?? null, row: device.id, label: device.label, by: device.added_by ?? null, account: device.account ?? null }));
+    const recovered = device.origin?.from === "recover";
+    this.publish(this.journal.append({ kind: "admit", how: recovered ? "recover" : device.origin?.how ?? "code", key: device.relay_public_key ?? null, no: device.origin?.admit_no ?? null, row: device.id, label: device.label, by: recovered ? by ?? null : device.added_by ?? null, account: device.account ?? null }));
   }
 
   /** A removal's journal entry, after its deny (P8 step 4). A journal that cannot be written stops no removal. */
