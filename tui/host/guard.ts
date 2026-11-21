@@ -271,8 +271,14 @@ export function guardedHost(port: TerminalPort): Host {
       }
       probePromise = new Promise<ProbeResult>((resolve) => { settleProbe = resolve; });
       phase = "probing";
-      if (!send(encoder.encode(PROBE_QUERY))) finishProbe(false);
-      else if (phase === "probing") cancelProbeTimer = port.timer(REPLY_WAIT_MS, () => finishProbe(false));
+      let sent = false;
+      try {
+        sent = send(encoder.encode(PROBE_QUERY));
+      } finally {
+        // a query that was not written, gone or thrown, ends the probe now: a later call gets that answer
+        if (!sent) finishProbe(false);
+      }
+      if (phase === "probing") cancelProbeTimer = port.timer(REPLY_WAIT_MS, () => finishProbe(false));
       return probePromise;
     },
 

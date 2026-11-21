@@ -443,6 +443,19 @@ describe("the start probe", () => {
     expect(seen).toEqual(["ab"]);
   });
 
+  it("ends when its query's write throws: the caller gets the error, and a second call the settled answer", async () => {
+    const host = new HeadlessHost();
+    host.enter();
+    host.duringNextWrite(() => { throw Object.assign(new Error("EBADF: write failed"), { code: "EBADF" }); });
+    expect(() => host.probe()).toThrow("EBADF");
+    const second: { answered?: boolean } = {};
+    void host.probe().then((result) => { second.answered = result.answered; });
+    // one turn of the event loop: every reaction of a settled promise has run by then
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(second).toEqual({ answered: false });
+    expect(host.timers()).toBe(0);
+  });
+
   it("is asked once: a second call gets the same answer and writes nothing", async () => {
     const host = new HeadlessHost({ answer: ANSWER });
     host.enter();
