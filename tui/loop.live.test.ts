@@ -163,13 +163,14 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
   it("shows a program named like an agent coming to the front as that agent, in its pane's title and the Agents list, with no reconnect", async () => {
     const { core: isolated, hc, root } = await core();
     mkdirSync(join(root, "bin"));
-    symlinkSync("/usr/bin/less", join(root, "bin", "claude"));
+    // a shell every runner image has, under the agent's name; it stays in front until its read ends
+    symlinkSync("/bin/sh", join(root, "bin", "claude"));
     await hc.call("terminal.run", { argv: ["sh", "-c", "echo FRONT-MARK; exec sh"], labels: { ...labels, "ovis.pane": "front-pane" }, cwd: root });
     const run = screen(isolated, root);
     await run.until(/FRONT-MARK[\s\S]*\x1b\[\?25h/, "the live pane");
     const before = await gridText(run.output(), 100, 30);
     expect([before.includes("[claude]"), before.includes("No agents")]).toEqual([false, true]);
-    run.type(`exec ${join(root, "bin", "claude")} /etc/hostname\r`);
+    run.type(`exec ${join(root, "bin", "claude")} -c 'read line'\r`);
     await run.until("[claude]", "the agent in the pane's title");
     let grid = await gridText(run.output(), 100, 30);
     while (grid.includes("No agents")) grid = await nextGrid(run);
