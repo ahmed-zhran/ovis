@@ -190,8 +190,11 @@ describe.skipIf(!bin || process.platform === "win32")("the screen's entry agains
     await run.until(/(?=[\s\S]*STAY-MARK)(?=[\s\S]*END-MARK)[\s\S]*\x1b\[\?25h/, "both panes live");
     await hc.call("terminal.send", { terminal: address, text: "go\r" });
     await run.until("ended (3)", "the ended pane's banner");
-    const ended = await gridText(run.output(), 100, 30);
-    expect([ended.includes("+- stays "), ended.includes("+- ends "), ended.includes("+- ended (3) ")]).toEqual([true, true, true]);
+    // the banner can arrive in one read and the rest of its frame in the next
+    const shown = (grid: string) => [grid.includes("+- stays "), grid.includes("+- ends "), grid.includes("+- ended (3) ")];
+    let ended = await gridText(run.output(), 100, 30);
+    while (shown(ended).includes(false)) ended = await nextGrid(run);
+    expect(shown(ended)).toEqual([true, true, true]);
     expect((await hc.call("terminal.get", { terminal: address })).state).toBe("finished");
     await hc.call("terminal.rm", { terminal: address });
     let grid = ended;
