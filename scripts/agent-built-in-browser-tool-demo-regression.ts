@@ -53,6 +53,8 @@ async function main(): Promise<void> {
         assert.ok(!(await row(browser, origin, {}, false, null)).includes("Ovis 내장 브라우저"), "a browser outside the desktop app is not offered the built-in browser");
         assert.ok(!(await row(browser, origin, { builtInBrowser: false }, true, null)).includes("Ovis 내장 브라우저"), "the desktop app with the setting off does not offer it");
         assert.ok(!(await row(browser, origin, { builtInBrowser: true }, true, null, false)).includes("Ovis 내장 브라우저"), "a desktop app that cannot let agents in (Windows) does not offer it");
+        assert.ok(!(await row(browser, origin, { builtInBrowser: true, agentBrowserTools: { claude: "ovis" } }, true, null, false)).includes("Ovis 내장 브라우저"), "a choice saved before is not offered where agents cannot be let in");
+        assert.ok(!(await row(browser, origin, { builtInBrowser: false, agentBrowserTools: { claude: "ovis" } }, true, null)).includes("Ovis 내장 브라우저"), "nor with the setting off");
         assert.ok((await row(browser, origin, { builtInBrowser: true }, true, "agent-built-in-browser-tool-1280-light.png")).includes("Ovis 내장 브라우저"), "the desktop app with the setting on offers it");
       } finally { await browser.close(); }
     } finally {

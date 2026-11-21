@@ -1,7 +1,7 @@
 import type { TailnetPcsOptions } from "../tailnet-pcs.ts";
 import type { SshCandidatesOptions } from "../ssh-candidates.ts";
 import { createAlertWebhook } from "../alert-webhook.ts";
-import { forgetBuiltInBrowserToken } from "../agent-launch.ts";
+import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens } from "../agent-launch.ts";
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { RelaySocket } from "../../shared/relay-channel.ts";
@@ -868,6 +868,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (machines) machines.localAgents(panes); else bridgeAgents!.reconciled(panes);
     },
     onResync: (panes, newer, askedAt = Date.now()) => {
+      // a whole snapshot: tokens of panes that ended while the server was down go too
+      keepBuiltInBrowserTokens(new Set(panes.map((pane) => pane.pane_id)));
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       finishes.resync(completions, projected, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;

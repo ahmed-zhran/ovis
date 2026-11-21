@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { freeAgentName } from "./agent-name.ts";
@@ -103,7 +103,8 @@ export function readBrowserToolSetting(read: () => unknown, dir: string, builtIn
 
 /** A pane's token for the built-in browser, written anew (only the user can read it): the app takes calls only while it is there. */
 function builtInLaunch(host: BuiltInBrowserHost, paneId: string): BuiltInBrowserLaunch | null {
-  if (host.socket === null || !host.enabled() || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId)) return null;
+  // no socket where the app said it would be (the app not up): the agent starts without the tool, and no token is written
+  if (host.socket === null || !host.enabled() || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId) || !existsSync(host.socket)) return null;
   const tokenFile = join(host.tokensDir, `${paneId}.token`);
   if ([host.socket, tokenFile, ...host.command].some((part) => part.includes("'"))) return null;
   mkdirSync(host.tokensDir, { recursive: true, mode: 0o700 });
@@ -123,6 +124,22 @@ export function forgetBuiltInBrowserToken(paneId: string): void {
   const host = browserTools?.builtIn;
   if (!host || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId)) return;
   rmSync(join(host.tokensDir, `${paneId}.token`), { force: true });
+}
+
+/** Takes back the tokens of panes no longer there (one that ended while the server was not running heard no end). */
+export function keepBuiltInBrowserTokens(paneIds: ReadonlySet<string>): void {
+  const host = browserTools?.builtIn;
+  if (!host) return;
+  let names: string[];
+  try {
+    names = readdirSync(host.tokensDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pane = /^([A-Za-z0-9_-]{1,120})\.token$/.exec(name)?.[1];
+    if (pane !== undefined && !paneIds.has(pane)) rmSync(join(host.tokensDir, name), { force: true });
+  }
 }
 
 /**

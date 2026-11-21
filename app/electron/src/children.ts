@@ -85,7 +85,8 @@ export function serverEnv(base: Env, options: { hc: string; stateDir: string; po
     // where an agent's built-in browser tool reaches the app (browserBroker.ts); the server offers it only with this
     ...(options.browserSocket ? { OVIS_BROWSER_SOCKET: options.browserSocket } : {}),
   };
-  const dropped = new Set(["HERDR_PLUGIN_ROOT", "HERDR_SOCKET", "OVIS_MANAGED", "OVIS_BOOT_ID", "OVIS_TOKEN"]);
+  // a socket the app did not name (none on Windows) is not taken from the environment it was started in
+  const dropped = new Set(["HERDR_PLUGIN_ROOT", "HERDR_SOCKET", "OVIS_MANAGED", "OVIS_BOOT_ID", "OVIS_TOKEN", ...(options.browserSocket ? [] : ["OVIS_BROWSER_SOCKET"])]);
   // the server would take a dropped setting back from its name before the rename (server/legacy-env.ts)
   for (const name of Object.keys(env)) if (dropped.has(name) || dropped.has(ovisName(name) ?? "")) delete env[name];
   return env;

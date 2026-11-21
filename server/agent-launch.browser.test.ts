@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forgetBuiltInBrowserToken, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
+import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -10,9 +10,12 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function host(enabled: boolean, socket: string | null = "/run/ovis/broker.sock") {
+function host(enabled: boolean, socketAt: string | null | "missing" = "made") {
   const dir = mkdtempSync(join(tmpdir(), "ovis-builtin-tool-"));
   dirs.push(dir);
+  // the app's socket stands in as a file where the app would have made it
+  const socket = socketAt === null ? null : join(dir, "broker.sock");
+  if (socketAt === "made") writeFileSync(join(dir, "broker.sock"), "");
   const tokensDir = join(dir, "browser-tokens");
   readBrowserToolSetting(() => ({ claude: "ovis", codex: "ovis" }), join(dir, "browser tools"), { socket, enabled: () => enabled, tokensDir, command: ["/opt/ovis/ovis-server", "browser-mcp"] });
   return { dir, tokensDir };
@@ -26,7 +29,7 @@ describe("the built-in browser as an agent's browser tool", () => {
     const config = JSON.parse(readFileSync(args[3]!, "utf8"));
     expect(args[3]).toBe(join(dir, "browser tools", "claude-ovis-p7.json"));
     const token = join(tokensDir, "p7.token");
-    expect(config.mcpServers["ovis-browser"]).toEqual({ type: "stdio", command: "/opt/ovis/ovis-server", args: ["browser-mcp", "--socket", "/run/ovis/broker.sock", "--token-file", token] });
+    expect(config.mcpServers["ovis-browser"]).toEqual({ type: "stdio", command: "/opt/ovis/ovis-server", args: ["browser-mcp", "--socket", join(dir, "broker.sock"), "--token-file", token] });
     if (process.platform !== "win32") expect(statSync(token).mode & 0o777).toBe(0o600);
     const first = readFileSync(token, "utf8");
     expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -37,9 +40,9 @@ describe("the built-in browser as an agent's browser tool", () => {
   });
 
   it("passes Codex the same as -c settings", () => {
-    const { tokensDir } = host(true);
+    const { dir, tokensDir } = host(true);
     const args = withBrowserTool("codex", ["--", "do it"], "linux", "p8")!;
-    expect(args).toEqual(["-c", "mcp_servers.ovis-browser.command='/opt/ovis/ovis-server'", "-c", `mcp_servers.ovis-browser.args=['browser-mcp','--socket','/run/ovis/broker.sock','--token-file','${join(tokensDir, "p8.token")}']`, "--", "do it"]);
+    expect(args).toEqual(["-c", "mcp_servers.ovis-browser.command='/opt/ovis/ovis-server'", "-c", `mcp_servers.ovis-browser.args=['browser-mcp','--socket','${join(dir, "broker.sock")}','--token-file','${join(tokensDir, "p8.token")}']`, "--", "do it"]);
   });
 
   it("adds nothing while the setting is off, outside the desktop app, or without a pane", () => {
@@ -51,5 +54,20 @@ describe("the built-in browser as an agent's browser tool", () => {
     expect(withBrowserTool("claude", ["--x"], "linux")).toEqual(["--x"]);
     expect(withBrowserTool("claude", ["--x"], "linux", "../p1")).toEqual(["--x"]);
     expect(existsSync(tokensDir)).toBe(false);
+  });
+
+  it("starts the agent without the tool, and writes no token, when the app's socket is not there", () => {
+    const { tokensDir } = host(true, "missing");
+    expect(withBrowserTool("claude", ["--model", "opus"], "linux", "p9")).toEqual(["--model", "opus"]);
+    expect(existsSync(join(tokensDir, "p9.token"))).toBe(false);
+  });
+
+  it("takes back the tokens of panes no longer there", () => {
+    const { tokensDir } = host(true);
+    withBrowserTool("claude", [], "linux", "kept");
+    withBrowserTool("claude", [], "linux", "gone");
+    keepBuiltInBrowserTokens(new Set(["kept"]));
+    expect(existsSync(join(tokensDir, "kept.token"))).toBe(true);
+    expect(existsSync(join(tokensDir, "gone.token"))).toBe(false);
   });
 });

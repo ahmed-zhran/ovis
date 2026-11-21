@@ -96,15 +96,17 @@ function BrowserToolRow({ agent }: { agent: BrowserToolAgent }) {
     update({ agentBrowserTools: next === "" ? rest : { ...rest, [agent]: next } });
   };
   // the desktop app's built-in browser, offered while its setting is on and the app can let agents in (not on Windows yet)
-  const offered = BROWSER_TOOL_IDS.filter((known) => known !== BUILT_IN_BROWSER_TOOL || (settings.builtInBrowser && builtInBrowserForAgents()) || tool === known);
-  const builtIn = tool === BUILT_IN_BROWSER_TOOL;
+  const offered = BROWSER_TOOL_IDS.filter((known) => known !== BUILT_IN_BROWSER_TOOL || (settings.builtInBrowser && builtInBrowserForAgents()));
+  // a choice kept from where it was offered shows as none here, as the agent starts without it
+  const shown = tool !== undefined && offered.includes(tool) ? tool : undefined;
+  const builtIn = shown === BUILT_IN_BROWSER_TOOL;
   return (
     <SettingsRow icon={Globe} label={t("Browser tool")} htmlFor={id} wide
       description={builtIn
         ? t("The agent uses tabs of its own in this app's built-in browser, through a few tools Ovis defines: open, read, click, type, take a picture, list and close. Your blocked sites apply, and its tabs keep cookies apart from yours. Applies from the next start; an agent started from a terminal is not changed.")
         : t("A browser the agent can drive: Ovis adds an MCP server at a fixed version when it starts this agent. That browser uses a profile of its own, without your sign-ins, and Ovis does not watch or limit it. Applies from the next start; an agent started from a terminal is not changed.")}
-      condition={tool === undefined ? undefined : <code className="settings-integration-command">{browserToolCommand(tool, "").join(" ")}</code>}>
-      <SettingsSelect id={id} value={tool ?? ""} onChange={(event) => choose(BROWSER_TOOL_IDS.find((known) => known === event.target.value) ?? "")}>
+      condition={shown === undefined ? undefined : <code className="settings-integration-command">{browserToolCommand(shown, "").join(" ")}</code>}>
+      <SettingsSelect id={id} value={shown ?? ""} onChange={(event) => choose(BROWSER_TOOL_IDS.find((known) => known === event.target.value) ?? "")}>
         <option value="">{t("None")}</option>
         {offered.map((known) => <option key={known} value={known}>{known === BUILT_IN_BROWSER_TOOL ? t("Ovis built-in browser") : BROWSER_TOOLS[known].name}</option>)}
       </SettingsSelect>
