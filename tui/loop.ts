@@ -286,21 +286,35 @@ export function startLoop(options: LoopOptions): Loop {
    * What the user typed, pasted or clicked while a layout write that one of their actions started is under way: it
    * waits behind that write, in order, and goes through once the write is done, so it meets the layout the write
    * leaves (the pane a close focuses, the pane a split follows), as a later read would. null when no write holds it.
+   * `ahead` is the state core as if what waits had gone through: only to see a detach in it, which never waits.
    */
-  let behindWrite: ModelEvent[] | null = null;
+  let behindWrite: { readonly events: ModelEvent[]; ahead: ModelState } | null = null;
 
-  /** A user's input event: through the state core now, or behind the layout write under way. */
+  /**
+   * A user's input event: through the state core now, or behind the layout write under way. A detach among what would
+   * wait leaves at once: a user leaving never waits for a write (what waited, typed before it, goes nowhere).
+   */
   function userInput(event: ModelEvent): void {
-    if (behindWrite !== null && (event.type === "key" || event.type === "text" || event.type === "paste" || event.type === "mouse")) behindWrite.push(event);
-    else dispatch(event);
+    if (behindWrite === null || !(event.type === "key" || event.type === "text" || event.type === "paste" || event.type === "mouse")) {
+      dispatch(event);
+      return;
+    }
+    const step = reduce(behindWrite.ahead, event);
+    if (step.effects.some((effect) => effect.type === "quit")) {
+      behindWrite = null;
+      perform({ type: "quit" });
+      return;
+    }
+    behindWrite.events.push(event);
+    behindWrite.ahead = step.state;
   }
 
   /** Holds the user's input until `writing` is done; then what waited goes through in order (and may hold again). */
   function holdUntil(writing: Promise<void>): void {
-    behindWrite ??= [];
+    behindWrite ??= { events: [], ahead: state };
     void writing.then(() => {
       guard(() => {
-        const waited = behindWrite ?? [];
+        const waited = behindWrite?.events ?? [];
         behindWrite = null;
         for (const event of waited) userInput(event);
       });
@@ -338,7 +352,9 @@ export function startLoop(options: LoopOptions): Loop {
         }
         const writing = layout.run(effect);
         if (writing !== null) {
-          holdUntil(writing);
+          // a zoom that follows the focus moves nothing input is routed by (the focus moved already): the next move
+          // goes on at once, and the layout writes only the latest of such zooms
+          if (effect.action !== "zoom_follow") holdUntil(writing);
           return;
         }
         // the agent list comes with a later row of the plan: one notice per press, never silence
