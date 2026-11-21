@@ -127,10 +127,17 @@ function builtInLaunch(host: BuiltInBrowserHost, paneId: string): (BuiltInBrowse
   // the pane's agent started anew: its earlier tokens go
   forgetBuiltInBrowserToken(paneId);
   mkdirSync(host.tokensDir, { recursive: true, mode: 0o700 });
+  builtInGrantedAt.set(key, Date.now());
   writeAnew(join(host.tokensDir, `${key}.pane`), paneId);
   writeAnew(tokenFile, randomBytes(32).toString("base64url"));
   return { command: host.command, socket: host.socket, tokenFile, key };
 }
+
+/**
+ * When this server issued or moved each key's token, by the clock a snapshot's asking time is read from (Date.now()):
+ * a key not here is older than every snapshot this server asked for.
+ */
+const builtInGrantedAt = new Map<string, number>();
 
 /** each token key with the pane that owns it now */
 function builtInOwners(tokensDir: string): { key: string; pane: string }[] {
@@ -153,6 +160,7 @@ function builtInOwners(tokensDir: string): { key: string; pane: string }[] {
 
 /** removes a launch's token, its owner and the agent config made for it */
 function dropBuiltInKey(host: BuiltInBrowserHost, key: string): void {
+  builtInGrantedAt.delete(key);
   for (const name of [`${key}.token`, `${key}.pane`]) rmSync(join(host.tokensDir, name), { force: true });
   if (!browserTools) return;
   let configs: string[];
@@ -169,8 +177,6 @@ export function forgetBuiltInBrowserToken(paneId: string): void {
   const host = browserTools?.builtIn;
   if (!host) return;
   for (const { key, pane } of builtInOwners(host.tokensDir)) if (pane === paneId) dropBuiltInKey(host, key);
-  // a token from before keys, named after its pane
-  if (/^[A-Za-z0-9_-]{1,120}$/.test(paneId)) rmSync(join(host.tokensDir, `${paneId}.token`), { force: true });
 }
 
 /**
@@ -180,23 +186,30 @@ export function forgetBuiltInBrowserToken(paneId: string): void {
 export function keepBuiltInBrowserTokens(paneIds: ReadonlySet<string>, askedAt: number): void {
   const host = browserTools?.builtIn;
   if (!host) return;
-  for (const { key, pane } of builtInOwners(host.tokensDir)) {
-    if (paneIds.has(pane)) continue;
-    let since: number;
-    try {
-      since = statSync(join(host.tokensDir, `${key}.pane`)).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (since < askedAt) dropBuiltInKey(host, key);
+  const owners = builtInOwners(host.tokensDir);
+  for (const { key, pane } of owners) {
+    const at = builtInGrantedAt.get(key);
+    if (!paneIds.has(pane) && (at === undefined || at < askedAt)) dropBuiltInKey(host, key);
   }
+  // a token with no pane beside it is no launch's (the app answers none): it goes too
+  const keys = new Set(owners.map(({ key }) => key));
+  try {
+    for (const name of readdirSync(host.tokensDir)) {
+      const key = /^([A-Za-z0-9_-]{1,120})\.token$/.exec(name)?.[1];
+      if (key !== undefined && !keys.has(key) && !builtInGrantedAt.has(key)) rmSync(join(host.tokensDir, name), { force: true });
+    }
+  } catch {}
 }
 
 /** A pane moved (herdr gave it another id): its agent keeps its token, now owned by the new id. */
 export function moveBuiltInBrowserToken(from: string, to: string): void {
   const host = browserTools?.builtIn;
   if (!host || !/^[A-Za-z0-9_-]{1,120}$/.test(to)) return;
-  for (const { key, pane } of builtInOwners(host.tokensDir)) if (pane === from) writeAnew(join(host.tokensDir, `${key}.pane`), to);
+  for (const { key, pane } of builtInOwners(host.tokensDir)) {
+    if (pane !== from) continue;
+    builtInGrantedAt.set(key, Date.now());
+    writeAnew(join(host.tokensDir, `${key}.pane`), to);
+  }
 }
 
 export function withBrowserTool(kind: string, args: string[] | undefined, platform: string, paneId?: string): string[] | undefined {

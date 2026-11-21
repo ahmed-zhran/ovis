@@ -1,11 +1,12 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, moveBuiltInBrowserToken, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
+  setSystemTime();
   readBrowserToolSetting(() => undefined, tmpdir(), null);
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -81,16 +82,32 @@ describe("the built-in browser as an agent's browser tool", () => {
     expect(existsSync(tokensDir)).toBe(false);
   });
 
-  it("takes back the tokens of panes a snapshot no longer lists, but not one issued after it was asked for", () => {
-    host(true);
+  it("takes back the tokens of panes a snapshot no longer lists, but not one issued or moved after it was asked for", () => {
+    const { tokensDir } = host(true);
+    setSystemTime(new Date(1_000));
     const kept = tokenOf(withBrowserTool("claude", [], "linux", "kept")!);
     const gone = tokenOf(withBrowserTool("claude", [], "linux", "gone")!);
+    const moving = tokenOf(withBrowserTool("claude", [], "linux", "moving")!);
+    writeFileSync(join(tokensDir, "nobody.token"), "x".repeat(43));
+    setSystemTime(new Date(2_000));
+    const askedAt = Date.now();
+    // in the same millisecond as the asking, and later: newer than the snapshot
     const late = tokenOf(withBrowserTool("claude", [], "linux", "late")!);
-    // a snapshot asked for after "gone" was issued and before "late" was (its owner file dated after it)
-    const askedAt = statSync(gone.replace(/\.token$/, ".pane")).mtimeMs + 1;
-    utimesSync(late.replace(/\.token$/, ".pane"), new Date(askedAt + 1000), new Date(askedAt + 1000));
+    moveBuiltInBrowserToken("moving", "moved");
     keepBuiltInBrowserTokens(new Set(["kept"]), askedAt);
-    expect([existsSync(kept), existsSync(gone), existsSync(late)]).toEqual([true, false, true]);
+    expect([existsSync(kept), existsSync(gone), existsSync(late), existsSync(moving), existsSync(join(tokensDir, "nobody.token"))]).toEqual([true, false, true, true, false]);
+  });
+
+  it("takes back, after a restart, the tokens of panes that ended meanwhile", () => {
+    const { tokensDir } = host(true);
+    // left by the server before this one, which this one never issued: older than its first snapshot
+    mkdirSync(tokensDir, { recursive: true });
+    for (const [key, pane] of [["k-ended", "ended"], ["k-live", "live"]] as const) {
+      writeFileSync(join(tokensDir, `${key}.token`), "x".repeat(43));
+      writeFileSync(join(tokensDir, `${key}.pane`), pane);
+    }
+    keepBuiltInBrowserTokens(new Set(["live"]), Date.now());
+    expect([existsSync(join(tokensDir, "k-ended.token")), existsSync(join(tokensDir, "k-ended.pane")), existsSync(join(tokensDir, "k-live.token"))]).toEqual([false, false, true]);
   });
 
   it("keeps a moved pane's agent on its token, so a later pane given the old id never meets it", () => {

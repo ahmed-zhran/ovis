@@ -11,7 +11,7 @@ import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { BROWSER_OWNER_FILE, BROWSER_TOKEN_FILE, MAX_BROWSER_LINE, type BrowserAnswer, type BrowserContent, type BrowserRequest } from "../../../shared/browser-broker.ts";
 import { clickRef, snapshot, typeRef } from "./browserAgent.ts";
-import type { BrowserTabs } from "./browserTabs.ts";
+import type { AgentGrant, BrowserTabs } from "./browserTabs.ts";
 
 /**
  * Where the socket is: a unix socket in a folder only the user can open. None on Windows: a named pipe Node
@@ -21,8 +21,8 @@ export function brokerPath(userData: string, platform: string): string | null {
   return platform === "win32" ? null : join(userData, "browser", "broker.sock");
 }
 
-/** the pane whose token file holds `token`, read now */
-export function tokenOwner(tokensDir: string, token: string): string | null {
+/** the launch whose token file holds `token` and the pane beside it, read now */
+export function tokenOwner(tokensDir: string, token: string): AgentGrant | null {
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) return null;
   const given = Buffer.from(token);
   let names: string[];
@@ -41,12 +41,12 @@ export function tokenOwner(tokensDir: string, token: string): string | null {
       continue;
     }
     if (held.length !== given.length || !timingSafeEqual(held, given)) continue;
-    // the owner beside it (a launch's key), or the name itself (a token written before keys)
+    // its pane is beside it; a token without one is no launch's
     try {
       const pane = readFileSync(join(tokensDir, `${key}.pane`), "utf8").trim();
-      return /^[A-Za-z0-9_-]{1,120}$/.test(pane) ? pane : null;
+      return /^[A-Za-z0-9_-]{1,120}$/.test(pane) ? { grant: key, pane } : null;
     } catch {
-      return key;
+      return null;
     }
   }
   return null;
@@ -123,6 +123,7 @@ export class BrowserBroker {
     const owner = typeof request.token === "string" ? tokenOwner(this.tokensDir, request.token) : null;
     const tabs = this.tabs();
     if (owner === null || tabs === null) return { id: request.id, content: text("The Ovis built-in browser is not open to this agent."), isError: true };
+    tabs.reown(owner);
     try {
       const args = typeof request.args === "object" && request.args !== null ? request.args : {};
       const content = await this.run(tabs, owner, String(request.tool), args);
@@ -133,10 +134,11 @@ export class BrowserBroker {
   }
 
   /** a tool's answer, or the words of why it did nothing */
-  private async run(tabs: BrowserTabs, owner: string, tool: string, args: Record<string, unknown>): Promise<BrowserContent[] | string> {
+  private async run(tabs: BrowserTabs, agent: AgentGrant, tool: string, args: Record<string, unknown>): Promise<BrowserContent[] | string> {
+    const owner = agent.grant;
     if (tool === "browser_open") {
       if (typeof args["url"] !== "string") return "browser_open needs a url.";
-      const id = await tabs.openFor(owner, args["url"]);
+      const id = await tabs.openFor(agent, args["url"]);
       if (id === null) return "That address was not opened: it is blocked, not a web address, failed to load, or you have the most tabs there may be.";
       return text(JSON.stringify(tabs.ownTabs(owner).find((tab) => tab.id === id)));
     }
