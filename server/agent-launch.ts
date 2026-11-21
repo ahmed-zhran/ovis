@@ -101,57 +101,109 @@ export function readBrowserToolSetting(read: () => unknown, dir: string, builtIn
   browserTools = { read, dir: resolve(dir), builtIn };
 }
 
-/** A pane's token for the built-in browser, written anew (only the user can read it): the app takes calls only while it is there. */
-function builtInLaunch(host: BuiltInBrowserHost, paneId: string): BuiltInBrowserLaunch | null {
-  // no socket where the app said it would be (the app not up): the agent starts without the tool, and no token is written
-  if (host.socket === null || !host.enabled() || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId) || !existsSync(host.socket)) return null;
-  const tokenFile = join(host.tokensDir, `${paneId}.token`);
-  if ([host.socket, tokenFile, ...host.command].some((part) => part.includes("'"))) return null;
-  mkdirSync(host.tokensDir, { recursive: true, mode: 0o700 });
-  const staged = `${tokenFile}.${randomUUID()}.tmp`;
+/** writes `text` at `file` through a new file renamed over it (only the user can read it): a link there is replaced, never written through */
+function writeAnew(file: string, text: string): void {
+  const staged = `${file}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(staged, randomBytes(32).toString("base64url"), { flag: "wx", mode: 0o600 });
-    renameSync(staged, tokenFile);
+    writeFileSync(staged, text, { flag: "wx", mode: 0o600 });
+    renameSync(staged, file);
   } catch (error) {
     rmSync(staged, { force: true });
     throw error;
   }
-  return { command: host.command, socket: host.socket, tokenFile };
+}
+
+/**
+ * A pane's token for the built-in browser, under a key made for this launch (shared/browser-broker.ts): the token file
+ * and, beside it, the pane that owns it. A pane moved keeps its key and only that owner changes, so a later pane given
+ * the old id never meets this agent's token. The app takes calls only while the token is there.
+ */
+function builtInLaunch(host: BuiltInBrowserHost, paneId: string): (BuiltInBrowserLaunch & { key: string }) | null {
+  // no socket where the app said it would be (the app not up): the agent starts without the tool, and no token is written
+  if (host.socket === null || !host.enabled() || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId) || !existsSync(host.socket)) return null;
+  const key = randomBytes(16).toString("hex");
+  const tokenFile = join(host.tokensDir, `${key}.token`);
+  if ([host.socket, tokenFile, ...host.command].some((part) => part.includes("'"))) return null;
+  // the pane's agent started anew: its earlier tokens go
+  forgetBuiltInBrowserToken(paneId);
+  mkdirSync(host.tokensDir, { recursive: true, mode: 0o700 });
+  writeAnew(join(host.tokensDir, `${key}.pane`), paneId);
+  writeAnew(tokenFile, randomBytes(32).toString("base64url"));
+  return { command: host.command, socket: host.socket, tokenFile, key };
+}
+
+/** each token key with the pane that owns it now */
+function builtInOwners(tokensDir: string): { key: string; pane: string }[] {
+  let names: string[];
+  try {
+    names = readdirSync(tokensDir);
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    const key = /^([A-Za-z0-9_-]{1,120})\.pane$/.exec(name)?.[1];
+    if (key === undefined) return [];
+    try {
+      return [{ key, pane: readFileSync(join(tokensDir, name), "utf8").trim() }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** removes a launch's token, its owner and the agent config made for it */
+function dropBuiltInKey(host: BuiltInBrowserHost, key: string): void {
+  for (const name of [`${key}.token`, `${key}.pane`]) rmSync(join(host.tokensDir, name), { force: true });
+  if (!browserTools) return;
+  let configs: string[];
+  try {
+    configs = readdirSync(browserTools.dir);
+  } catch {
+    return;
+  }
+  for (const name of configs) if (name.endsWith(`-${key}.json`)) rmSync(join(browserTools.dir, name), { force: true });
 }
 
 /** Takes back a pane's token for the built-in browser: its agent's calls stop being answered at once. */
 export function forgetBuiltInBrowserToken(paneId: string): void {
   const host = browserTools?.builtIn;
-  if (!host || !/^[A-Za-z0-9_-]{1,120}$/.test(paneId)) return;
-  rmSync(join(host.tokensDir, `${paneId}.token`), { force: true });
-}
-
-/** Takes back the tokens of panes no longer there (one that ended while the server was not running heard no end). */
-export function keepBuiltInBrowserTokens(paneIds: ReadonlySet<string>): void {
-  const host = browserTools?.builtIn;
   if (!host) return;
-  let names: string[];
-  try {
-    names = readdirSync(host.tokensDir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    const pane = /^([A-Za-z0-9_-]{1,120})\.token$/.exec(name)?.[1];
-    if (pane !== undefined && !paneIds.has(pane)) rmSync(join(host.tokensDir, name), { force: true });
-  }
+  for (const { key, pane } of builtInOwners(host.tokensDir)) if (pane === paneId) dropBuiltInKey(host, key);
+  // a token from before keys, named after its pane
+  if (/^[A-Za-z0-9_-]{1,120}$/.test(paneId)) rmSync(join(host.tokensDir, `${paneId}.token`), { force: true });
 }
 
 /**
- * `args` with the browser tool chosen for this agent, if any (shared/browser-tools.ts). Claude Code and Copilot read
- * it from a file in this PC's state folder, so an agent another machine of the core starts gets none: it would look
- * for the file there.
+ * Takes back the tokens of panes not in a snapshot asked for at `askedAt` (one that ended while the server was not running
+ * heard no end). A token issued or moved since the snapshot was asked for is newer than it, and kept.
  */
+export function keepBuiltInBrowserTokens(paneIds: ReadonlySet<string>, askedAt: number): void {
+  const host = browserTools?.builtIn;
+  if (!host) return;
+  for (const { key, pane } of builtInOwners(host.tokensDir)) {
+    if (paneIds.has(pane)) continue;
+    let since: number;
+    try {
+      since = statSync(join(host.tokensDir, `${key}.pane`)).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (since < askedAt) dropBuiltInKey(host, key);
+  }
+}
+
+/** A pane moved (herdr gave it another id): its agent keeps its token, now owned by the new id. */
+export function moveBuiltInBrowserToken(from: string, to: string): void {
+  const host = browserTools?.builtIn;
+  if (!host || !/^[A-Za-z0-9_-]{1,120}$/.test(to)) return;
+  for (const { key, pane } of builtInOwners(host.tokensDir)) if (pane === from) writeAnew(join(host.tokensDir, `${key}.pane`), to);
+}
+
 export function withBrowserTool(kind: string, args: string[] | undefined, platform: string, paneId?: string): string[] | undefined {
   if (browserTools === null || !isBrowserToolAgent(kind)) return args;
   const tool = browserToolChoices(browserTools.read())[kind];
   if (tool === undefined) return args;
-  let builtIn: BuiltInBrowserLaunch | undefined;
+  let builtIn: (BuiltInBrowserLaunch & { key: string }) | undefined;
   if (tool === BUILT_IN_BROWSER_TOOL) {
     // the app's socket and the token are this PC's: an agent another machine of the core starts cannot reach them
     const launch = browserTools.builtIn !== null && paneId !== undefined && hcMachine() === null ? builtInLaunch(browserTools.builtIn, paneId) : null;
@@ -167,7 +219,7 @@ export function withBrowserTool(kind: string, args: string[] | undefined, platfo
       console.warn(`browser tool: not added to ${kind}, which starts on another machine than this PC's config file`);
       return args;
     }
-    file = join(browserTools.dir, builtIn === undefined ? `${kind}-${tool}.json` : `${kind}-${tool}-${paneId}.json`);
+    file = join(browserTools.dir, builtIn === undefined ? `${kind}-${tool}.json` : `${kind}-${tool}-${builtIn.key}.json`);
     const config = browserToolConfig(kind, tool, platform, builtIn);
     if (!existsSync(file) || readFileSync(file, "utf8") !== config) {
       mkdirSync(browserTools.dir, { recursive: true, mode: 0o700 });

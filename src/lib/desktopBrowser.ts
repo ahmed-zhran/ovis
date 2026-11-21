@@ -67,6 +67,11 @@ function bridge(): Bridge | undefined {
   return typeof found?.current === "function" && typeof found.onChange === "function" && typeof found.close === "function" ? found as Bridge : undefined;
 }
 
+/** whether this page is the desktop app's own (its built-in browser's bridge is there) */
+export function inDesktopApp(): boolean {
+  return bridge() !== undefined;
+}
+
 /** whether this desktop app can give an agent its built-in browser as a tool (no way in on Windows yet) */
 export function builtInBrowserForAgents(): boolean {
   return bridge()?.agentTools === true;

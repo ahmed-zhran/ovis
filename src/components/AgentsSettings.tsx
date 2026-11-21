@@ -16,7 +16,7 @@ import { loadIntegrations, outcomeFor, type IntegrationsResult } from "../lib/in
 import { lastSeen } from "../lib/lastSeen.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useSettings } from "../lib/settings.ts";
-import { builtInBrowserForAgents } from "../lib/desktopBrowser.ts";
+import { builtInBrowserForAgents, inDesktopApp } from "../lib/desktopBrowser.ts";
 import { openSetupGuide } from "../lib/setupGuide.ts";
 import { canSignInAgain, glanceWindow, isHubAccount, isSignIn, meterText, moveInOrder, orderProviders, PROVIDER_MARK, PROVIDER_NAME, recordedBy, recordedNote, usageName, useStatuslineSwitch, useUsage, windowLabel } from "../lib/usage.ts";
 import { userErrorMessage, type UserError } from "../lib/userError.ts";
@@ -97,8 +97,10 @@ function BrowserToolRow({ agent }: { agent: BrowserToolAgent }) {
   };
   // the desktop app's built-in browser, offered while its setting is on and the app can let agents in (not on Windows yet)
   const offered = BROWSER_TOOL_IDS.filter((known) => known !== BUILT_IN_BROWSER_TOOL || (settings.builtInBrowser && builtInBrowserForAgents()));
-  // a choice kept from where it was offered shows as none here, as the agent starts without it
-  const shown = tool !== undefined && offered.includes(tool) ? tool : undefined;
+  // a choice kept from where it was offered: on another device (a phone, a browser) this page cannot tell what the
+  // desktop app's server will do, so it shows it, not to be picked; in a desktop app that cannot let agents in it is none
+  const elsewhere = tool === BUILT_IN_BROWSER_TOOL && !offered.includes(tool) && !inDesktopApp();
+  const shown = tool !== undefined && (offered.includes(tool) || elsewhere) ? tool : undefined;
   const builtIn = shown === BUILT_IN_BROWSER_TOOL;
   return (
     <SettingsRow icon={Globe} label={t("Browser tool")} htmlFor={id} wide
@@ -109,6 +111,7 @@ function BrowserToolRow({ agent }: { agent: BrowserToolAgent }) {
       <SettingsSelect id={id} value={shown ?? ""} onChange={(event) => choose(BROWSER_TOOL_IDS.find((known) => known === event.target.value) ?? "")}>
         <option value="">{t("None")}</option>
         {offered.map((known) => <option key={known} value={known}>{known === BUILT_IN_BROWSER_TOOL ? t("Ovis built-in browser") : BROWSER_TOOLS[known].name}</option>)}
+        {elsewhere && <option value={BUILT_IN_BROWSER_TOOL} disabled>{t("Ovis built-in browser")}</option>}
       </SettingsSelect>
     </SettingsRow>
   );

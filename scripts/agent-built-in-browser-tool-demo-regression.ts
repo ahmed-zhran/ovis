@@ -28,7 +28,7 @@ async function row(browser: Browser, origin: string, settings: Record<string, un
   await page.getByText("Claude Code", { exact: true }).first().click();
   const select = page.getByLabel("브라우저 도구", { exact: true });
   await select.scrollIntoViewIfNeeded();
-  const options = await select.locator("option").allInnerTexts();
+  const options = await select.locator("option").evaluateAll((all) => all.map((option) => option.textContent + ((option as HTMLOptionElement).disabled ? " (disabled)" : "")));
   if (shot !== null) {
     await select.selectOption("ovis");
     await page.getByText("에이전트가 이 앱의 내장 브라우저에서 자기 탭을 씁니다.", { exact: false }).waitFor();
@@ -51,6 +51,7 @@ async function main(): Promise<void> {
       try {
         const origin = `http://127.0.0.1:${server.port}/`;
         assert.ok(!(await row(browser, origin, {}, false, null)).includes("Ovis 내장 브라우저"), "a browser outside the desktop app is not offered the built-in browser");
+        assert.ok((await row(browser, origin, { agentBrowserTools: { claude: "ovis" } }, false, null)).includes("Ovis 내장 브라우저 (disabled)"), "a choice saved in the desktop app shows on another device, not to be picked");
         assert.ok(!(await row(browser, origin, { builtInBrowser: false }, true, null)).includes("Ovis 내장 브라우저"), "the desktop app with the setting off does not offer it");
         assert.ok(!(await row(browser, origin, { builtInBrowser: true }, true, null, false)).includes("Ovis 내장 브라우저"), "a desktop app that cannot let agents in (Windows) does not offer it");
         assert.ok(!(await row(browser, origin, { builtInBrowser: true, agentBrowserTools: { claude: "ovis" } }, true, null, false)).includes("Ovis 내장 브라우저"), "a choice saved before is not offered where agents cannot be let in");

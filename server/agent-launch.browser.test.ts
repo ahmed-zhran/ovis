@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
+import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, moveBuiltInBrowserToken, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -21,28 +21,47 @@ function host(enabled: boolean, socketAt: string | null | "missing" = "made") {
   return { dir, tokensDir };
 }
 
+/** the token file an agent was given, read from its MCP config */
+function tokenOf(args: string[]): string {
+  const config = JSON.parse(readFileSync(args[args.indexOf("--mcp-config") + 1]!, "utf8"));
+  const given: string[] = config.mcpServers["ovis-browser"].args;
+  return given[given.indexOf("--token-file") + 1]!;
+}
+
+/** the pane that owns a token now */
+const ownerOf = (token: string) => readFileSync(token.replace(/\.token$/, ".pane"), "utf8");
+
 describe("the built-in browser as an agent's browser tool", () => {
   it("gives a pane's agent its own token and the app's socket, and takes the token back when the pane goes", () => {
     const { dir, tokensDir } = host(true);
     const args = withBrowserTool("claude", ["--model", "opus"], "linux", "p7")!;
     expect(args.slice(0, 3)).toEqual(["--model", "opus", "--mcp-config"]);
+    const token = tokenOf(args);
+    expect(token.startsWith(tokensDir)).toBe(true);
+    expect(args[3]).toBe(join(dir, "browser tools", `claude-ovis-${token.slice(tokensDir.length + 1, -".token".length)}.json`));
     const config = JSON.parse(readFileSync(args[3]!, "utf8"));
-    expect(args[3]).toBe(join(dir, "browser tools", "claude-ovis-p7.json"));
-    const token = join(tokensDir, "p7.token");
     expect(config.mcpServers["ovis-browser"]).toEqual({ type: "stdio", command: "/opt/ovis/ovis-server", args: ["browser-mcp", "--socket", join(dir, "broker.sock"), "--token-file", token] });
     if (process.platform !== "win32") expect(statSync(token).mode & 0o777).toBe(0o600);
-    const first = readFileSync(token, "utf8");
-    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    withBrowserTool("claude", [], "linux", "p7");
-    expect(readFileSync(token, "utf8")).not.toBe(first);
-    forgetBuiltInBrowserToken("p7");
+    expect(readFileSync(token, "utf8")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(ownerOf(token)).toBe("p7");
+    // started anew: a new key, and the old token and its config are gone
+    const again = withBrowserTool("claude", [], "linux", "p7")!;
+    expect(tokenOf(again)).not.toBe(token);
     expect(existsSync(token)).toBe(false);
+    expect(existsSync(args[3]!)).toBe(false);
+    const againToken = tokenOf(again);
+    forgetBuiltInBrowserToken("p7");
+    expect(existsSync(againToken)).toBe(false);
+    expect(existsSync(again[again.indexOf("--mcp-config") + 1]!)).toBe(false);
   });
 
   it("passes Codex the same as -c settings", () => {
     const { dir, tokensDir } = host(true);
     const args = withBrowserTool("codex", ["--", "do it"], "linux", "p8")!;
-    expect(args).toEqual(["-c", "mcp_servers.ovis-browser.command='/opt/ovis/ovis-server'", "-c", `mcp_servers.ovis-browser.args=['browser-mcp','--socket','${join(dir, "broker.sock")}','--token-file','${join(tokensDir, "p8.token")}']`, "--", "do it"]);
+    expect(args[0]).toBe("-c");
+    expect(args[1]).toBe("mcp_servers.ovis-browser.command='/opt/ovis/ovis-server'");
+    expect(args[3]).toMatch(new RegExp(`^mcp_servers\\.ovis-browser\\.args=\\['browser-mcp','--socket','${join(dir, "broker.sock").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}','--token-file','${tokensDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[0-9a-f]{32}\\.token'\\]$`));
+    expect(args.slice(4)).toEqual(["--", "do it"]);
   });
 
   it("adds nothing while the setting is off, outside the desktop app, or without a pane", () => {
@@ -59,15 +78,30 @@ describe("the built-in browser as an agent's browser tool", () => {
   it("starts the agent without the tool, and writes no token, when the app's socket is not there", () => {
     const { tokensDir } = host(true, "missing");
     expect(withBrowserTool("claude", ["--model", "opus"], "linux", "p9")).toEqual(["--model", "opus"]);
-    expect(existsSync(join(tokensDir, "p9.token"))).toBe(false);
+    expect(existsSync(tokensDir)).toBe(false);
   });
 
-  it("takes back the tokens of panes no longer there", () => {
-    const { tokensDir } = host(true);
-    withBrowserTool("claude", [], "linux", "kept");
-    withBrowserTool("claude", [], "linux", "gone");
-    keepBuiltInBrowserTokens(new Set(["kept"]));
-    expect(existsSync(join(tokensDir, "kept.token"))).toBe(true);
-    expect(existsSync(join(tokensDir, "gone.token"))).toBe(false);
+  it("takes back the tokens of panes a snapshot no longer lists, but not one issued after it was asked for", () => {
+    host(true);
+    const kept = tokenOf(withBrowserTool("claude", [], "linux", "kept")!);
+    const gone = tokenOf(withBrowserTool("claude", [], "linux", "gone")!);
+    const late = tokenOf(withBrowserTool("claude", [], "linux", "late")!);
+    // a snapshot asked for after "gone" was issued and before "late" was (its owner file dated after it)
+    const askedAt = statSync(gone.replace(/\.token$/, ".pane")).mtimeMs + 1;
+    utimesSync(late.replace(/\.token$/, ".pane"), new Date(askedAt + 1000), new Date(askedAt + 1000));
+    keepBuiltInBrowserTokens(new Set(["kept"]), askedAt);
+    expect([existsSync(kept), existsSync(gone), existsSync(late)]).toEqual([true, false, true]);
+  });
+
+  it("keeps a moved pane's agent on its token, so a later pane given the old id never meets it", () => {
+    host(true);
+    const moved = tokenOf(withBrowserTool("claude", [], "linux", "w1-p1")!);
+    moveBuiltInBrowserToken("w1-p1", "w2-p1");
+    expect(ownerOf(moved)).toBe("w2-p1");
+    const reused = tokenOf(withBrowserTool("claude", [], "linux", "w1-p1")!);
+    expect(reused).not.toBe(moved);
+    expect([existsSync(moved), ownerOf(reused)]).toEqual([true, "w1-p1"]);
+    keepBuiltInBrowserTokens(new Set(["w2-p1", "w1-p1"]), Date.now() + 1000);
+    expect(existsSync(moved)).toBe(true);
   });
 });

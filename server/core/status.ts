@@ -1,7 +1,7 @@
 import type { TailnetPcsOptions } from "../tailnet-pcs.ts";
 import type { SshCandidatesOptions } from "../ssh-candidates.ts";
 import { createAlertWebhook } from "../alert-webhook.ts";
-import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens } from "../agent-launch.ts";
+import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, moveBuiltInBrowserToken } from "../agent-launch.ts";
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { RelaySocket } from "../../shared/relay-channel.ts";
@@ -829,6 +829,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       alert(paneId, alertStatus("idle", waits.waiting(paneId)));
     },
     onBaseline: (panes, newer = new Set(), askedAt = Date.now(), created = new Map()) => {
+      // every snapshot, at start too: tokens of panes it no longer lists (ended while the server was down) go, except
+      // one issued or moved after it was asked for
+      keepBuiltInBrowserTokens(new Set(panes.map((pane) => pane.pane_id)), askedAt);
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       for (const pane of projected) if (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent)) waits.seed(pane.pane_id, pane.agent_status);
       const alerted = projected.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(pane.agent_status, waits.waiting(pane.pane_id))) }));
@@ -868,8 +871,6 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (machines) machines.localAgents(panes); else bridgeAgents!.reconciled(panes);
     },
     onResync: (panes, newer, askedAt = Date.now()) => {
-      // a whole snapshot: tokens of panes that ended while the server was down go too
-      keepBuiltInBrowserTokens(new Set(panes.map((pane) => pane.pane_id)));
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       finishes.resync(completions, projected, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
@@ -893,6 +894,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       push.closed(paneId);
     },
     onPaneMoved: (from, to) => {
+      moveBuiltInBrowserToken(from, to);
       const renumber = finishes.moved(from, to);
       for (const state of [codexFailedAt, codexTurns, codexLooked] as Map<string, unknown>[]) if (state.has(from)) { state.set(to, state.get(from)); state.delete(from); }
       if (codexFailed.delete(from)) codexFailed.add(to);

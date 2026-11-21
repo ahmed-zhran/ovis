@@ -9,7 +9,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
-import { BROWSER_TOKEN_FILE, MAX_BROWSER_LINE, type BrowserAnswer, type BrowserContent, type BrowserRequest } from "../../../shared/browser-broker.ts";
+import { BROWSER_OWNER_FILE, BROWSER_TOKEN_FILE, MAX_BROWSER_LINE, type BrowserAnswer, type BrowserContent, type BrowserRequest } from "../../../shared/browser-broker.ts";
 import { clickRef, snapshot, typeRef } from "./browserAgent.ts";
 import type { BrowserTabs } from "./browserTabs.ts";
 
@@ -32,15 +32,22 @@ export function tokenOwner(tokensDir: string, token: string): string | null {
     return null;
   }
   for (const name of names) {
-    const pane = BROWSER_TOKEN_FILE.exec(name)?.[1];
-    if (pane === undefined) continue;
+    const key = BROWSER_TOKEN_FILE.exec(name)?.[1];
+    if (key === undefined) continue;
     let held: Buffer;
     try {
       held = Buffer.from(readFileSync(join(tokensDir, name), "utf8").trim());
     } catch {
       continue;
     }
-    if (held.length === given.length && timingSafeEqual(held, given)) return pane;
+    if (held.length !== given.length || !timingSafeEqual(held, given)) continue;
+    // the owner beside it (a launch's key), or the name itself (a token written before keys)
+    try {
+      const pane = readFileSync(join(tokensDir, `${key}.pane`), "utf8").trim();
+      return /^[A-Za-z0-9_-]{1,120}$/.test(pane) ? pane : null;
+    } catch {
+      return key;
+    }
   }
   return null;
 }
@@ -83,7 +90,7 @@ export class BrowserBroker {
     rmSync(this.path, { force: true });
     if (keepTokens) return;
     try {
-      for (const name of readdirSync(this.tokensDir)) if (BROWSER_TOKEN_FILE.test(name)) rmSync(join(this.tokensDir, name), { force: true });
+      for (const name of readdirSync(this.tokensDir)) if (BROWSER_TOKEN_FILE.test(name) || BROWSER_OWNER_FILE.test(name)) rmSync(join(this.tokensDir, name), { force: true });
     } catch {}
   }
 
