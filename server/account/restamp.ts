@@ -223,8 +223,8 @@ function unresolvedDigest(plan: Plan, state: ReturnType<typeof readRestampState>
   return changed.length || links.length ? digestOf([digestOf(plan), changed, links]) : undefined;
 }
 
-export function restampTombstoneMergeClock(stateDir: string, sibling: string, serverId: string | null) {
-  return readSiblingMergeClock(stateDir, sibling, serverId, Date.now() + DAY);
+export function restampTombstoneMergeClock(stateDir: string, sibling: string) {
+  return readSiblingMergeClock(stateDir, sibling, Date.now() + DAY);
 }
 
 function checkRelayScope(plan: Plan): void {

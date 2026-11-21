@@ -46,7 +46,7 @@ import { HC_RELEASE, hcInstallTarget, installHc } from "./herdr-core/install.ts"
 import { userHome } from "./user-home.ts";
 import { type HerdrCoreFacts, LOCAL_MACHINE } from "../shared/machines.ts";
 import { type AlertTiming, defaultStateDir } from "./push.ts";
-import { mergeSiblingState, siblingStateDir } from "./state-merge.ts";
+import { closeFailedMergeGate, mergeSiblingState, siblingStateDir } from "./state-merge.ts";
 import { moveLegacyStateDir } from "./update-state.ts";
 import { sweepSshDirs } from "./ssh.ts";
 import { OpenCodePromptState } from "./prompt.ts";
@@ -73,6 +73,7 @@ import { AccountIntroductions } from "./account/introductions.ts";
 import { RecoveryReleases } from "./account/recovery.ts";
 import { openPcRecovery } from "./account/recovery-server.ts";
 import { applyRestamp, restampTombstoneMergeClock } from "./account/restamp.ts";
+import { MergeRegistryReadError } from "./account/restamp-state.ts";
 import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
 import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
 import { lockRoutes } from "./account/lock-routes.ts";
@@ -304,8 +305,9 @@ export function createServer(
   let clockProblem: string | null = null;
   let clock: ReturnType<typeof restampTombstoneMergeClock> | undefined;
   if (opensAll && sibling && blocked === null && restamp.problem === undefined) {
-    try { clock = restampTombstoneMergeClock(stateDir, sibling, serverIdNow()); }
+    try { clock = restampTombstoneMergeClock(stateDir, sibling); }
     catch (error) {
+      if (error instanceof MergeRegistryReadError) closeFailedMergeGate(stateDir, new Date(), opensAll);
       clockProblem = error instanceof Error ? error.message : String(error);
       console.error(clockProblem);
     }

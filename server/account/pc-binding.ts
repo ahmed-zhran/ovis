@@ -87,7 +87,7 @@ export function mergePcBinding(ownDoc: PcDoc | null, sibling: PcDoc) {
   const other = kept(sibling.binding);
   const standing = own?.pending ? null : own;
   const inherited = other?.pending ? null : other;
-  return { clears, inherited, binding: standing ?? inherited, siblingBinding: other,
+  return { clears, inherited, binding: standing ?? inherited, ownBinding: own, siblingBinding: other,
     conflict: standing !== null && inherited !== null && standing.account !== inherited.account };
 }
 
@@ -104,6 +104,9 @@ function settleLink(binding: AccountBinding | null, firstKey: string | null, row
 export function restampMemberProblem(path: string, pc: (PcDoc & { counterOnly?: true }) | null, sibling: PcDoc | null, rows: readonly Member[]): string | null {
   const merge = sibling === null ? null : mergePcBinding(pc, sibling);
   if (merge?.conflict) return "The two folders bind this PC to two accounts";
+  if (merge?.ownBinding && merge.siblingBinding && merge.ownBinding.account !== merge.siblingBinding.account) {
+    return "A pending binding names a different account from the other folder's binding";
+  }
   const binding = merge === null ? settleLink(pc?.binding ?? null, pc?.first?.key ?? null, rows) : merge.binding;
   const accounts = rows.flatMap(row => row.account === undefined ? [] : [row.account]);
   const migrating = pc === null || pc.counterOnly === true;
