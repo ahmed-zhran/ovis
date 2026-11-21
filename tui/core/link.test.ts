@@ -17,7 +17,7 @@ const WAIT_MS = 5000;
  */
 const standInRun = process.env["OVIS_STANDIN_RUN"];
 /** the cases of the first block: the last block checks that the stand-in run passed every one */
-const LINK_CASES = 29;
+const LINK_CASES = 30;
 /** the cases the plan names (row 22), which the last block finds by name among those that passed */
 const NAMED = ["EOF", "missed", "stale socket", "incompatible names the methods", "a call while offline opens no socket"];
 
@@ -95,6 +95,11 @@ class ScriptedLine {
     try {
       const result = this.answer(message.method, message.params, this);
       if (result === HOLD) return;
+      // an answer the test gives later, in the order it chooses
+      if (result instanceof Promise) {
+        void result.then((value: unknown) => this.send(encodeFrame(0, FRAME_DATA, JSON.stringify({ jsonrpc: "2.0", id: message.id, result: value }))));
+        return;
+      }
       reply = { result };
     } catch (error) {
       reply = { error: { code: -32000, message: String(error), data: { kind: "refused" } } };
@@ -620,6 +625,38 @@ describe.skipIf(process.platform === "win32" || standInRun === undefined)("the c
       expect(docNotices(name)).toEqual([0, 2]);
     }
     expect(reads()).toEqual(["doc.get herdr-app", "doc.get ovis-layout", "doc.get ovis-layout", "doc.get herdr-app"]);
+  });
+
+  it("never tells an older layout document after a newer one: a re-read that settles while a missed resync reads", async () => {
+    let held = false;
+    const pending: ((doc: unknown) => void)[] = [];
+    const { cores, path } = await scripted((method, params, line) => {
+      if (method !== "doc.get") return subscribing()(method, params, line);
+      if (!held) return { value: null, version: params["name"] === "ovis-layout" && pending.length > 0 ? 2 : 0 };
+      const { promise, resolve } = Promise.withResolvers<unknown>();
+      pending.push(resolve);
+      return promise;
+    });
+    const link = start(path);
+    await online(link, 1);
+    const core = cores[0]!;
+    const layouts = () => notices.flatMap((notice) => (notice.type === "doc" && notice.name === "ovis-layout" ? [notice.doc.version] : []));
+    held = true;
+    core.notify(1, "event", { seq: 2, type: "doc", data: { name: "ovis-layout", version: 1 } });
+    await until("the re-read asked", () => core.calls.filter((call) => call.startsWith("doc.get")).length === 3);
+    core.notify(1, "missed", { seq: 3, terminals: [] });
+    await until("the resync's reads asked", () => core.calls.filter((call) => call.startsWith("doc.get")).length === 5);
+    const [old, app, current] = pending;
+    old!({ value: { tag: "old" }, version: 1 });
+    // answered after the re-read on the same line: the re-read has settled once this call has
+    await link.call("machine.list", {}).catch(() => {});
+    app!({ value: null, version: 0 });
+    current!({ value: { tag: "current" }, version: 2 });
+    await until("the resync's layout told", () => layouts().includes(2));
+    held = false;
+    expect(await link.refreshLayout()).toBe(true);
+    expect(layouts()).toEqual([0, 2]);
+    expect(notices.filter((notice) => notice.type === "doc" && notice.name === "ovis-layout").at(-1)).toMatchObject({ doc: { version: 2, value: { tag: "current" } } });
   });
 
   it("can be read from inside its first notice, which comes after openLink returned", async () => {

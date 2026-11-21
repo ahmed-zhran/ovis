@@ -450,7 +450,8 @@ class Link implements CoreLink {
     }
     if (line.over || round !== line.round) return;
     line.held = null;
-    LINK_DOCS.forEach((name, at) => line.docs.set(name, docs[at]!));
+    // a re-read that settled while these reads ran may hold a newer version: the newest stays the one known
+    LINK_DOCS.forEach((name, at) => { if (docs[at]!.version >= (line.docs.get(name)?.version ?? -1)) line.docs.set(name, docs[at]!); });
     const cause = line.epoch === 0 ? "connect" : "missed";
     if (cause === "connect") {
       line.epoch = ++this.epochs;
@@ -460,10 +461,12 @@ class Link implements CoreLink {
       this.setState({ kind: "Online", epoch: line.epoch });
     }
     const { epoch } = line;
+    const readNow = new Map<string, number>(LINK_DOCS.map((name, at) => [name, docs[at]!.version]));
     const notices: LinkNotice[] = [
       { type: "snapshot", epoch, cause, seq: snapshot.seq, terminals: snapshot.terminals },
       ...LINK_DOCS.map((name, at): LinkNotice => ({ type: "doc", epoch, name, doc: docs[at]! })),
-      ...held.map((notice) => notice(epoch)),
+      // a document told while these reads ran that is older than what they read is not told after them
+      ...held.map((notice) => notice(epoch)).filter((notice) => notice.type !== "doc" || notice.doc.version >= (readNow.get(notice.name) ?? -1)),
     ];
     // a notice the owner failed on ends the line: nothing after it is told
     for (const notice of notices) if (!line.over) this.deliver(notice);
