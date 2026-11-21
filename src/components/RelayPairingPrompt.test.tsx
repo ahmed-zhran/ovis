@@ -5,7 +5,7 @@ import { create, type ReactTestInstance, type ReactTestRenderer } from "react-te
 import type { RelayPairingRequest } from "../../shared/protocol.ts";
 import { SettingsProvider } from "../lib/settings.ts";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
-import { APPROVE_KEY_GUARD_MS, APPROVE_POINTER_GUARD_MS, INPUT_AGE_MAX_MS, RelayPairingPrompt, aroundDigits, deadlineOf, inputAge, secondsLeft, takesFocus } from "./RelayPairingPrompt.tsx";
+import { APPROVE_KEY_GUARD_MS, APPROVE_POINTER_GUARD_MS, INPUT_AGE_MAX_MS, RelayPairingPrompt, aroundDigits, deadlineOf, firstJoinPrompts, inputAge, pendingKeyPrompts, secondsLeft, takesFocus } from "./RelayPairingPrompt.tsx";
 
 const AT = Date.parse("2026-11-10T00:00:00.000Z");
 const request = (over: Partial<RelayPairingRequest> = {}): RelayPairingRequest => ({ id: "p1", label: "Hako's iPhone", digits: "725403", expires_at: new Date(AT + 90_000).toISOString(), ...over });
@@ -516,6 +516,38 @@ describe("the PC's prompt for a device waiting for approval", () => {
     inert = true;
     const root = await show([request()]);
     expect(nodeOf(prompts(root)[0]!).scrolled).toBe(0);
+  });
+
+  it("asks this PC's own window to allow the first phone of a PC with no member, beside its digits, and decides it there", async () => {
+    const asked = new Date(AT).toISOString();
+    const root = await show(firstJoinPrompts([
+      { id: "j1", label: "Android · Chrome", asked_at: asked, left_ms: 60_000, digits: "725403" },
+      // a join a member could approve is typed in Settings, never tapped here
+      { id: "j2", label: "Tablet", asked_at: asked, left_ms: 60_000 },
+    ]));
+    const [prompt, ...more] = prompts(root);
+    expect(more).toEqual([]);
+    expect(sentence(prompt!)).toContain("Android · Chrome");
+    expect(prompt!.findAllByType("strong").map(text)).toEqual(["725 403"]);
+    expect(left(prompt!)).toBe("60 s left");
+    expect(prompt!.findAllByType("button").map(text)).toEqual(["Allow", "Decline"]);
+    await act(async () => { prompt!.findAllByType("button")[1]!.props.onClick(KEY); });
+    await act(async () => { jest.advanceTimersByTime(APPROVE_POINTER_GUARD_MS); });
+    await act(async () => { approveOf(prompt!).props.onClick(POINTER); });
+    expect(decided).toEqual([["/api/relay/join", { id: "j1", decision: "decline" }], ["/api/relay/join", { id: "j1", decision: "approve" }]]);
+  });
+
+  it("asks this PC's own window to allow a key a QR or code pairing waits with, beside its fingerprint, and decides it there", async () => {
+    const root = await show(pendingKeyPrompts([{ id: "a".repeat(32), label: "Pixel 9", fingerprint: "K7QF-29XM", via: "relay", redeemed_at: new Date(AT).toISOString(), slots: { used: 1, of: 3 } }]));
+    const [prompt] = prompts(root);
+    expect(sentence(prompt!)).toContain("Pixel 9");
+    expect(prompt!.findAllByType("strong").map(text)).toEqual(["K7QF-29XM"]);
+    expect(prompt!.findAll((node) => node.props["data-testid"] === "relay-pairing-left")).toHaveLength(0);
+    expect(prompt!.findAllByType("button").map(text)).toEqual(["Allow", "Decline"]);
+    await act(async () => { prompt!.findAllByType("button")[1]!.props.onClick(KEY); });
+    await act(async () => { jest.advanceTimersByTime(APPROVE_POINTER_GUARD_MS); });
+    await act(async () => { approveOf(prompt!).props.onClick(POINTER); });
+    expect(decided).toEqual([["/api/devices/pending/decline", { id: "a".repeat(32) }], ["/api/devices/pending/approve", { id: "a".repeat(32) }]]);
   });
 
   it("still approves and declines through decideRelayPairing", async () => {

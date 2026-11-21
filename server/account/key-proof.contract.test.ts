@@ -37,6 +37,24 @@ test("T71/T72: the device proves its key, waits, and is let in only when the PC'
   expect(made.stored().find((row) => row.relay_public_key === paired.device.spki)).toBeDefined();
 });
 
+test("T71: this PC's own window approves the waiting key like its screen, and a window that is not its own cannot", async () => {
+  const made = await pc(true);
+  const paired = await provingDevice(made, await made.offerCode());
+  await paired.pending;
+  const [waiting] = (await made.local("/api/devices/pending")).body.pending as { id: string; fingerprint: string }[];
+  expect(waiting?.fingerprint).toBe(paired.fingerprint);
+  const approve = (headers: Record<string, string> = {}) => made.local("/api/devices/pending/approve", { method: "POST", headers: { "x-herdr-machine": "1", ...headers }, body: { id: waiting!.id } });
+  const remote = await approve({ "x-forwarded-for": "100.64.0.9" });
+  expect([remote.status, remote.body.error?.code]).toEqual([403, "local_required"]);
+  expect(made.screen.keyConfirm()).toBeDefined();
+  const admitted = deferred<void>();
+  paired.link.onFrame = (frame) => { if (frame.type === FrameType.AUTH_OK) admitted.resolve(); };
+  expect((await approve()).status).toBe(200);
+  await bounded(admitted.promise);
+  expect(made.stored().find((row) => row.relay_public_key === paired.device.spki)).toBeDefined();
+  expect((await approve()).status).toBe(404);
+});
+
 test("T72: a decline on the screen ends the pairing and lets nobody in", async () => {
   const made = await pc(true);
   const paired = await provingDevice(made, await made.offerCode());
