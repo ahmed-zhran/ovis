@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forgetBuiltInBrowserToken, keepBuiltInBrowserTokens, moveBuiltInBrowserToken, readBrowserToolSetting, withBrowserTool } from "./agent-launch.ts";
@@ -66,14 +66,18 @@ describe("the built-in browser as an agent's browser tool", () => {
   });
 
   it("adds nothing while the setting is off, outside the desktop app, or without a pane", () => {
-    host(false);
+    // each host's own token folder stays unmade: nothing was issued there, nor next to it
+    const off = host(false);
     expect(withBrowserTool("claude", ["--x"], "linux", "p1")).toEqual(["--x"]);
-    const { tokensDir } = host(true, null);
+    const outside = host(true, null);
     expect(withBrowserTool("claude", ["--x"], "linux", "p1")).toEqual(["--x"]);
-    host(true);
+    const paneless = host(true);
     expect(withBrowserTool("claude", ["--x"], "linux")).toEqual(["--x"]);
     expect(withBrowserTool("claude", ["--x"], "linux", "../p1")).toEqual(["--x"]);
-    expect(existsSync(tokensDir)).toBe(false);
+    for (const { dir, tokensDir } of [off, outside, paneless]) {
+      expect(existsSync(tokensDir)).toBe(false);
+      expect(readdirSync(dir).filter((name) => name !== "broker.sock")).toEqual([]);
+    }
   });
 
   it("starts the agent without the tool, and writes no token, when the app's socket is not there", () => {
