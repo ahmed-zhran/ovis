@@ -90,7 +90,15 @@ export class Pointer {
 
   mouse(over: "overlay" | "screen", event: MouseInput, scene: PointerScene): PointerAct[] {
     if (over === "overlay") {
-      // an open overlay owns the mouse: nothing reaches the chrome or a pane under it; its close control closes it
+      // an open overlay owns the mouse: nothing reaches the chrome or a pane under it; its close control closes it.
+      // A gesture that began before it opened ends at its release: a program that got the press gets that release,
+      // and a selection or divider grab is dropped, so nothing of it goes on once the overlay closes.
+      if (event.action === "release") {
+        const grab = this.grab;
+        this.grab = NONE;
+        const look = grab.kind === "forward" && grab.pane === scene.focus ? scene.look(grab.pane) : null;
+        return grab.kind === "forward" && look ? [{ kind: "forward", pane: grab.pane, event: inGrid(event, look) }] : [];
+      }
       if (event.action !== "press") return [];
       this.grab = NONE;
       const hit = event.button === "left" ? scene.hits?.at(event.col, event.row) : null;

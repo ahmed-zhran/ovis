@@ -116,6 +116,24 @@ describe("the pointer", () => {
     });
   }
 
+  it("a gesture begun in a pane before an overlay opened ends at its release over the overlay, and nothing of it goes on after", () => {
+    // a program with a mouse mode: it gets its release, in its grid's cells
+    const forward = new Pointer();
+    const program = sceneOf("a", lookA(true));
+    expect(forward.mouse("screen", ev(["press", "left", 3, 2]), program)).toEqual([{ kind: "forward", pane: "a", event: ev(["press", "left", 3, 3]) }]);
+    // the help opens from the keyboard while the button is held
+    expect(forward.mouse("overlay", ev(["motion", "left", 4, 2]), program)).toEqual([]);
+    expect(forward.mouse("overlay", ev(["release", "left", 4, 2]), program)).toEqual([{ kind: "forward", pane: "a", event: ev(["release", "left", 4, 3]) }]);
+    // the help closed again: a drag with no new press goes nowhere
+    expect(forward.mouse("screen", ev(["motion", "left", 5, 2]), program)).toEqual([]);
+    // a selection begun before the overlay is dropped at that release: no copy, and no later drag extends it
+    const select = new Pointer();
+    const plain = sceneOf("a", lookA(false));
+    expect(select.mouse("screen", ev(["press", "left", 1, 1]), plain)).toEqual([]);
+    expect(select.mouse("overlay", ev(["release", "left", 3, 1]), plain)).toEqual([]);
+    expect(select.mouse("screen", ev(["motion", "left", 4, 1]), plain)).toEqual([]);
+  });
+
   it("an open overlay takes the mouse: nothing reaches a pane or the chrome; a left press on its close control closes it", () => {
     const pointer = new Pointer();
     for (const event of [ev(["press", "left", 3, 2]), ev(["press", "left", 1, 0]), ev(["press", "wheelUp", 3, 2])]) {
