@@ -286,6 +286,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     setRequestRoute(pathname);
     return jsonResponse({ error: { code: "local_required", message: "Turn the lock on or off on this PC's own screen." } }, 403, { "cache-control": "no-store" });
   }
+  // so is the approval of a key a device waits with: no other window learns whether one waits (pending-routes.ts)
+  if (!ownWindow && request.method === "POST" && pathname === "/api/devices/pending/approve" && ctx.services.pendingRedemptions !== undefined) {
+    setRequestRoute("/api/devices/pending/*");
+    return jsonResponse({ error: { code: "local_required", message: "Approve this device on this PC's own screen." } }, 403, { "cache-control": "no-store" });
+  }
   const askingTheScreen = ownWindow
     && ((pathname === "/api/account/lock" && request.method === "GET") || (pathname === "/api/account/unlock" && request.method === "POST"));
   const localDenial = ownWindow && !funnel && devices.localRemovalRetry()
@@ -584,7 +589,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   }
   if (pathname === "/api/devices/pending" || pathname.startsWith("/api/devices/pending/")) {
     const pendingRedemptions = ctx.services.pendingRedemptions;
-    if (pendingRedemptions !== undefined) return handlePendingRequest(request, pathname, pendingRedemptions, access);
+    if (pendingRedemptions !== undefined) return handlePendingRequest(request, pathname, { pending: pendingRedemptions, confirms: ctx.services.localConfirms, access, ownWindow });
   }
   if (pathname === "/api/devices" || pathname.startsWith("/api/devices/")) {
     try {

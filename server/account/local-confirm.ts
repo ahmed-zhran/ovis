@@ -1,9 +1,11 @@
 /**
  * Proof from this PC's own screen (docs/account.md, "Confirmed on this PC"): one named act, asked for by whoever
- * may ask, answered on a screen of this PC that no caller of Ovis' routes can supply, and used up once by the code
- * that does the act. Only two paths answer one: the desktop-owner channel, a descriptor the desktop app that started
- * this server holds the other end of, and the local confirm listener, a page on 127.0.0.1 of its own that is not
- * the server's dispatcher, the relay or any route. Every answer is in memory: a restart ends every open confirm.
+ * may ask, answered on a screen of this PC, and used up once by the code that does the act. Two paths answer any act:
+ * the desktop-owner channel, a descriptor the desktop app that started this server holds the other end of, and the
+ * local confirm listener, a page on 127.0.0.1 of its own that is not the server's dispatcher, the relay or any route.
+ * A third answers a key approval (approve_key) alone: this PC's own Ovis window (dispatch.ts ownWindow, the route
+ * /api/devices/pending/approve), so the device waiting is approved where its owner already looks. Every answer is
+ * in memory: a restart ends every open confirm.
  *
  * What it does not prove: that a person sat there. A program that runs as this PC's user, a terminal a device that
  * drives this PC opened included, can reach the listener and the descriptor as the owner does, and change the files
@@ -163,6 +165,15 @@ function canonical(value: unknown): string {
 
 function answerOnScreen(confirms: LocalConfirms, id: string, answer: "approved" | "declined"): boolean {
   return answerers.get(confirms)?.(id, answer) ?? false;
+}
+
+/**
+ * This PC's own window approves the key a device waits with (the caller has checked the window is the PC's own): the
+ * open approve_key confirm for `pending`, answered as the screen would. False when none such is open.
+ */
+export function approveKeyOnOwnWindow(confirms: LocalConfirms, pending: string): boolean {
+  const open = confirms.pending().find((entry) => entry.action.kind === "approve_key" && entry.action.pending === pending);
+  return open !== undefined && answerOnScreen(confirms, open.id, "approved");
 }
 
 /**
