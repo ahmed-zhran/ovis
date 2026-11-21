@@ -1,8 +1,8 @@
 import { afterAll, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, recordStaleStartForTest, signalChildGroup, stopTestCores, stoppedCleanly } from "./test-hc.ts";
+import { dirname, join } from "node:path";
+import { coreFolder, corePids, IsolatedCore, isolatedHcEnv, isolationProblem, recordStaleStartForTest, signalChildGroup, stopTestCores, stoppedCleanly } from "./test-hc.ts";
 
 // A stand-in hc that writes down how it was run: no real core is started or stopped.
 const root = mkdtempSync(join(tmpdir(), "ovis-test-hc-"));
@@ -194,6 +194,27 @@ it("refuses a core whose socket is outside the folder it was given", () => {
   const folder = join(root, "given");
   expect(() => new IsolatedCore(bin, { root: folder, env: isolatedHcEnv(join(root, "elsewhere")) })).toThrow();
 });
+
+it("refuses a socket or folder that names the core's folder on its way out of it", () => {
+  const folder = join(root, "climb");
+  const env = isolatedHcEnv(folder);
+  expect(isolationProblem(env, folder)).toBeNull();
+  expect(isolationProblem({ ...env, HC_SOCKET: `${folder}/../elsewhere/run/hc.sock` }, folder)).not.toBeNull();
+  expect(isolationProblem({ ...env, XDG_STATE_HOME: `${folder}/run/../../elsewhere` }, folder)).not.toBeNull();
+  expect(isolationProblem({ ...env, HOME: `${folder}-sibling/home` }, folder)).not.toBeNull();
+});
+
+it("keeps the folder of a core whose stop left its socket, so its report is not a clean stop", async () => {
+  const core = new IsolatedCore(silent, coreFolder(root));
+  mkdirSync(dirname(core.socket), { recursive: true });
+  writeFileSync(core.socket, "");
+  try {
+    const report = await core.stop();
+    expect({ socketGone: report.socketGone, rootGone: report.rootGone, clean: stoppedCleanly(report) }).toEqual({ socketGone: false, rootGone: false, clean: false });
+  } finally {
+    rmSync(core.root, { recursive: true, force: true });
+  }
+}, 20_000);
 
 it("runs no hc command of a core whose environment stopped being isolated", () => {
   rmSync(record, { force: true });

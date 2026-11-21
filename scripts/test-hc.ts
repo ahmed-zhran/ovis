@@ -13,7 +13,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { coreSocket, userCore } from "../server/herdr-core/core-socket.ts";
 
 /** the longest unix socket path the OS takes (sun_path less its terminating NUL) */
@@ -48,7 +48,13 @@ export function isolatedHcEnv(root: string, extra: Record<string, string> = {}) 
  */
 export function isolationProblem(env: Record<string, string | undefined>, root?: string): string | null {
   const socket = env["HC_SOCKET"];
-  const inside = (name: string) => root !== undefined && env[name]?.startsWith(`${root}/`) === true;
+  // resolved first: `${root}/../elsewhere` names the root but lies outside it
+  const inside = (name: string) => {
+    const path = env[name];
+    if (root === undefined || path === undefined) return false;
+    const rel = relative(resolve(root), resolve(path));
+    return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  };
   if (!socket || !env["HC_SESSION"]) return "it names no HC_SOCKET and HC_SESSION of its own (isolatedHcEnv sets both)";
   if (env["HC_SESSION"] === "default") return "its HC_SESSION is default";
   if (userCore(env)) return `${socket} is the user's own core`;
@@ -357,10 +363,13 @@ export class IsolatedCore implements TestCore {
     await Promise.allSettled([...this.running]);
     // a stop that came before the start's own status: stopTestCores reads again only a core with pids
     if (this.pids.length === 0) await this.readPids(true).catch(() => {});
-    const { killed, unproven } = await stopTestCores(this.bin, [this]);
+    const { killed, unproven, socketsLeft } = await stopTestCores(this.bin, [this]);
     const alive = this.pids.filter(pidAlive);
-    // a late hc child in a deleted folder would run whatever hc is first on PATH: the folder outlives every pid
-    if (alive.length === 0) rmSync(this.root, { recursive: true, force: true });
+    // a late hc child in a deleted folder would run whatever hc is first on PATH: the folder outlives every pid.
+    // With no pid recorded, nothing proves the core ended while its socket is left: the folder stays then too, so
+    // the report cannot read as stopped (with pids, all gone, the socket is only what a killed core left behind)
+    const unprovenEnd = socketsLeft.length > 0 && this.pids.length === 0;
+    if (alive.length === 0 && !unprovenEnd) rmSync(this.root, { recursive: true, force: true });
     return { pids: this.pids, killed, unproven, alive, socketGone: !existsSync(this.socket), rootGone: !existsSync(this.root) };
   }
 
