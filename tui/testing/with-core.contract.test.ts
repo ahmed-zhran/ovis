@@ -165,6 +165,7 @@ describe("with-core's options", () => {
     ["an empty --keys list", ["--no-core", "--pty", "--keys", "", "--", "true"], {}],
     ["no command", ["--no-core"], {}],
     ["a limit that is not a number", ["--limit", "soon", "--", "true"], {}],
+    ["a limit longer than a timer holds", ["--no-core", "--limit", "2147484", "--", "true"], {}],
     ["no hc named", ["--", "true"], { OVIS_TEST_HC_BIN: undefined }],
   ] as const) {
     it(`exits 2 on ${what}, before anything runs`, async () => {
@@ -434,8 +435,9 @@ describe.skipIf(!bin)("with-core against a real hc", () => {
       expect(await run.exited).toBe(inside ? 0 : 2);
       expect(existsSync(core.socket)).toBe(true);
     } finally {
-      ownCore = null;
+      // still named while it stops: a signal's teardown awaits the same stop
       const report = await core.stop();
+      ownCore = null;
       expect({ killed: report.killed, alive: report.alive, rootGone: report.rootGone }).toEqual({ killed: [], alive: [], rootGone: true });
     }
   }, TEST_MS);

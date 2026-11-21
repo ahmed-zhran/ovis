@@ -206,7 +206,8 @@ export function runSupervised(options: Omit<PtyOptions, "command"> & { entry: st
       },
       close() {
         conn = null;
-        if (!reported) fail("the supervisor ended without reporting the entry's end");
+        // a request still open gets no answer any more, whether or not the end was reported
+        fail(reported ? "the supervisor closed before answering" : "the supervisor ended without reporting the entry's end");
         socketClosed();
       },
     },

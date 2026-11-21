@@ -45,6 +45,8 @@ import { coreFolder, IsolatedCore, signalChildGroup, stoppedCleanly } from "../.
 import { GhosttyEngine, GhosttyModule } from "../../shared/ghostty/engine.ts";
 import { runOnPty, type PtyRun } from "./pty.ts";
 
+/** the longest delay a timer holds (a signed 32-bit count of ms) */
+const TIMER_MAX_MS = 2 ** 31 - 1;
 const USAGE = "usage: bun tui/testing/with-core.ts [--no-core | --core-env <file>] [--limit <seconds>] [--pty [--size COLSxROWS] [--keys <list>] [--answer y|n] [--dump]] -- [--] <command...>";
 const WASM = join(import.meta.dir, "..", "..", "shared", "ghostty", "ghostty-vt.wasm");
 const FIRST_FRAME_END = "\x1b[?2026l";
@@ -136,6 +138,8 @@ function parse(args: string[]): Options {
     } else if (flag === "--limit") {
       const seconds = Number(args[++i]);
       if (!Number.isFinite(seconds) || seconds <= 0) throw new Refused("--limit needs a number of seconds above 0");
+      // a longer timer would fire at once
+      if (seconds * 1000 > TIMER_MAX_MS) throw new Refused(`--limit takes at most ${Math.floor(TIMER_MAX_MS / 1000)} seconds`);
       options.limitSeconds = seconds;
     } else if (flag === "--pty") pty = true;
     else if (flag === "--size") {
