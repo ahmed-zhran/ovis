@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountDeviceId, newRecordId, signSafetyRecord } from "../../shared/account-records.ts";
 import { createServer } from "../index.ts";
+import { isJsonObject } from "../http.ts";
 import { privateStateFs } from "../private-state.ts";
 import { loadRelayIdentity, rotateRelayIdentity } from "../relay/identity.ts";
 import { DeviceJournal } from "./device-journal.ts";
@@ -770,4 +771,109 @@ posix("r3 L9b: a changed relay identity does not inherit the folder's approved r
   expect(restarted.devices.accountError).toContain("relay identity changed");
   expect(bytes(active, "devices.json")).toBe(before);
   expect(pending(active)).toBe(true);
+});
+
+posix("a failed sibling registry read leaves the gate closed on a later standalone start", () => {
+  const [active, sibling] = [dir(), dir()];
+  writeFileSync(join(sibling, "devices.json"), "{broken", { mode: 0o600 });
+  const failed = start(active, sibling);
+  expect(failed.devices.failsClosed).toBe(true);
+  failed.stop();
+
+  expect(start(active).devices.gated).toBe(true);
+  expect(JSON.parse(bytes(active, "devices.json"))).toMatchObject({ placeholder: true, devices: [] });
+});
+
+posix.each(["preview", "confirmation", "replay"] as const)(
+  "restamp %s refuses two accounts that only disagree after the registries merge", async phase => {
+    const [active, sibling] = [dir(), dir()];
+    const future = row();
+    registry(active, future);
+    const running = start(active, sibling);
+    const request = { act: "restamp" } as const;
+    const introduceDifferentAccounts = () => {
+      for (const folder of [active, sibling]) put(folder, "account-pc.json", { v: 1, next_admit: 1 });
+      const a = { ...row(stamp(-HOUR), key(), other), account };
+      const b = { ...row(stamp(-HOUR), key(), "d".repeat(16)), account: "other_account" };
+      registry(active, future, a);
+      registry(sibling, future, b);
+    };
+    const disagreement = expect.stringMatching(/devices name.*account/i);
+
+    if (phase === "preview") {
+      introduceDifferentAccounts();
+      expect(await askRecovery(active, request)).toMatchObject({ error: disagreement });
+      return;
+    }
+    const preview = await askRecovery(active, request);
+    if (!isJsonObject(preview) || typeof preview.confirm !== "string") throw new Error("Expected a restamp preview");
+    const confirm = { ...request, confirm: preview.confirm };
+    if (phase === "confirmation") {
+      introduceDifferentAccounts();
+      expect(await askRecovery(active, confirm)).toMatchObject({ error: disagreement });
+      expect(pending(active)).toBe(false);
+      return;
+    }
+    expect(await askRecovery(active, confirm)).toMatchObject({ queued: true });
+    running.stop();
+    introduceDifferentAccounts();
+
+    const restarted = start(active, sibling);
+    expect(restarted.devices.accountError).toEqual(disagreement);
+    expect(registered(active)[0]?.created_at).toBe(FUTURE);
+    expect(existsSync(join(active, "restamp-done.json"))).toBe(false);
+  },
+);
+
+posix("restamp keeps the working phone when ordinary merge drops conflicting twins", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const phone = { ...row(), account };
+  registry(active, phone);
+  const closed = start(active, sibling);
+  await queue(active);
+  closed.stop();
+  const twin = { ...row(stamp(-HOUR), key(), other), account: "other_account" };
+  registry(active, phone, twin);
+  registry(sibling, phone, { ...twin, relay_public_key: key() });
+
+  const restarted = start(active, sibling);
+  expect(restarted.devices.accountError).toBeNull();
+  expect(restarted.devices.hasKey(phone.relay_public_key)).toBe(true);
+  expect(registered(active).map(device => device.id)).toEqual([phone.id]);
+});
+
+posix("a promoted list row cannot close the clock gate on its working paired phone", () => {
+  const [active, sibling] = [dir(), dir()];
+  const { server_id } = loadRelayIdentity(active);
+  const phone = { ...row(stamp(-HOUR)), account };
+  registry(sibling, phone);
+  put(active, "account-devices.json", {
+    v: 1, account, server_id, version: 1, snapshot: "1".repeat(32),
+    devices: [{ id: accountDeviceId(server_id, phone.relay_public_key), key: phone.relay_public_key, no: 2, label: "Phone",
+      confirmed_at: FUTURE, last_signin_day: null, origin: { from: "remote", how: "list", by: null, admit_no: 1, at: FUTURE },
+      state: "live", hold_until: null }],
+  });
+
+  const { devices } = start(active, sibling);
+  expect(devices.accountError).toBeNull();
+  expect(devices.hasKey(phone.relay_public_key)).toBe(true);
+  expect(JSON.parse(bytes(active, "account-devices.json")).devices).toEqual([]);
+});
+
+posix("confirmation refuses a pending binding to a different account without writing the journal", async () => {
+  const [active, sibling] = [dir(), dir()];
+  const phone = { ...row(), account };
+  registry(active, phone);
+  start(active, sibling);
+  const preview = await askRecovery(active, { act: "restamp" });
+  if (!isJsonObject(preview) || typeof preview.confirm !== "string") throw new Error("Expected a restamp preview");
+  put(sibling, "account-pc.json", { v: 1, next_admit: 1,
+    binding: { account: "other_account", bind_id: "f".repeat(32), pending: true },
+    first: { key: key(), list_key: null }, clears: [], others_ever: true, gen: 0 });
+  const journal = join(active, "device-journal.json");
+  const before = existsSync(journal) ? readFileSync(journal, "utf8") : null;
+
+  expect(await askRecovery(active, { act: "restamp", confirm: preview.confirm })).toMatchObject({ error: expect.stringMatching(/pending.*bind/i) });
+  expect(existsSync(journal) ? readFileSync(journal, "utf8") : null).toBe(before);
+  expect(pending(active)).toBe(false);
 });
