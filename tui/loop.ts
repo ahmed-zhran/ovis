@@ -283,6 +283,10 @@ export function startLoop(options: LoopOptions): Loop {
         dispatch({ type: "notice", code: "not_built", data: { action: effect.action }, at: clock.now() });
         return;
       }
+      case "input":
+        // the rest of a text run, behind the action before it: it meets the focus and mode that action left
+        dispatch(effect.event);
+        return;
       case "quit":
         act("quit");
         quit();

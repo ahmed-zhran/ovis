@@ -258,7 +258,9 @@ function ladderText(acc: Acc, event: TextInput): void {
     if (s.mode.name !== "terminal") {
       acc.levels.push(3);
       const bound = boundIn(s.keymap.modeKeys[s.mode.name], charChords(first, false));
+      const from = acc.effects.length;
       if (bound !== undefined) runAction(acc, bound.action, bound.index, event.at);
+      if (handBack(acc, from, after, event.at)) return;
       rest = after;
       continue;
     }
@@ -269,8 +271,10 @@ function ladderText(acc: Acc, event: TextInput): void {
       else {
         acc.levels.push(5);
         const bound = boundIn(s.keymap.afterPrefix, chords);
+        const from = acc.effects.length;
         if (bound !== undefined) runAction(acc, bound.action, bound.index, event.at);
         else if (HANGUL.test(first)) notice(acc, "ime_prefix", {}, event.at);
+        if (handBack(acc, from, after, event.at)) return;
       }
       rest = after;
       continue;
@@ -285,6 +289,18 @@ function ladderText(acc: Acc, event: TextInput): void {
     arm(acc);
     rest = rest.slice(at + 1);
   }
+}
+
+/**
+ * After an action the caller performs (a run effect, such as a directional focus), the rest of the text run waits
+ * for it: it goes back to the caller as an `input` effect behind the run, and the caller dispatches it once the run
+ * is performed, so it meets the focus the action left. One read then routes as the same bytes split across reads do.
+ * True when the run handed the rest back.
+ */
+function handBack(acc: Acc, from: number, rest: string, at: number): boolean {
+  if (!acc.effects.slice(from).some((effect) => effect.type === "run")) return false;
+  if (rest.length > 0) acc.effects.push({ type: "input", event: { type: "text", text: rest, at } });
+  return true;
 }
 
 /** Level 6: the focused pane gets this input, unless there is none or the key has no identity. */

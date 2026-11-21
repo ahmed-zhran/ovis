@@ -38,6 +38,8 @@ export type Effect =
   /** level 6: send this input to the pane through its gate (encodeKey, or encodePaste) */
   | { readonly type: "pane"; readonly pane: string; readonly input: PaneInput }
   | RunEffect
+  /** the rest of a text run behind a run effect: dispatch it as an event once the effects before it are performed */
+  | { readonly type: "input"; readonly event: TextInput }
   /** detach: close every channel, give the terminal back; no terminal is killed */
   | { readonly type: "quit" }
   /** read herdr's config again and answer with a `keys` event */

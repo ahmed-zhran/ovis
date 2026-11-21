@@ -324,6 +324,38 @@ describe("the loop", () => {
     expect(run.loop.model().focus.panes["t-main"]).toBe("t1");
   }, TEST_MS);
 
+  it("one read routes as the same bytes split across reads: an action and the text after it in one read", async () => {
+    /** the focus, the mode and what every program received after `reads`, each read followed by a turn */
+    const outcome = async (reads: string[]) => {
+      const run = await Run.start({ fixture: demo });
+      try {
+        await run.live();
+        // a read after the panes went live: what was read at the instant they did is refused as early, by design
+        await run.advance(1);
+        for (const read of reads) {
+          run.type(read);
+          await run.advance(20);
+        }
+        const model = run.loop.model();
+        return { focus: model.focus, mode: model.mode.name, received: ["t1", "t2", "t3", "t4"].map((terminal) => run.core.program(terminal).receivedHex()) };
+      } finally {
+        await run.close();
+      }
+    };
+    // a directional focus, two of them, the workspace picker and a key of its mode, resize mode, a zoom and a close,
+    // each followed by text in the same read
+    for (const bytes of ["\x02lzy\r", "\x02l\x02hab", "\x02wlab", "\x02rhab", "\x02zab", "\x02xab"]) {
+      const joined = await outcome([bytes]);
+      expect({ bytes, outcome: await outcome([...bytes]) }).toEqual({ bytes, outcome: joined });
+      for (let cut = 1; cut < bytes.length; cut++) {
+        expect({ bytes, cut, outcome: await outcome([bytes.slice(0, cut), bytes.slice(cut)]) }).toEqual({ bytes, cut, outcome: joined });
+      }
+    }
+    // the gate's case: the text after the move reaches the pane moved to, and nothing reaches the one left
+    const moved = await outcome(["\x02lzy\r"]);
+    expect([moved.focus.panes["t-main"], moved.received[0], moved.received[1]]).toEqual(["t2", "", Buffer.from("zy\r").toString("hex")]);
+  }, TEST_MS);
+
   it("scale: 200 terminals in 50 workspaces draw a frame, and only the shown tab's 16 panes are attached", async () => {
     const run = await start({ fixture: scale });
     await run.live(20_000);
