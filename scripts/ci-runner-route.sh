@@ -154,3 +154,30 @@ if [[ ("$event" == pull_request || "$event" == push) && "$linux" == *'"ovis-vm"'
   fi
 fi
 echo "fast=$fast"
+
+# Native Windows install: winvm, the Windows 11 VM on the maintainer's PC, while its launcher says its one runner
+# waits for a job (scripts/self-hosted-runner/winvm-runner.sh writes the Unix time into the repository variable
+# CI_WINVM_READY every minute while it listens, and 0 once a job starts or it stops). Anything else gets
+# windows-latest: hosted_only, a fork pull request, an event other than a pull request or a push (WINVM_READY is
+# empty for a workflow that calls ci.yml), or a mark that is missing or older than three minutes.
+windows_hosted='"windows-latest"'
+windows_labels='["self-hosted","self-hosted-ovis-win"]'
+ready="${WINVM_READY:-}"
+now=$(date +%s)
+if [[ "${HOSTED_ONLY:-}" == true ]]; then
+  why="called with hosted_only"
+elif [[ ("$event" == pull_request || "$event" == pull_request_target) && "${HEAD_REPO:-}" != "${REPOSITORY:-}" ]]; then
+  why="pull request from fork ${HEAD_REPO:-unknown}"
+elif [[ "$event" != pull_request && "$event" != push ]]; then
+  why="${event:-no event}"
+elif ! [[ "$ready" =~ ^[1-9][0-9]{0,11}$ ]]; then
+  why="winvm's runner is not waiting for a job (CI_WINVM_READY ${ready:-unset})"
+elif (( now - ready > 180 || ready - now > 60 )); then
+  why="winvm's runner last said it was waiting $((now - ready))s ago"
+else
+  echo "Windows: self-hosted $windows_labels (winvm's runner said it was waiting $((now - ready))s ago)" >&2
+  echo "windows=$windows_labels"
+  exit 0
+fi
+echo "Windows: windows-latest ($why)" >&2
+echo "windows=$windows_hosted"

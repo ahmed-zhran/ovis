@@ -63,14 +63,21 @@ function route(env: Record<string, string>) {
   return result;
 }
 
-function outputs(env: Record<string, string>): { linux: unknown; fast: unknown } {
+function allOutputs(env: Record<string, string>): { linux: unknown; fast: unknown; windows: unknown } {
   const result = route(env);
   expect(result.status).toBe(0);
   const lines = result.stdout.trimEnd().split("\n");
-  expect(lines.length).toBe(2);
+  expect(lines.length).toBe(3);
   expect(lines[0]).toStartWith("linux=");
   expect(lines[1]).toStartWith("fast=");
-  return { linux: JSON.parse(lines[0]!.slice("linux=".length)), fast: JSON.parse(lines[1]!.slice("fast=".length)) };
+  expect(lines[2]).toStartWith("windows=");
+  const [linux, fast, windows] = lines.map((line) => JSON.parse(line.slice(line.indexOf("=") + 1)) as unknown);
+  return { linux, fast, windows };
+}
+
+function outputs(env: Record<string, string>): { linux: unknown; fast: unknown } {
+  const { linux, fast } = allOutputs(env);
+  return { linux, fast };
 }
 
 function routed(env: Record<string, string>): unknown {
@@ -98,7 +105,7 @@ describe.skipIf(process.platform === "win32")("CI runner route", () => {
 
     it("goes hosted once a job of theirs has waited more than four minutes", () => {
       const result = route({ ...pr, FAKE_GH: actions({ in_progress: { 1: running(2) }, queued: { 2: [...waiting(1, 30), ...waiting(1, 300)] } }) });
-      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\n');
+      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\nwindows="windows-latest"\n');
       expect(result.stderr).toMatch(/a self-hosted job has waited 30\ds for a runner/);
       expect(result.stderr).not.toContain("::warning::");
       const light: Job = { ...waiting(1, 300)[0]!, name: "Detect changes" };
@@ -133,7 +140,7 @@ describe.skipIf(process.platform === "win32")("CI runner route", () => {
 
     it("goes hosted after a minute when no job of theirs is running: no runner looks online", () => {
       const result = route({ ...pr, FAKE_GH: actions({ queued: { 1: waiting(1, 90) } }) });
-      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\n');
+      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\nwindows="windows-latest"\n');
       expect(result.stderr).toContain("no runner looks online");
       expect(routed({ ...pr, FAKE_GH: actions({ queued: { 1: waiting(1, 30) } }) })).toEqual(ovis);
       expect(routed({ ...pr, FAKE_GH: actions({ in_progress: { 1: running(1) }, queued: { 2: waiting(1, 90) } }) })).toEqual(ovis);
@@ -150,7 +157,7 @@ describe.skipIf(process.platform === "win32")("CI runner route", () => {
       writeFileSync(join(state, "jobs-1.json"), `${page(running(4))}\n${page(waiting(1, 300))}\n`);
       writeFileSync(join(state, "in_progress.json"), `{"workflow_runs":[]}\n{"workflow_runs":[{"id":1,"updated_at":"${ago(30)}"}]}\n`);
       const result = route({ ...pr, FAKE_GH: state });
-      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\n');
+      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\nwindows="windows-latest"\n');
       expect(result.stderr).toMatch(/has waited 30\ds/);
       expect(result.stderr).not.toContain("::warning::");
     });
@@ -158,7 +165,7 @@ describe.skipIf(process.platform === "win32")("CI runner route", () => {
     it("stays hosted when the jobs cannot be read", () => {
       const result = route(pr);
       expect(result.status).toBe(0);
-      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\n');
+      expect(result.stdout).toBe('linux="ubuntu-24.04"\nfast="ubuntu-24.04"\nwindows="windows-latest"\n');
       expect(result.stderr).toContain("::warning::");
       const broken = actions({ in_progress: { 1: running(1) } });
       rmSync(join(broken, "jobs-1.json"));
@@ -370,6 +377,50 @@ describe.skipIf(process.platform === "win32")("CI runner route", () => {
     it("sends the Linux jobs and Fast checks to the hosted image when true, before it reads anything else", () => {
       for (const env of scenarios()) expect(outputs({ ...env, HOSTED_ONLY: "true" })).toEqual({ linux: "ubuntu-24.04", fast: "ubuntu-24.04" });
       expect(outputs({ EVENT_NAME: "workflow_dispatch", REQUESTED_LABELS: '"self-hosted"', HOSTED_ONLY: "true" })).toEqual({ linux: "ubuntu-24.04", fast: "ubuntu-24.04" });
+    });
+  });
+
+  describe("Native Windows install", () => {
+    const winvm = ["self-hosted", "self-hosted-ovis-win"];
+    const readyAgo = (seconds: number): string => String(Math.floor(Date.now() / 1000) - seconds);
+    const windows = (env: Record<string, string>): unknown => allOutputs({ FAKE_GH: actions({}), ...env }).windows;
+    const pr = { EVENT_NAME: "pull_request", HEAD_REPO: repo };
+
+    it("goes to winvm while its runner said within three minutes that it waits for a job", () => {
+      for (const env of [pr, { EVENT_NAME: "push", REF: "refs/heads/main" }, { EVENT_NAME: "push", REF: "refs/heads/topic" }]) {
+        expect(windows({ ...env, WINVM_READY: readyAgo(5) })).toEqual(winvm);
+        expect(windows({ ...env, WINVM_READY: readyAgo(170) })).toEqual(winvm);
+      }
+      expect(route({ ...pr, FAKE_GH: actions({}), WINVM_READY: readyAgo(5) }).stderr).toMatch(/Windows: self-hosted .*said it was waiting \ds ago/);
+    });
+
+    it("takes windows-latest when the mark is missing, 0, stale, from the future or not a time", () => {
+      for (const ready of ["", " ", "0", readyAgo(200), readyAgo(86_400), readyAgo(-120), "soon", "1e9", "-5", "12345678901234"]) {
+        expect(windows({ ...pr, WINVM_READY: ready })).toBe("windows-latest");
+      }
+      expect(route({ ...pr, FAKE_GH: actions({}), WINVM_READY: "0" }).stderr).toContain("Windows: windows-latest (winvm's runner is not waiting for a job (CI_WINVM_READY 0))");
+    });
+
+    it("keeps a fork pull request, another event and hosted_only on windows-latest whatever the mark says", () => {
+      const ready = readyAgo(5);
+      for (const env of [
+        { EVENT_NAME: "pull_request", HEAD_REPO: "someone/fork" },
+        { EVENT_NAME: "pull_request" },
+        { EVENT_NAME: "pull_request_target", HEAD_REPO: "someone/fork" },
+        { EVENT_NAME: "pull_request_target", HEAD_REPO: repo },
+        { EVENT_NAME: "workflow_dispatch", REQUESTED_LABELS: labels },
+        { EVENT_NAME: "workflow_run" },
+        { EVENT_NAME: "" },
+        { ...pr, HOSTED_ONLY: "true" },
+        { EVENT_NAME: "push", REF: "refs/heads/main", HOSTED_ONLY: "true" },
+      ]) {
+        expect(windows({ ...env, WINVM_READY: ready })).toBe("windows-latest");
+      }
+    });
+
+    it("does not follow the Linux jobs' route", () => {
+      expect(allOutputs({ ...pr, FAKE_GH: actions({ queued: { 1: waiting(1, 300) } }), WINVM_READY: readyAgo(5) })).toEqual({ linux: "ubuntu-24.04", fast: "ubuntu-24.04", windows: winvm });
+      expect(allOutputs({ EVENT_NAME: "push", CONFIGURED_LABELS: labels })).toEqual({ linux: JSON.parse(labels), fast: JSON.parse(labels), windows: "windows-latest" });
     });
   });
 
